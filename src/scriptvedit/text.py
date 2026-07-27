@@ -214,7 +214,8 @@ def _text_size_opt(size_expr, u_expr):
     return f"fontsize={int(size_expr.value)}"
 
 
-def _text_anchor_xy(x_expr, y_expr, u_expr, anchor):
+def _text_anchor_xy(x_expr, y_expr, u_expr, anchor, *, safe_area=None,
+                    safe_padding=(0, 0, 0, 0)):
     """テキスト配置の x/y drawtext 式を返す。
     anchor='center': (frac*W - text_w/2, frac*H - text_h/2)
     anchor='left'  : (frac*W, frac*H)   ※左上基準
@@ -222,8 +223,21 @@ def _text_anchor_xy(x_expr, y_expr, u_expr, anchor):
     xf = x_expr.to_ffmpeg(u_expr)
     yf = y_expr.to_ffmpeg(u_expr)
     if anchor == "left":
-        return f"x='({xf})*W'", f"y='({yf})*H'"
-    return f"x='({xf})*W-text_w/2'", f"y='({yf})*H-text_h/2'"
+        raw_x, raw_y = f"({xf})*W", f"({yf})*H"
+    else:
+        raw_x = f"({xf})*W-text_w/2"
+        raw_y = f"({yf})*H-text_h/2"
+
+    if safe_area is not None:
+        left, top, right, bottom = safe_area
+        pad_left, pad_top, pad_right, pad_bottom = safe_padding
+        # drawtextが実際に確定したtext_w/text_hでクランプするため、フォントや
+        # 日本語/英数字の幅差に依存しない。カンマはfiltergraph用にescapeする。
+        raw_x = (f"max({left}*W+{pad_left}\\,min({raw_x}\\,"
+                 f"(1-{right})*W-text_w-{pad_right}))")
+        raw_y = (f"max({top}*H+{pad_top}\\,min({raw_y}\\,"
+                 f"(1-{bottom})*H-text_h-{pad_bottom}))")
+    return f"x='{raw_x}'", f"y='{raw_y}'"
 
 
 def _build_drawtext_filter(spec, text_opt, start, dur, *, enable=None):
@@ -231,7 +245,20 @@ def _build_drawtext_filter(spec, text_opt, start, dur, *, enable=None):
     text_opt: 完成済みの "textfile=..." または "text=..." オプション文字列。"""
     u_expr = f"clip((t-{start})/{dur}\\,0\\,1)"
     font = _escape_ffpath(spec["font"])
-    x_opt, y_opt = _text_anchor_xy(spec["x"], spec["y"], u_expr, spec["anchor"])
+    safe_padding = (0, 0, 0, 0)
+    if spec.get("safe_area") is not None:
+        box_pad = int(spec.get("box_border", 0)) if spec.get("box") else 0
+        border_pad = int(spec.get("border", 0))
+        sh_x, sh_y = spec.get("shadow", (0, 0))
+        safe_padding = (
+            box_pad + border_pad + _builtins.max(0, -sh_x),
+            box_pad + border_pad + _builtins.max(0, -sh_y),
+            box_pad + border_pad + _builtins.max(0, sh_x),
+            box_pad + border_pad + _builtins.max(0, sh_y),
+        )
+    x_opt, y_opt = _text_anchor_xy(
+        spec["x"], spec["y"], u_expr, spec["anchor"],
+        safe_area=spec.get("safe_area"), safe_padding=safe_padding)
     opts = [f"fontfile={font}"]
     opts.append(text_opt)
     opts.append(_text_size_opt(spec["size"], u_expr))

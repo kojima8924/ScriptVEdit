@@ -7,7 +7,7 @@
     "-i",
     "color=c=black:s=1280x720:d=6:r=30",
     "-i",
-    "__cache__/artifacts/xfade/c745ddb3e862da68.mkv",
+    "__cache__/artifacts/xfade/2edb80b9db6b9849.mkv",
     "-filter_complex",
     "[0:v][1:v]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,6)'[v1]",
     "-map",
@@ -22,7 +22,7 @@
     "test50.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/xfade/c745ddb3e862da68.mkv": [
+    "__cache__/artifacts/xfade/2edb80b9db6b9849.mkv": [
       "ffmpeg",
       "-y",
       "-loop",
@@ -50,7 +50,7 @@
       "-i",
       "assets/images/shape_starburst.png",
       "-filter_complex",
-      "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=0x00000000,setsar=1,format=yuva444p[s0];[1:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=0x00000000,setsar=1,format=yuva444p[s1];[2:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=0x00000000,setsar=1,format=yuva444p[s2];[s0][s1]xfade=transition=slideleft:duration=0.5:offset=2.0[x1];[x1][s2]xfade=transition=slideleft:duration=0.5:offset=4.0[x2]",
+      "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=0x00000000,setsar=1,format=bgra[s0];[1:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=0x00000000,setsar=1,format=bgra[s1];[2:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=0x00000000,setsar=1,format=bgra[s2];[s0][s1]xfade=transition=slideleft:duration=0.5:offset=2.0[x1];[x1][s2]xfade=transition=slideleft:duration=0.5:offset=4.0[x2]",
       "-map",
       "[x2]",
       "-c:v",
@@ -58,10 +58,10 @@
       "-level",
       "3",
       "-pix_fmt",
-      "yuva444p",
+      "bgra",
       "-t",
       "6.0",
-      "__cache__/artifacts/xfade/c745ddb3e862da68.mkv"
+      "__cache__/artifacts/xfade/2edb80b9db6b9849.mkv"
     ]
   }
 }

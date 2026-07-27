@@ -69,6 +69,21 @@ def _file_fingerprint(path):
     return h
 
 
+def _web_source_fingerprint(path):
+    """HTML sourceの改行だけをCRLFへ正規化した内容指紋。
+
+    ブラウザのHTML入力ではLF/CRLFの差に意味がない一方、共有フォルダやeditorで
+    改行だけが変わると長尺Web cacheが全再生成される。repo規約のCRLFへ寄せるため、
+    現在の追跡HTMLの既存fingerprintを維持しつつ外部LF版も同じキーにする。
+    一般素材とdepsは引き続き厳密なraw fingerprintを使う。
+    """
+    with open(path, "rb") as source:
+        content = source.read()
+    normalized = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    normalized = normalized.replace(b"\n", b"\r\n")
+    return hashlib.sha256(normalized).hexdigest()[:16]
+
+
 def _is_cache_artifact_path(path):
     """パスがキャッシュディレクトリ(__cache__)配下の生成物かどうか判定"""
     abs_path = os.path.abspath(path).replace("\\", "/")
@@ -262,6 +277,11 @@ def _checkpoint_cache_path(original_source, ops, duration=None, fps=None, qualit
     # 注: 生成される中間物の内容は draft/本番で同一のため、_ACTIVE_QUALITY(rq)は
     # 鍵に含めない（含めると本番↔draft で全キャッシュミスになり無駄な再生成が起きる）
     sigs.append(f"ev={_ENGINE_VER}")
+    # 中間ベイクのpix_fmt世代。.mkv を焼く経路のみ鍵に入れる
+    # （静止画チェックポイントはPNGで pix_fmt 変更の影響を受けないため）
+    is_video = _detect_media_type(original_source) in ("video",)
+    if duration is not None or is_video:
+        sigs.append(f"bpf={_BAKE_PIXFMT_VER}")
     if duration is not None:
         sigs.append(f"dur={duration}")
     if fps is not None:
@@ -274,10 +294,16 @@ def _checkpoint_cache_path(original_source, ops, duration=None, fps=None, qualit
         sigs.append(f"pctx={proj.width}x{proj.height}@{proj.fps}")
     key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
     # video入力 + transform-only でも動画ならmkv (ffv1)
-    is_video = _detect_media_type(original_source) in ("video",)
     ext = ".mkv" if (duration is not None or is_video) else ".png"
     cache_dir = os.path.join(_ARTIFACT_DIR, "checkpoint", _src_bucket(original_source))
     return os.path.join(cache_dir, f"{key}{ext}")
+
+
+# モーフ/粒子レンダラの版。morph.py の描画結果が変わったら上げる
+# （_ENGINE_VER を上げると全キャッシュが飛ぶため、morph 系だけを無効化する）
+# "3": 中間ベイクの pix_fmt を yuva444p → bgra に変更（色変換由来の劣化を除去）。
+#      旧 yuva444p の中間物を再利用させないため版を上げる
+_MORPH_RENDER_VER = "3"
 
 
 def _morph_cache_path(src_path, morph_op, duration, fps, quality="final"):
@@ -297,6 +323,7 @@ def _morph_cache_path(src_path, morph_op, duration, fps, quality="final"):
     sigs.append(f"q={quality}")
     # 中間物は draft/本番で同一内容のため rq(_ACTIVE_QUALITY)は鍵に含めない
     sigs.append(f"ev={_ENGINE_VER}")
+    sigs.append(f"mv={_MORPH_RENDER_VER}")
     key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
     cache_dir = os.path.join(_ARTIFACT_DIR, "morph", _src_bucket(src_path))
     return os.path.join(cache_dir, f"{key}.mkv")
@@ -315,6 +342,7 @@ def _particle_cache_path(img_path, particle_op, duration, fps, quality="final"):
     sigs.append(f"q={quality}")
     # 中間物は draft/本番で同一内容のため rq(_ACTIVE_QUALITY)は鍵に含めない
     sigs.append(f"ev={_ENGINE_VER}")
+    sigs.append(f"mv={_MORPH_RENDER_VER}")
     key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
     cache_dir = os.path.join(_ARTIFACT_DIR, "particle", _src_bucket(img_path))
     return os.path.join(cache_dir, f"{key}.mkv")
@@ -339,7 +367,7 @@ def _build_morph_frame_extract_cmd(src_path, frame_path):
 
     -sseof -0.5: 終端0.5秒前からデコード
     -update 1: 残り全フレームを同一ファイルへ上書き → 最終フレームが残る
-    -pix_fmt rgba: alpha維持（前ベイクのffv1 yuva444p等の透過を保つ）
+    -pix_fmt rgba: alpha維持（前ベイクのffv1 bgra等の透過を保つ）
     """
     cmd = ["ffmpeg", "-y", "-sseof", "-0.5"]
     cmd.extend(_decoder_input_args(src_path, "video", None))
@@ -441,7 +469,7 @@ def _web_cache_path(obj, project):
     sigs = [f"renderer={_renderer_identity()}"]
     # テンプレートファイルのフィンガープリント
     try:
-        ffp = _file_fingerprint(obj._web_source)
+        ffp = _web_source_fingerprint(obj._web_source)
         sigs.append(f"ffp={ffp}")
     except (OSError, TypeError):
         sigs.append(f"src={obj._web_source}")
@@ -449,8 +477,16 @@ def _web_cache_path(obj, project):
     data_str = json.dumps(obj._web_data, sort_keys=True, default=str)
     sigs.append(f"data={hashlib.sha256(data_str.encode()).hexdigest()[:12]}")
     sigs.append(f"dur={obj.duration}")
-    fps = obj._web_fps or project.fps
+    capture = obj._web_capture_spec(project)
+    fps = capture["fps"]
     sigs.append(f"fps={fps}")
+    # full finalの従来keyは維持し、draft低fps/部分captureだけを別cacheにする。
+    if (capture["fps"] != capture["base_fps"]
+            or capture["frame_start"] != 0
+            or capture["frame_end"] != capture["full_frames"]):
+        sigs.append(
+            f"capture={capture['frame_start']}:{capture['frame_end']}"
+            f"/{capture['full_frames']}")
     if obj._web_size:
         sigs.append(f"size={obj._web_size[0]}x{obj._web_size[1]}")
     if obj._web_deps:
@@ -467,8 +503,75 @@ def _web_cache_path(obj, project):
     return os.path.join(_ARTIFACT_DIR, "web", name, f"{key}.webm")
 
 
-def _layer_cache_paths(filename, project):
-    """レイヤーキャッシュパスを計算（signature方式）"""
+# --- レイヤーキャッシュの品質段階 -------------------------------------------
+# 値 → (拡張子, ffmpegエンコード引数)。中間ファイルの品質/サイズを選ぶ。
+#
+# 拡張子とデコーダ選択は結合している（_decoder_input_args と対で維持すること）:
+#   .webm … VP9+alpha。再利用時に libvpx-vp9 を強制する（ネイティブVP9デコーダは
+#           alpha非対応で、透過が黒背景化して下層レイヤーを覆う。issue #13 P1-3）
+#   .mkv  … FFV1。webmコンテナはFFV1を格納できないため別コンテナにする。
+#           FFV1はネイティブデコーダがbgraのalphaを正しく復号するので強制不要。
+#
+# クロマ間引きについての実測メモ（1080p30・細い文字＋高彩度のコードパネル素材）:
+#   量子化を完全に止めても yuva420p である限り PSNR は 49.97dB で頭打ち
+#   （＝クロマ間引き固有の誤差下限）。draft(crf30)=47.60dB, balanced(crf15)=49.13dB。
+#   alpha を持てる非可逆コーデックは 4:2:0 の libvpx-vp9 しか無く（libvpx-vp9 は
+#   yuva444p 非対応、prores_ks 4444 は同素材で可逆FFV1の2.3〜3.1倍に肥大）、
+#   **クロマ間引きを完全に無くしたい場合は lossless を選ぶ**しかない。
+_LAYER_CACHE_QUALITY = {
+    # プレビュー用。従来の既定値と同一設定（既存キャッシュ資産と同じ絵）
+    "draft": (".webm", [
+        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+        "-b:v", "0", "-crf", "30", "-auto-alt-ref", "0",
+    ]),
+    # 折衷（既定）。二重劣化のうち量子化分をほぼ除去し、可逆の約1/8サイズ
+    "balanced": (".webm", [
+        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+        "-b:v", "0", "-crf", "15", "-auto-alt-ref", "0",
+    ]),
+    # 品質最優先。完全可逆（ビット完全）。クロマ間引きも色変換も起きない
+    #
+    # pix_fmt が bgra であって yuva444p でないのは実測に基づく:
+    # FFV1 yuva444p は RGBA→YUV の行列変換を挟むため、
+    #   (a) 生成プロセスと再利用プロセスで colorspace タグが unknown のまま
+    #       別々に推定され（601/709 の食い違い）、高彩度の文字で最大68/255 の
+    #       色ずれが出た（文字部PSNR 27.9dB＝draft より悪い）
+    #   (b) colorspace/color_range を明示しても往復はビット完全にならない
+    # bgra はチャンネル並べ替えのみで色変換が無く、実測でビット完全（PSNR=inf,
+    # 最大誤差0）。サイズは yuva444p 比 +5% 程度に収まる。
+    "lossless": (".mkv", [
+        "-c:v", "ffv1", "-level", "3", "-pix_fmt", "bgra",
+    ]),
+}
+
+_DEFAULT_LAYER_CACHE_QUALITY = "balanced"
+
+
+def _resolve_layer_cache_quality(quality):
+    """レイヤーキャッシュ品質を検証して正規化する（None は既定値）"""
+    if quality is None:
+        return _DEFAULT_LAYER_CACHE_QUALITY
+    if quality not in _LAYER_CACHE_QUALITY:
+        raise ValueError(
+            f"cache_quality引数は "
+            f"{', '.join(repr(k) for k in _LAYER_CACHE_QUALITY)} "
+            f"のいずれか: {quality!r}")
+    return quality
+
+
+def _layer_cache_encode_args(quality):
+    """品質に対応するffmpegエンコード引数（コピーを返す）"""
+    return list(_LAYER_CACHE_QUALITY[_resolve_layer_cache_quality(quality)][1])
+
+
+def _layer_cache_paths(filename, project, quality=None):
+    """レイヤーキャッシュパスを計算（signature方式）
+
+    quality: レイヤーキャッシュ品質（None で既定）。**鍵と拡張子の両方**に効く。
+    鍵に含めないと品質を変えても古い中間ファイルが再利用される。
+    """
+    quality = _resolve_layer_cache_quality(quality)
+    ext = _LAYER_CACHE_QUALITY[quality][0]
     basename = os.path.splitext(os.path.basename(filename))[0]
     sigs = []
     try:
@@ -485,13 +588,13 @@ def _layer_cache_paths(filename, project):
     # 総尺変更後に旧キャッシュを再利用すると短尺切れ/古い尺が戻る。issue #13 P1-4）
     # render経路ではplan pass直後に総尺が確定済み（_render_impl参照）
     sigs.append(f"dur={project.duration}")
+    # 品質も鍵の一部（同じ素材でも draft と lossless は別成果物）。
+    # 名前だけでなく**実際のエンコード引数**を含めることで、将来 crf/pix_fmt を
+    # 調整したときに古い中間ファイルが黙って再利用されるのを防ぐ。
+    sigs.append(f"q={quality}:{' '.join(_LAYER_CACHE_QUALITY[quality][1])}")
     key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
     layer_dir = os.path.join(_ARTIFACT_DIR, "layer", basename)
-    # 拡張子は .webm 固定。レイヤーキャッシュは libvpx-vp9 + yuva420p で、
-    # 再利用時のデコーダ選択（_decoder_input_args）が .webm 拡張子で
-    # libvpx-vp9 を強制する。.mkv だとネイティブVP9デコーダ（alpha非対応）
-    # が選ばれ、透過が黒背景化して下層レイヤーを覆う（issue #13 P1-3）。
-    return (os.path.join(layer_dir, f"{key}.webm"),
+    return (os.path.join(layer_dir, f"{key}{ext}"),
             os.path.join(layer_dir, f"{key}.anchors.json"))
 
 
@@ -626,4 +729,4 @@ from scriptvedit.expr import Expr, max
 from scriptvedit.ffmpeg import _decoder_input_args
 from scriptvedit.plugins import _EFFECT_PLUGINS
 from scriptvedit.project import Project
-from scriptvedit.state import _ARTIFACT_DIR, _BAKEABLE_EFFECTS, _ENGINE_VER, _TERMINAL_FRAME_EFFECTS, _detect_media_type
+from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIXFMT_VER, _BAKEABLE_EFFECTS, _ENGINE_VER, _TERMINAL_FRAME_EFFECTS, _detect_media_type

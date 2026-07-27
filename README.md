@@ -252,6 +252,21 @@ checkpointで焼き込まれるか、レンダリング時にoverlay座標で解
 
 **重要**: live Effect は checkpoint で焼かれないため、checkpoint 生成後もレンダリング時に必ず残る。
 
+morph_to のモーフ方式（`method`）:
+- `method="sdf"`（**既定**）… 形状ベース（符号付き距離場）。中間形状が常に滑らかな
+  1つのシルエットになり、位置・サイズがずれた素材や文字グリフでも破綻しない。
+  追加パラメータ: `align` / `edge_softness` / `color_ease` / `color_path`
+- `method="transport"` … 従来の最適輸送＋ワープ場。形の**内部パーツが実際に移動する**ため、
+  複数パーツを持つ素材ではこちらが向く。反面、中間フレームの輪郭が波打ちやすい。
+  追加パラメータ: `max_pixels` / `w_move` / `w_color` / `w_vanish` / `grid_step` /
+  `smoothing` / `color_metric` / `color_mix` / `color_local` / `alpha_mode` / `alpha_sharp`
+- `method` 未指定でも transport 専用パラメータ（`max_pixels` 等）を渡した場合は
+  transport が選ばれる（既定切り替え前の呼び出しが壊れないようにするため）
+- 方式に対応しないパラメータを渡すと method 名付きの ValueError になる
+- 中間色は両方式とも「リニア光 × OKLCh」で作る。色相を回すため、補色寄りの2色
+  （例: オレンジ→青緑）は中間で黄緑を通る。中立にフェードさせたい場合は
+  `color_path="oklab"`（sdf）/ `color_mix="oklab"`（transport）を指定する
+
 morph_to の注意点:
 - bakeable ops の末尾に配置する必要がある（違反時は ValueError）
 - 1つの Object に1回のみ適用可能（複数指定は ValueError。多段モーフは `compute()` で中間素材を生成して分割）
@@ -320,6 +335,10 @@ move(x=lambda u: 0.5 + 0.3 * cos(u * 2 * PI),
 - その他: `mod`, `frac`, `deg2rad`, `rad2deg`
 - 組み込み互換: `abs`, `min`, `max`, `round`, `pow`
 - 定数: `PI`, `E`
+
+`from scriptvedit import *` 後も、これらは通常値ならPython組み込みへ委譲する。
+`min(values, key=...)` / `max(..., default=...)` / `round(x, ndigits)` /
+`pow(x, y, mod)`もそのまま使え、引数に`Expr`が含まれるときだけFFmpeg式を生成する。
 
 ### イージング関数
 
@@ -484,6 +503,14 @@ obj <= +(resize(sx=0.5, sy=0.5) | resize(sx=0.3, sy=0.3))
 
 キャッシュは `__cache__/artifacts/checkpoint/{src_hash}/{signature}.{ext}` に保存。
 品質ヒントを尊重するかは `describe()` の各 op にある `respects_fast_hint` で確認できる。
+
+**中間ベイクのピクセル形式**: 動画になる中間物（checkpoint / `compute()` / morph / 粒子 /
+`slideshow()` 等の xfade 生成物）は FFV1 の `bgra`（`.mkv`）で焼く。FFV1 は可逆だが
+`yuva444p` では RGBA→YUV の行列変換が入り、往復がビット完全にならない
+（morph 90フレームの実測で PSNR 48.2dB / alpha 不一致 122,097 画素）。`bgra` は
+色変換を挟まないため往復がビット完全（PSNR=∞・誤差0）。中間物は
+morph→checkpoint→本レンダと多段に積み上がるため、微小な色ずれも累積する。
+代償は中間ファイルが約 +11% 肥大することだが、中間物は最終出力に残らない。
 尊重しない op では `~` をキャッシュ指紋へ混ぜないため、通常処理と同じキャッシュを再利用する。
 この意味は Effect / Transform / AudioEffect で共通であり、`~AudioEffect` も音声を削除しない。
 音声を消す場合は `adelete()` を明示する。
@@ -504,6 +531,51 @@ p.layer("maku.py", cache="off")    # キャッシュしない（デフォルト�
 - 素材の鮮度検証: キャッシュ生成時に素材の内容ハッシュを anchors.json に記録し、素材が更新された場合は
   - `auto` ... 古いキャッシュを使わずレイヤーを再実行（再生成）
   - `use` ... 警告を出して古いキャッシュのまま続行（`cache="make"` での再生成を促す）
+
+#### 中間ファイルの品質（cache_quality）
+
+レイヤーキャッシュは中間ファイルを1枚挟むため、そこでの劣化がそのまま最終出力に乗る。
+用途に応じて `cache_quality` で品質を選ぶ（`cache` が `"off"` 以外のときだけ意味を持つ）。
+
+```python
+p.layer("maku.py", cache="auto")                          # 既定 = "balanced"
+p.layer("maku.py", cache="auto", cache_quality="draft")    # プレビュー用（軽い・粗い）
+p.layer("maku.py", cache="auto", cache_quality="lossless") # 最終版用（劣化ゼロ）
+```
+
+| 値 | 中身 | 用途 |
+|---|---|---|
+| `"draft"` | VP9 `yuva420p` crf30 / `.webm` | プレビュー。最小・最速。輪郭にリンギングが出る |
+| `"balanced"` | VP9 `yuva420p` crf15 / `.webm` | **既定**。量子化劣化をほぼ除去。draft の約1.3倍のサイズ |
+| `"lossless"` | FFV1 `bgra` / `.mkv` | 完全可逆（ビット完全）。サイズは balanced の**100倍以上** |
+
+品質はキャッシュ鍵に含まれるため、変更すると別の中間ファイルとして再生成される
+（古いキャッシュが黙って再利用されることはない）。不要になった中間ファイルは
+`python -m scriptvedit cache --gc` で掃除する。
+
+**選び方の目安**（1080p30・細い等幅文字＋高彩度のコードパネルでの実測。
+「真値」= コーデックを一切通さないレイヤーのRGBA）:
+
+| 品質 | 中間サイズ(4秒) | 生成時間 | 真値とのPSNR | alpha不一致画素 |
+|---|---|---|---|---|
+| draft | 0.07 MB | 6.2 s | 57.7 dB | 2117 |
+| balanced | 0.09 MB | 6.6 s | 64.0 dB | 13 |
+| lossless | 11.96 MB | 2.3 s | ∞（完全一致） | 0 |
+
+- **最終出力が H.264 mp4 なら、3段階の差は最終画質にはほとんど出ない**
+  （最終エンコードの量子化と 4:2:0 化に埋もれる）。既定の `balanced` で十分。
+- `lossless` が効くのは、劣化を積み上げたくない場合
+  — 透過付き出力（`alpha=True` の webm / 連番PNG）、キャッシュ済みレイヤーを
+  さらに合成し直す構成、キャッシュ層を何枚も重ねる構成。
+- `lossless` は**可逆ゆえにサイズが桁違い**（上表で130倍）。ディスクと相談すること。
+  なお生成は FFV1 のほうが VP9 より速い（可逆で探索が要らないため）。
+
+> **注意**: `"balanced"` でもクロマ間引き（4:2:0）自体は無くならない。
+> alpha を保持できる非可逆コーデックは `libvpx-vp9` の `yuva420p` だけで
+> （`libvpx-vp9` は `yuva444p` 非対応、ProRes 4444 は同素材で可逆FFV1より
+> 2.3〜3.1倍大きく可逆の代替にならない）、**クロマ間引きを完全に無くすには
+> `"lossless"` を選ぶ**しかない。量子化を止めても 4:2:0 のままでは
+> PSNR は 49.97 dB で頭打ちになる（実測）。
 
 ### 方針: genchain は提供しない
 
@@ -827,7 +899,8 @@ proof.time(3) <= move(x=0.5, y=0.5, anchor="center") & scale(lambda u: lerp(0.8,
 ### オーディオ（拡張）
 
 ```python
-p.normalize_audio(target=-14)                        # 最終音声をloudnorm(EBU R128)で正規化(LUFS)
+p.normalize_audio(target=-14, true_peak=-1.5, limiter=True, sample_rate=48000)
+# loudnorm → 48kHz化 → 最終ピークリミッター
 
 bgm.time() <= loop(until=None) & duck_under(narration, ratio=8)  # ループ + 自動ダッキング
 
@@ -838,8 +911,10 @@ viz = audio_viz("bgm.mp3", kind="waves", color="cyan") # 波形/スペクトル�
 
 - `normalize_audio` は Project メソッド。`duck_under` / `loop` は AudioEffect（`&` で連結）。
   `~` は映像系と共通の品質ヒントで、音声を消すには `adelete()` を使う
-- `duck_under(other, *, ratio=8, threshold=0.05, attack=20, release=250)`: `other`（ナレーション等）再生中に自音量を下げる
+- `duck_under(other, *, ratio=8, threshold=0.05, attack=20, release=250)`: `other`（ナレーション等）再生中に自音量を下げる。sidechainは自動で無音延長されるため、ナレーション終了後もBGMは指定尺まで続く
 - `loop(until=None)`: 省略時は Project.duration までループ
+- `audio_sequence` は連結後の実尺を返却Objectの`duration`へ自動設定する。`Narration`を直接渡すと字幕もcrossfade込みで並び、返却Objectの数値`@`配置へ追従する。追加の`.time(total)`は不要
+- `normalize_audio(target=-14, *, true_peak=-1.5, lra=11, limiter=True, sample_rate=48000)` は最終音声へloudnorm、サンプルレート確定、任意のピークリミッターを順に適用する。`true_peak`は最終lossy出力の目標で、AAC/Opus再上昇向けに内部で0.5dBの余裕を確保する。WebM/Opusの出力レートは48kHz固定
 - `audio_sequence` / `sfx` / `audio_viz` はキャッシュ生成物（音声/映像Objectを返す）。`audio_viz` の `kind` は `"waves"` / `"spectrum"` / `"cqt"`
 
 ### パーティクル（explode / assemble）
@@ -919,8 +994,9 @@ p.render("out.gif")               # GIF（2パスパレット）
 p.render("out.webp")              # アニメーション WebP
 p.render("out.png")               # 連番PNG（out.png → out_%05d.png）
 p.render("out.webm", alpha=True)  # 透過VP9（yuva420p）
-p.render("out.mp4", draft=True)   # ドラフト（最終エンコードのみ半解像度・ultrafast・crf28）
+p.render("out.mp4", draft=True)   # 半解像度・軽量エンコード。Webも既定8fpsで撮影
 p.thumbnail(at=2.5, out="thumb.png")   # 指定時刻の1フレームをPNG抽出
+p.thumbnail(at=92, out="thumb.png", source="out.mp4")  # 完成動画を入力seek（高速）
 ```
 
 `configure` で解像度プリセット / エンコーダ / 並列度を設定する。
@@ -929,10 +1005,48 @@ p.thumbnail(at=2.5, out="thumb.png")   # 指定時刻の1フレームをPNG抽�
 p.configure(preset="shorts")      # shorts/reel/square/hd/720p/2k/4k 等（w/h/fps を一括設定）
 p.configure(encoder="nvenc")      # nvenc/hevc_nvenc/qsv/hevc（利用不可なら libx264 へ警告付きフォールバック）
 p.configure(parallel=4)           # キャッシュ並列生成のワーカ数
+p.configure(draft_web_fps=8)      # draft時のCanvas screenshot上限。Noneで本番同等
 ```
 
 - 透過出力（`alpha=True`）は `.webm`（VP9）を推奨。gif / h264 はアルファを保持できない
 - `encoder` は `ffmpeg -encoders` で検出のみ。検出できても環境により libx264 にフォールバックし得る
+
+### 時間分割並列レンダ（render(parallel=N)）
+
+最終レンダの filtergraph 評価はほぼ単一スレッドで、長尺・多オブジェクトでは
+エンコードよりフィルタ評価が支配的になる。`parallel=N` は総尺を**フレーム境界で**
+N 分割し、各区間を別プロセスの ffmpeg で並列レンダして concat（`-c copy`）で
+無劣化結合する。
+
+```python
+p.render("out.mp4", parallel=4)   # 4分割並列。未指定/1 なら従来どおり単一プロセス
+```
+
+- **仕組み**: フィルタ式は全て絶対タイムライン時刻 `t` 基準
+  （`tpad` / `enable='between(t,..)'` / `u=clip((t-start)/dur,..)` / drawtext）なので、
+  チャンク側では「背景PTSを +t0 シフト → 全フィルタ評価 → -t0 で戻す」だけで
+  フィルタ文字列は全編レンダと同一のまま成立する。各オブジェクトは tpad 整列直後に
+  `trim` で区間前のフレームを破棄し、区間に重ならないオブジェクトは入力ごと除外する
+- **音声は分割しない**: `loudnorm` / `duck_under` は全尺依存のため、音声は全編1本を
+  並行レンダし、concat 結果へ mux する（境界のサンプルずれも起きない）。
+  チャプター（marker）も mux 時に付与される
+- **出力の同一性**: フィルタ文字列が全編レンダと同一のため、エンコード前のフレームは
+  一致する。最終出力は H.264 のレート制御が GOP 境界で変わるためビット同一には
+  ならないが、視覚的には同一（実プロジェクト2分56秒での実測: フレーム数完全一致・
+  PSNR 平均53.8dB / 最低46.0dB・SSIM 0.9996・音声はデコードPCMがMD5完全一致）
+- **対応形式**: H.264系（.mp4/.mkv/.mov、draft含む）のみ。gif/webp/webm/連番PNG/
+  alpha や `start`/`end` 部分レンダとの併用時は通知の上で従来レンダへフォールバック
+- **配分**: 各チャンクへ `-threads ceil(CPU数/N)` を渡してエンコーダスレッドの
+  過剰予約を防ぐ。`configure(parallel=N)`（キャッシュ並列生成のワーカ数）とは別物
+- **向き不向き**: フィルタ評価が支配的な長尺プロジェクトほど効く
+  （実測: 2分56秒・87オブジェクトの実プロジェクトで 1012s → 並列2: 255s /
+  並列4: 149s / 並列8: 106s。20コア機）。並列2で4倍になるのは、逐次レンダが
+  「後半オブジェクトの tpad クローン区間（開始前）にも drawtext 等を評価する」
+  浪費を head_trim が同時に排除するためで、分割は単なる並列化以上に効く。逐次レンダが1秒未満で終わる極小
+  プロジェクト（目安5〜10秒尺以下）では、プロセス起動+concatの固定
+  オーバーヘッド（計0.1秒弱）が上回り並列の方がわずかに遅い。
+  区間をまたぐオブジェクトはソース先頭からのデコードが発生するため、
+  超長尺の1本物ソースが多い構成では分割数を上げても伸びにくい
 
 ### ツール・開発体験（DX）
 
@@ -953,7 +1067,8 @@ p.audit(strict=True)              # warningが1件でもあればRuntimeError（
 `text-no-decoration`）、音声が重なるのに `duck_under` なし
 （`audio-overlap-no-duck`）、BGM のループ・尺不足（`bgm-loop` / `bgm-too-short`）、
 `normalize_audio()` 未設定（`no-normalize-audio`）、`~` 品質ヒントが尊重されない op
-（`quality-hint-ignored`、info）。エラーにはせず findings
+（`quality-hint-ignored`、info）、Web/Canvas内部が静的検査対象外であること
+（`web-content-uninspected`、info）。エラーにはせず findings
 （`{"severity", "code", "message"}` の list）を返す。
 
 キャッシュ管理・監視は CLI からも実行できる。
@@ -1054,7 +1169,14 @@ TTS音声と字幕を1呼び出しで扱う統合機能。
 # narrate: TTSナレーション音声 + 同期字幕を1回で生成・配置（音声実長ぶんタイムラインが進む）
 n = narrate("こんにちは、世界", speaker=3, subtitle_style={"size": 40, "y": 0.85})
 # 戻り値 Narration(audio, subtitle)。audio, sub = narrate(...) も可
+n @ 3.0  # 音声と字幕を一緒に同期配置
 narrate("二行目のナレーション", speaker=1, subtitle=False)   # 字幕なし（音声のみ）
+narrate(
+    "読み上げる長い原稿です。画面表示は短くできます。",
+    subtitle_text="画面表示は短く",
+    subtitle_max_chars=14, subtitle_max_lines=2,
+    subtitle_safe_area=(0.05, 0.08),
+)
 
 # karaoke: ASS \k タグのカラオケ風ハイライト字幕（.time(全体尺) で開始0配置）
 sub = karaoke([
@@ -1064,7 +1186,8 @@ sub = karaoke([
 sub.time(5)
 ```
 
-- `narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0, volume=1.0, subtitle=True, subtitle_style=None, x=0.5, y=0.9, size=36, ...)`: 字幕窓は音声実長に一致し、音声と字幕は同じ開始時刻に配置される。x/y/size/color/font/box/... は text() と同じ字幕スタイル引数（既定は下部中央+半透明ボックス）。`backend`/`speaker` は `voice()` と同じ（→「音声合成」節。`backend="edge"` なら VOICEVOX 不要）
+- `narrate(..., subtitle_text=None, subtitle_formatter=None, subtitle_max_chars=None, subtitle_max_lines=None, subtitle_safe_area=None)`: 読み上げ文と表示文を分離し、formatter→日本語禁則折り返しの順で整形する。行数超過は切り捨てずエラー。safe areaは数値、`(horizontal, vertical)`、`(left, top, right, bottom)`の画面比率で指定する
+- 字幕窓は音声実長に一致し、音声と字幕は同じ開始時刻に配置される。x/y/size/color/font/box/... は text() と同じ字幕スタイル引数（既定は下部中央+半透明ボックス）。`backend`/`speaker` は `voice()` と同じ
 - `karaoke(lines, *, style=None)`: `lines` は `(start, end, "歌詞")` または `(start, end, "歌詞", [語ごとの秒数])`。`word_durations` 省略時は行内の語へ `(end-start)` を均等割り。`style` で font/size/primary(発音済み色)/secondary(未発音色)/outline/alignment/margin_v 等を上書き。**フォント描画は libass 依存**（環境のフォント有無で見た目が変わる）
 
 ### ビート同期（beat_sync / scriptvedit.beat）
@@ -1099,6 +1222,7 @@ s.time(5) <= move(x=0.5, y=0.5, anchor="center")
 
 # storyboard: タイムラインの絵コンテ（サムネイル格子PNG）を1枚生成（Projectメソッド）
 p.storyboard("board.png", cols=4, interval=None)  # interval省略時は 総尺/12
+p.storyboard("board.png", source="out.mp4")       # 完成動画から高速生成
 
 # export_metadata: YouTube投稿用メタデータ（章+タイトル+説明+タグ）を1ファイル出力（Projectメソッド）
 p.export_metadata("meta.json", title="タイトル", tags=["tag1", "tag2"])   # .json=構造化データ
@@ -1106,7 +1230,7 @@ p.export_metadata("meta.txt")   # .txt=概要欄にそのまま貼れるプレ�
 ```
 
 - `slide(html_file, page=None, *, duration=5.0, width=None, height=None, name=None, debug_frames=False, deps=None)`: `page` 指定時はキャプチャ前に `window.showSlide(page)` を実行、無ければ `id="page-<page>"` の要素のみ表示（他 `id^="page-"` を非表示）。`renderFrame` 未定義なら no-op を自動注入（静止スライド可）。キャッシュは web Object と同じ signature 方式
-- `storyboard(out_path, *, cols=4, interval=None)`: `thumbnail()` と同じ抽出経路でコマを取り出し PIL で `cols` 列のグリッドに結合（各コマ左上に時刻ラベル焼き込み）。事前 render 不要（**Pillow が必要**）
+- `storyboard(out_path, *, cols=4, interval=None, source=None, timeout=600)`: 事前renderなしでもProjectグラフ準備1回・FFmpeg 1回で全コマを抽出する。`source`へ完成動画を渡すとProjectを再構築せず入力seekする。Pillowが必要
 - `export_metadata(path=None, *, title=None, description=None, tags=None)`: `title` 省略時は `param("title")`、`path` 省略時は `metadata.json`。拡張子で .json（構造化）/ .txt（概要欄用）を切替。`marker()` で打った章が目次になる。`tags="foo"` は1個のタグとして扱う（複数はリスト）
 
 ### テスト・検証ツール（scriptvedit.testkit）
@@ -1200,8 +1324,10 @@ p.render(output_path, *, dry_run=False, timeout=None,
          start=None, end=None, draft=False, alpha=False, strict=False)
 ```
 
-`start`/`end` は部分レンダの時間窓（秒。フィルタの t 基準は保ったまま出力だけを
-窓で切り出す）。`draft=True` は最終エンコードだけを軽くする半解像度のドラフトレンダ。
+`start`/`end` は部分レンダの時間窓（秒。フィルタの t 基準を保持）。Web/Canvas Objectは
+交差するフレームだけをscreenshotする。状態依存`renderFrame()`との互換性のため窓より前も
+JavaScript/Canvasは順に評価するが、screenshotは省略する。`draft=True` は半解像度・軽量エンコードに加え、Web撮影を
+`draft_web_fps`（既定8fps）以下へ落とす。`draft_web_fps=None`で本番同等にできる。
 checkpoint/morph の中間キャッシュ鍵は**意図的に本番と共有**する（中間物の内容は
 draft/本番で同一のため。分離すると draft⇄本番の切り替えで全キャッシュミスになる）。
 `alpha=True` は対応形式（webm 等）で
@@ -1257,7 +1383,8 @@ python tests/render_all.py test01 test75  # 指定のみ
 
 ファイル指紋（キャッシュ鍵）は mtime ではなく**内容ハッシュ**で、同一バイト列の
 素材なら clone 先でも安定する。改行変換による指紋ずれは `.gitattributes`（作業ツリーを
-CRLF に固定、`templates/vendor/**` は無変換）で防いでいる。
+CRLF に固定、`templates/vendor/**` は無変換）で防いでいる。外部HTMLのWeb cacheは
+LF/CRLFだけの違いをCRLFへ正規化してハッシュするため、改行変更だけでは再生成しない。
 
 スナップショットを再生成したら、`scripts/tools_baseline.py` で「パス以外は変わっていない」ことを検証できる。
 

@@ -771,6 +771,13 @@ class Object:
             sigs.append(f"plugin={pname}:{_EFFECT_PLUGINS[pname].code_ffp}")
         # サブProject全体の出力へ影響する音声設定（normalize_audio）も署名対象
         sigs.append(f"loudnorm={sub_project._loudnorm_target}")
+        loudnorm_options = getattr(sub_project, "_loudnorm_options", None)
+        if loudnorm_options is not None:
+            sigs.append(f"loudnorm_options={loudnorm_options}")
+        # duck_under のsidechain padや最終音声グラフはレイヤー/素材FFPに
+        # 現れない。音声グラフ変更後に旧subproject WebMを再利用しないための
+        # 局所バージョン（高コストなWeb/画像キャッシュ全体は無効化しない）。
+        sigs.append("audio_graph=2")
         sigs.append(f"ev={_ENGINE_VER}")
         key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
         cache_path = os.path.join(_ARTIFACT_DIR, "subproject", f"{key}.webm")
@@ -844,6 +851,8 @@ class Object:
             fps = proj.fps if proj else 30
             sigs.append(f"dur={duration}")
             sigs.append(f"fps={fps}")
+            # 中間ベイクのpix_fmt世代（.mkvを焼く動画computeのみ。静止画PNGは無関係）
+            sigs.append(f"bpf={_BAKE_PIXFMT_VER}")
         key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
         src_hash = hashlib.sha256(
             self.source.replace("\\", "/").encode()).hexdigest()[:8]
@@ -884,7 +893,8 @@ class Object:
             cmd.extend(["-vf", ",".join(filters)])
         cmd.extend([
             "-c:v", "ffv1", "-level", "3",
-            "-pix_fmt", "yuva444p",
+            # 色変換を挟まない中間形式（理由と実測値は state.py の _BAKE_PIX_FMT）
+            "-pix_fmt", _BAKE_PIX_FMT,
             "-t", str(duration), cache_path,
         ])
         return cmd
@@ -978,12 +988,41 @@ class Object:
         if frames_dir is None:
             frames_dir = _web_frames_dir(self._web_name)
         frames_pattern = os.path.join(frames_dir, "frame_%05d.png")
-        fps = self._web_fps or project.fps
+        capture = self._web_capture_spec(project)
+        fps = capture["fps"]
         dur = self.duration
+        # 通常の本番全尺キャッシュは従来コマンドを完全に維持する。
+        # draft低fpsも全尺なら同じ単純な連番入力でよい。
+        if capture["frame_start"] == 0 and capture["frame_end"] == capture["full_frames"]:
+            return [
+                "ffmpeg", "-y",
+                "-framerate", str(fps),
+                "-i", frames_pattern,
+                "-c:v", "libvpx-vp9",
+                "-pix_fmt", "yuva420p",
+                "-b:v", "0", "-crf", "30",
+                "-auto-alt-ref", "0",
+                "-t", str(dur),
+                webm_path,
+            ]
+
+        # 部分レンダ用キャッシュは必要区間のPNGだけを持つ。透明な全尺背景へ
+        # 元のローカル時刻から重ね、Objectのstart/durationやEffectのt基準を
+        # 変えずに通常の合成経路へ渡せるWebMへする。
+        w, h = self._web_size
+        offset = capture["frame_start"] / fps
+        graph = (
+            f"[1:v]setpts=PTS-STARTPTS+{offset}/TB[wclip];"
+            f"[0:v][wclip]overlay=eof_action=pass:repeatlast=0:format=auto,"
+            "format=yuva420p[wout]")
         return [
             "ffmpeg", "-y",
+            "-f", "lavfi", "-i",
+            f"color=c=black@0.0:s={w}x{h}:d={dur}:r={fps},format=rgba",
             "-framerate", str(fps),
             "-i", frames_pattern,
+            "-filter_complex", graph,
+            "-map", "[wout]",
             "-c:v", "libvpx-vp9",
             "-pix_fmt", "yuva420p",
             "-b:v", "0", "-crf", "30",
@@ -991,6 +1030,60 @@ class Object:
             "-t", str(dur),
             webm_path,
         ]
+
+    def _web_capture_spec(self, project):
+        """このレンダで実際に撮影するWebフレーム範囲を返す。
+
+        final全尺は従来どおり。draftは ``configure(draft_web_fps=...)`` で
+        screenshot FPSを下げ、部分レンダは表示窓と交差するローカルフレームだけを
+        撮影する。trim/terminal Effectは時刻の1:1対応を壊すため安全側で全尺へ戻す。
+        """
+        # 既存full-final cache keyの表記（30 と 30.0 の差を含む）を維持するため、
+        # 元の数値型を保ったまま計算時だけfloat変換されるようにする。
+        base_fps = self._web_fps or project.fps
+        fps = base_fps
+        draft_fps = getattr(project, "draft_web_fps", None)
+        if getattr(project, "_draft", False) and draft_fps is not None:
+            fps = _builtins.min(base_fps, draft_fps)
+
+        duration = float(self.duration)
+        full_frames = _web_frame_count(duration, fps)
+        frame_start = 0
+        frame_end = full_frames
+        visible = True
+
+        unsafe_window_ops = {"trim"} | set(_TERMINAL_FRAME_EFFECTS)
+        can_window = not any(
+            getattr(effect, "name", None) in unsafe_window_ops
+            for effect in getattr(self, "effects", []))
+        window = getattr(project, "_render_window", None)
+        if window is not None and can_window:
+            global_start = float(self.start_time or 0.0)
+            global_end = global_start + duration
+            window_start, window_end = window
+            if window_end is None:
+                window_end = project.duration
+            local_start = _builtins.max(0.0, float(window_start) - global_start)
+            local_end = _builtins.min(
+                duration, float(window_end) - global_start)
+            visible = local_end > local_start and global_end > float(window_start)
+            if visible:
+                frame_start = _builtins.max(
+                    0, int(_math.floor(local_start * fps)))
+                frame_end = _builtins.min(
+                    full_frames, int(_math.ceil(local_end * fps)))
+                visible = frame_end > frame_start
+            else:
+                frame_start = frame_end = 0
+
+        return {
+            "base_fps": base_fps,
+            "fps": fps,
+            "full_frames": full_frames,
+            "frame_start": frame_start,
+            "frame_end": frame_end,
+            "visible": visible,
+        }
 
     def _render_web_frames(self, project, frames_dir=None):
         """Playwrightで HTML を連番PNGにキャプチャ"""
@@ -1005,9 +1098,15 @@ class Object:
             _shutil.rmtree(frames_dir, ignore_errors=True)
         os.makedirs(frames_dir, exist_ok=True)
         w, h = self._web_size
-        fps = self._web_fps or project.fps
+        capture = self._web_capture_spec(project)
+        fps = capture["fps"]
         dur = self.duration
-        N = _web_frame_count(dur, fps)
+        full_frames = capture["full_frames"]
+        frame_start = capture["frame_start"]
+        frame_end = capture["frame_end"]
+        if not capture["visible"]:
+            raise RuntimeError("表示窓外のWeb Objectを撮影しようとしました")
+        capture_frames = frame_end - frame_start
         html_path = os.path.abspath(self._web_source)
         url = f"file:///{html_path.replace(os.sep, '/')}"
 
@@ -1055,9 +1154,13 @@ class Object:
                         "  }"
                         "}", slide_page)
                 page.wait_for_function("typeof globalThis.renderFrame === 'function'", timeout=5000)
-                for i in range(N):
+                progress_step = _builtins.max(1, capture_frames // 10)
+                captured = 0
+                # statefulなrenderFrameとの互換性を保つため、窓より前も
+                # evaluateだけは順に行い、高コストなscreenshotだけを省略する。
+                for i in range(frame_end):
                     t = i / fps
-                    u = 1.0 if N <= 1 else i / (N - 1)
+                    u = 1.0 if full_frames <= 1 else i / (full_frames - 1)
                     state = {
                         "frame": i, "t": t, "u": u,
                         "fps": fps, "duration": dur,
@@ -1065,9 +1168,19 @@ class Object:
                         "data": self._web_data, "seed": 0,
                     }
                     page.evaluate("state => globalThis.renderFrame(state)", state)
+                    if i < frame_start:
+                        continue
                     page.screenshot(
-                        path=os.path.join(frames_dir, f"frame_{i:05d}.png"),
+                        path=os.path.join(
+                            frames_dir, f"frame_{captured:05d}.png"),
                         omit_background=True)
+                    captured += 1
+                    if (capture_frames >= 20 and (
+                            captured == 1 or captured % progress_step == 0
+                            or captured == capture_frames)):
+                        print(
+                            f"  Webフレーム {captured}/{capture_frames} "
+                            f"({captured / capture_frames:.0%})")
             finally:
                 # 失敗時もブラウザプロセスを残さない
                 browser.close()
@@ -1217,6 +1330,6 @@ from scriptvedit.filters.video import _build_effect_filters, _build_transform_fi
 from scriptvedit.media import _source_signature
 from scriptvedit.plugins import _EFFECT_PLUGINS
 from scriptvedit.project import Project
-from scriptvedit.state import _ARTIFACT_DIR, _CACHE_DIR, _ENGINE_VER, _GEN_COUNTER, _GEN_COUNTER_LOCK, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
+from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIX_FMT, _BAKE_PIXFMT_VER, _CACHE_DIR, _ENGINE_VER, _GEN_COUNTER, _GEN_COUNTER_LOCK, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
 from scriptvedit.timeline import _link_after, _register_anchor_owner, pause
 from scriptvedit.validate import _require_time

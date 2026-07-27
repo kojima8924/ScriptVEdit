@@ -7,7 +7,7 @@
     "-i",
     "color=c=black:s=1280x720:d=3:r=30",
     "-i",
-    "__cache__/artifacts/morph/ac9b64e5/a1bff6dc3f09d81e.mkv",
+    "__cache__/artifacts/morph/ac9b64e5/8118e81c38c6c56a.mkv",
     "-filter_complex",
     "[0:v][1:v]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,3)'[v1]",
     "-map",
@@ -22,22 +22,24 @@
     "test26.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/morph/ac9b64e5/a1bff6dc3f09d81e.mkv": [
+    "__cache__/artifacts/morph/ac9b64e5/8118e81c38c6c56a.mkv": [
       "ffmpeg",
       "-y",
       "-framerate",
       "30",
       "-i",
       "__morph_frames__/frame_%05d.png",
+      "-vf",
+      "tpad=stop_mode=clone:stop=1",
       "-c:v",
       "ffv1",
       "-level",
       "3",
       "-pix_fmt",
-      "yuva444p",
-      "-t",
-      "3",
-      "__cache__/artifacts/morph/ac9b64e5/a1bff6dc3f09d81e.mkv"
+      "bgra",
+      "-frames:v",
+      "91",
+      "__cache__/artifacts/morph/ac9b64e5/8118e81c38c6c56a.mkv"
     ]
   }
 }

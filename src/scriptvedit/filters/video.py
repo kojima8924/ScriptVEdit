@@ -120,9 +120,17 @@ def _build_input_args(obj, fps):
     return _decoder_input_args(obj.source, obj.media_type, fps)
 
 
-def _build_video_overlay_parts(obj, input_idx, current_base, dur):
+def _build_video_overlay_parts(obj, input_idx, current_base, dur, head_trim=None):
     """1オブジェクト分の映像フィルタチェーン + overlay行を構築
     （本レンダとレイヤーキャッシュで共通利用し、両経路の乖離を防ぐ）
+
+    head_trim: 時間分割並列レンダ（Project.render(parallel=N)）のチャンク側でのみ
+        指定される「この絶対時刻より前のフレームを早期破棄する」秒数。
+        tpadでタイムライン時刻へ整列した直後に trim=start=... を挿むことで、
+        チャンク開始前のフレームが後段の重いフィルタ（drawtext/geq/scale等）へ
+        流れるのを防ぐ。trimはPTSを振り直さないため、後段のt依存式
+        （enable/u正規化/drawtext）は全編レンダと同一文字列のまま成立する。
+        None（既定）なら従来どおり＝挿入しない。
 
     Returns: (filter_parts, out_label)
     """
@@ -134,6 +142,9 @@ def _build_video_overlay_parts(obj, input_idx, current_base, dur):
     # trim/setpts の後に挿入し、trim がクローンフレーム込みで尺を切らないようにする
     if obj.media_type != "image" and start > 0:
         obj_filters.append(f"tpad=start_duration={start}:start_mode=clone")
+    # 時間分割並列レンダ: チャンク開始前のフレームを破棄（PTSは絶対時刻のまま維持）
+    if head_trim is not None and head_trim > 0:
+        obj_filters.append(f"trim=start={head_trim}")
     # テキスト系: tpad後（タイムライン時刻に整列した後）にdrawtext/subtitlesを重畳
     if obj.media_type == "text":
         obj_filters.extend(_build_text_filters(obj, start, dur))

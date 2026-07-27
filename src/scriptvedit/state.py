@@ -45,7 +45,7 @@ def _detect_media_type(path):
 # --- configure許可キー ---
 
 _CONFIGURE_KEYS = {"width", "height", "fps", "duration", "background_color",
-                   "preset", "encoder", "parallel"}
+                   "preset", "encoder", "parallel", "draft_web_fps"}
 
 # 出力プリセット: name -> (width, height, fps)
 _PRESETS = {
@@ -108,6 +108,31 @@ _CACHE_DIR = "__cache__"
 _CHECKPOINT_DIR = os.path.join(_CACHE_DIR, "checkpoints")
 _ARTIFACT_DIR = os.path.join(_CACHE_DIR, "artifacts")
 _ENGINE_VER = "8"
+
+# --- 中間ベイク(FFV1 .mkv)のピクセル形式 -------------------------------------
+# checkpoint / compute / morph / particle / xfade の中間物はすべてこの形式で焼く。
+#
+# bgra であって yuva444p でないのは実測に基づく。FFV1 自体は可逆だが、
+# yuva444p は RGBA→YUV の行列変換を挟むため往復がビット完全にならない:
+#   - 実測(640x360・高彩度の細字＋半透明グラデ＋ノイズ): yuva444p は
+#     不透明部PSNR 54.92dB / RGB最大誤差 2 / alpha不一致 20,064px。
+#     bgra は PSNR=inf・最大誤差0・alpha不一致0（完全にビット完全）。
+#   - colorspace/color_range を明示しても往復はビット完全にならない。生成側と
+#     再利用側が colorspace 未タグのまま別々に BT.601/709 を推定して食い違うため。
+# bgra はチャンネル並べ替えのみで色変換が無い。中間物は多段（morph→checkpoint→
+# 本レンダ）で積み上がるため、ここでの微小な色ずれ・alpha ずれが累積する。
+# 代償は中間ファイルの肥大（実測 +12.7%）だが、中間物は最終出力に残らない。
+#
+# 注: xfade は bgra を直接扱えず gbrap（プレーナRGBA）へ自動変換されるが、
+# どちらも8bit RGB フルレンジのため詰め替えのみで劣化しない（YUVは経由しない）。
+_BAKE_PIX_FMT = "bgra"
+
+# 中間ベイクのピクセル形式世代。_BAKE_PIX_FMT を変えたら上げる。
+# （_ENGINE_VER を上げると layer/web/audio を含む全キャッシュが飛ぶため、
+#   ベイク系のキャッシュ鍵だけを無効化する。morph/particle は
+#   _MORPH_RENDER_VER 側で無効化する）
+_BAKE_PIXFMT_VER = "1"
+
 _BAKEABLE_EFFECTS = {"scale", "fade", "trim", "morph_to", "rotate_to", "wipe", "color_shift",
                      "chroma_key", "vignette", "pixelize", "glow", "lut", "glitch",
                      "perspective_warp", "lens", "ken_burns", "drop_shadow", "outline",

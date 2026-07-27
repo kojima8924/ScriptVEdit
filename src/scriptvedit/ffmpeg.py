@@ -205,15 +205,23 @@ def _decoder_input_args(source, media_type, fps):
     """
     if media_type == "image":
         return ["-loop", "1", "-r", str(fps), "-i", source]
-    if media_type != "audio" and source.lower().endswith(".webm"):
-        # scriptvedit 自身の生成物（__cache__配下）は VP9+alpha 固定なので
-        # libvpx-vp9 を強制する（ネイティブVP9デコーダはalpha非対応）。
+    if media_type != "audio" and source.lower().endswith((".webm", ".mkv")):
+        # scriptvedit 自身の生成物（__cache__配下）は拡張子でコーデックが確定する
+        # （_LAYER_CACHE_QUALITY 参照）ため、probe せず拡張子で分岐する。
+        #   .webm … VP9+alpha 固定 → libvpx-vp9 を強制（ネイティブVP9デコーダは
+        #           alpha非対応で、透過が黒背景化して下層レイヤーを覆う）
+        #   .mkv  … FFV1(bgra) 等。ネイティブデコーダがalphaを正しく復号する
+        #           ので強制は不要（むしろ libvpx-vp9 を指定すると復号できない）
+        from scriptvedit.cache import _is_cache_artifact_path
+        if _is_cache_artifact_path(source):
+            if source.lower().endswith(".webm"):
+                return ["-c:v", "libvpx-vp9", "-i", source]
+            return ["-i", source]
+        if source.lower().endswith(".mkv"):
+            return ["-i", source]  # 外部mkvは従来どおりネイティブデコーダ任せ
         # 外部の WebM は VP8/AV1 もあり得るため、拡張子だけで強制すると
         # "Bitstream not supported" で落ちる（監査 issue #15）。
         # codec_name を probe して libvpx 系が必要な場合のみ指定する
-        from scriptvedit.cache import _is_cache_artifact_path
-        if _is_cache_artifact_path(source):
-            return ["-c:v", "libvpx-vp9", "-i", source]
         codec = _probe_video_codec(source)
         if codec == "vp9":
             return ["-c:v", "libvpx-vp9", "-i", source]  # alpha保持のため

@@ -54,6 +54,7 @@ class Project:
         self._extra_layer_deps = {}  # layer filename → [追加依存パス]（morph_toターゲット等）
         self._layer_meta_cache = {}  # anchors.jsonパス → パース済みメタ（二重読み防止）
         self._loudnorm_target = None  # normalize_audio() 設定時のLUFS目標
+        self._loudnorm_options = None  # TP/LRA/limiter/sample_rate の実用出力設定
         self._markers = []  # [(time, label)] チャプターマーカー
         self._param_overrides = None  # p.param() 用の遅延パース済み上書き値
         self._render_window = None  # 部分レンダの (start, end)
@@ -62,9 +63,11 @@ class Project:
         self._encoder_args = list(_ENCODER_MAP["libx264"]["args"])       # []
         self._encoder_draft_args = list(_ENCODER_MAP["libx264"]["draft"])
         self._parallel = None       # キャッシュ並列生成のワーカ数（None=自動）
+        self.draft_web_fps = 8      # draft時のWeb screenshot上限（None=本番同等）
         self._draft = False         # ドラフトレンダ中フラグ
         self._render_quality = "final"
         self._thumbnail_at = None   # thumbnail()実行中のみ非None
+        self._storyboard_frame_indices = None  # storyboard一括抽出中のframe番号
         Project._current = self
 
     def configure(self, **kwargs):
@@ -92,6 +95,13 @@ class Project:
                     or not _math.isfinite(v) or v <= 0):
                 raise ValueError(
                     f"configure: fps は正の有限数で指定してください: {v!r}")
+        if "draft_web_fps" in kwargs and kwargs["draft_web_fps"] is not None:
+            v = kwargs["draft_web_fps"]
+            if (isinstance(v, bool) or not isinstance(v, (int, float))
+                    or not _math.isfinite(v) or v <= 0):
+                raise ValueError(
+                    "configure: draft_web_fps は正の有限数またはNoneで"
+                    f"指定してください: {v!r}")
         # duration: None（自動）または正の有限数
         if "duration" in kwargs and kwargs["duration"] is not None:
             v = kwargs["duration"]
@@ -148,11 +158,43 @@ class Project:
         self._encoder_args = list(info["args"])
         self._encoder_draft_args = list(info["draft"])
 
-    def normalize_audio(self, target=-14):
-        """最終音声にloudnorm(EBU R128)を適用しラウドネスを正規化する。
-        target: 目標ラウドネス(LUFS)。既定 -14（配信向け）。"""
+    def normalize_audio(self, target=-14, *, true_peak=-1.5, lra=11,
+                        limiter=True, sample_rate=48000):
+        """最終音声を EBU R128 準拠で正規化し、出力ピークを保護する。
+
+        target:      目標ラウドネス (LUFS)。既定 -14。
+        true_peak:   最終lossy音声の目標上限 (dBTP)。エンコード時の
+                     再上昇に備え、内部処理は0.5dB低く設定する。
+        lra:         目標ラウドネスレンジ (LU)。
+        limiter:     True なら loudnorm 後に look-ahead limiter を適用。
+        sample_rate: 最終音声のサンプルレート。None で自動。
+
+        従来の ``normalize_audio(-14)`` はそのまま使える。
+        """
+        # 従来契約（-70〜0 LUFS）を維持する。実用値は通常-24〜-9付近だが、
+        # 互換性のためAPI側で狭めない。
         _require_number("normalize_audio", "target", target, -70, 0)
+        _require_number("normalize_audio", "true_peak", true_peak, -9, 0)
+        _require_number("normalize_audio", "lra", lra, 1, 50)
+        if not isinstance(limiter, bool):
+            raise ValueError(
+                f"normalize_audio: limiter は bool で指定してください: {limiter!r}")
+        if sample_rate is not None:
+            if isinstance(sample_rate, bool) or not isinstance(sample_rate, int):
+                raise ValueError(
+                    "normalize_audio: sample_rate は整数または None で"
+                    f"指定してください: {sample_rate!r}")
+            if not 8000 <= sample_rate <= 384000:
+                raise ValueError(
+                    "normalize_audio: sample_rate は 8000〜384000 の範囲で"
+                    f"指定してください: {sample_rate}")
         self._loudnorm_target = target
+        self._loudnorm_options = {
+            "true_peak": true_peak,
+            "lra": lra,
+            "limiter": limiter,
+            "sample_rate": sample_rate,
+        }
 
     # --- テンプレート変数 ---
 
@@ -510,6 +552,7 @@ class Project:
                 raise ValueError(f"ffprobe exit code {result.returncode}")
             data = json.loads(result.stdout)
             streams = data.get("streams", [])
+            has_video = any(s.get("codec_type") == "video" for s in streams)
             has_audio = any(s.get("codec_type") == "audio" for s in streams)
             duration_str = data.get("format", {}).get("duration")
             duration = float(duration_str) if duration_str else None
@@ -538,7 +581,8 @@ class Project:
                     video_duration = _stream_dur(s)
                 elif ct == "audio" and audio_duration is None:
                     audio_duration = _stream_dur(s)
-            info = {"has_audio": has_audio, "duration": duration,
+            info = {"has_video": has_video, "has_audio": has_audio,
+                    "duration": duration,
                     "sample_rate": sample_rate,
                     "video_duration": video_duration,
                     "audio_duration": audio_duration}
@@ -557,16 +601,29 @@ class Project:
             self._probe_cache[cache_key] = None
             return None
 
-    def layer(self, filename, priority=0, cache="off"):
+    def layer(self, filename, priority=0, cache="off", cache_quality=None):
         """レイヤーファイルを登録（実行はrender時に遅延）
 
         filename は cwd 相対でも、呼び出し元スクリプト/実行中レイヤーからの
         相対でも解決される（どのディレクトリから実行しても動く）。
+
+        cache_quality: レイヤーキャッシュ中間ファイルの品質。cache != "off" のときのみ意味を持つ。
+            "draft"    … プレビュー用。VP9 yuva420p crf30（最小・最速）
+            "balanced" … 既定。VP9 yuva420p crf15（量子化劣化をほぼ除去）
+            "lossless" … FFV1 bgra（完全可逆。クロマ間引きも色変換も無い）
+            None を渡すと既定（"balanced"）。品質はキャッシュ鍵に含まれるため、
+            変更すると別の中間ファイルとして再生成される。
         """
         if cache not in ("off", "auto", "use", "make"):
             raise ValueError(f"cache引数は 'off','auto','use','make' のいずれか: {cache!r}")
+        cache_quality = _resolve_layer_cache_quality(cache_quality)
         filename = resolve_layer_path(filename, self)
-        self._layer_specs.append({"filename": filename, "priority": priority, "cache": cache})
+        self._layer_specs.append({"filename": filename, "priority": priority,
+                                  "cache": cache, "cache_quality": cache_quality})
+
+    def _layer_cache_paths_for(self, spec):
+        """spec の品質を反映したレイヤーキャッシュパスを返す（呼び出し側の取り違え防止）"""
+        return _layer_cache_paths(spec["filename"], self, spec.get("cache_quality"))
 
     def _exec_layer(self, filename, priority):
         """レイヤーファイルを実行してobjectsに登録"""
@@ -791,8 +848,13 @@ class Project:
                     # changed で再収束させる（anchor と同じ固定点反復に乗せる）
                     after = getattr(item, '_start_after', None)
                     fixed = getattr(item, '_fixed_start', None)
+                    relative_owner = getattr(item, '_timeline_owner', None)
                     new_start = current_time
-                    if after is not None:
+                    if relative_owner is not None:
+                        new_start = (
+                            relative_owner.start_time
+                            + float(getattr(item, '_timeline_offset', 0.0)))
+                    elif after is not None:
                         if after.duration is not None:
                             new_start = after.start_time + after.duration
                         else:
@@ -869,20 +931,29 @@ class Project:
                         f"定義済みアンカー: {defined}")
 
     def render(self, output_path, *, dry_run=False, timeout=None,
-               start=None, end=None, draft=False, alpha=False, strict=False):
+               start=None, end=None, draft=False, alpha=False, strict=False,
+               parallel=None):
         # _ACTIVE_QUALITY を try/finally で復元（draft レンダ後に "draft" が
         # 残留して別レンダの鍵に混入するのを防ぐ。dry_run早期returnや例外時も復元）
         _prev_active_quality = _ACTIVE_QUALITY[0]
         try:
             return self._render_impl(
                 output_path, dry_run=dry_run, timeout=timeout,
-                start=start, end=end, draft=draft, alpha=alpha, strict=strict)
+                start=start, end=end, draft=draft, alpha=alpha, strict=strict,
+                parallel=parallel)
         finally:
             _ACTIVE_QUALITY[0] = _prev_active_quality
 
     def _render_impl(self, output_path, *, dry_run=False, timeout=None,
                      start=None, end=None, draft=False, alpha=False,
-                     strict=False):
+                     strict=False, parallel=None):
+        # 時間分割並列レンダのチャンク数。configure(parallel=N)は「キャッシュ
+        # 並列生成のワーカ数」で別物（キャッシュ側の意味は従来どおり維持）
+        if parallel is not None and (
+                isinstance(parallel, bool) or not isinstance(parallel, int)
+                or parallel < 1):
+            raise ValueError(
+                f"render: parallel は1以上の整数で指定してください: {parallel!r}")
         output_path = os.fsdecode(output_path)
         self._reset_runtime_state()
         self._dry_run = dry_run
@@ -968,7 +1039,11 @@ class Project:
                 raise RuntimeError(
                     f"render(strict=True): audit の warning が {len(warns)} 件"
                     f"あります:\n" + "\n".join(
-                        f"  [{f['code']}] {f['message']}" for f in warns))
+                    f"  [{f['code']}] {f['message']}" for f in warns))
+
+        # 部分レンダ窓と交差しないWeb Objectは入力自体が不要。未生成cacheを
+        # 要求しないよう、plan/render構造検証とauditの後でレンダ対象から外す。
+        self._prune_window_invisible_web_objects()
 
         if dry_run:
             web_cmds = self._collect_web_cmds()
@@ -1018,54 +1093,126 @@ class Project:
         cache_hits = sum(1 for p in planned if os.path.exists(p))
         cache_misses = len(planned) - cache_hits
         self._ensure_checkpoints()
-        cmd = self._build_ffmpeg_cmd(output_path)
-        print(f"実行コマンド:")
-        print(f"  ffmpeg {' '.join(cmd[1:])}")
-        print()
-        fmt = self._resolve_output_format(output_path)
-        if fmt["kind"] == "pngseq":
-            # 連番は単一パスへ原子的に確定できないため従来どおり直接出力する。
-            _run_ffmpeg(cmd, timeout=timeout)
+        n_chunks = self._parallel_chunk_count(parallel, output_path)
+        if n_chunks >= 2:
+            n_chunks = self._render_parallel(output_path, n_chunks, timeout)
         else:
-            # 最終単一出力もキャッシュと同じく、同拡張子の一時パスへ書いてから
-            # 原子的に確定する。timeout/Ctrl+C/ffmpeg失敗では一時ファイルだけを
-            # 消すため、壊れた新規出力も、既存の正常な完成品の消失も防げる。
-            final_path = fmt["output_path"]
-            tmp_path = _unique_tmp_path(final_path)
-            run_cmd = list(cmd)
-            if not run_cmd or os.fsdecode(run_cmd[-1]) != final_path:
-                raise ValueError(
-                    "render: ffmpegコマンドの最終出力パスを一時パスへ置換できません")
-            run_cmd[-1] = tmp_path
-            try:
-                _run_ffmpeg(run_cmd, timeout=timeout)
-                os.replace(tmp_path, final_path)
-            finally:
+            cmd = self._build_ffmpeg_cmd(output_path)
+            print(f"実行コマンド:")
+            print(f"  ffmpeg {' '.join(cmd[1:])}")
+            print()
+            fmt = self._resolve_output_format(output_path)
+            if fmt["kind"] == "pngseq":
+                # 連番は単一パスへ原子的に確定できないため従来どおり直接出力する。
+                _run_ffmpeg(cmd, timeout=timeout)
+            else:
+                # 最終単一出力もキャッシュと同じく、同拡張子の一時パスへ書いてから
+                # 原子的に確定する。timeout/Ctrl+C/ffmpeg失敗では一時ファイルだけを
+                # 消すため、壊れた新規出力も、既存の正常な完成品の消失も防げる。
+                final_path = fmt["output_path"]
+                tmp_path = _unique_tmp_path(final_path)
+                run_cmd = list(cmd)
+                if not run_cmd or os.fsdecode(run_cmd[-1]) != final_path:
+                    raise ValueError(
+                        "render: ffmpegコマンドの最終出力パスを一時パスへ置換できません")
+                run_cmd[-1] = tmp_path
                 try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+                    _run_ffmpeg(run_cmd, timeout=timeout)
+                    os.replace(tmp_path, final_path)
+                finally:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
         self._generate_pending_caches()
         elapsed = _time.perf_counter() - _t0
         generated = _GEN_COUNTER[0]
         print(f"\n完了: {output_path}")
         mode = "ドラフト" if draft else "本番"
+        if n_chunks >= 2:
+            mode += f"・並列{n_chunks}"
         print(f"[統計] {mode} / 総時間 {elapsed:.2f}s / "
               f"キャッシュ ヒット{cache_hits} ミス{cache_misses} / "
               f"生成した中間ファイル {generated}件")
 
-    def thumbnail(self, at, out, *, timeout=600):
+    def thumbnail(self, at, out, *, timeout=600, source=None):
         """指定時刻 at(秒) のフレームを1枚のPNGとして書き出す。
 
         render() と同じプラン解決・チェックポイント生成を通し、
         フィルタグラフの t 基準を保ったまま -ss + -frames:v 1 で抜き出す。
+        source に既レンダ動画を指定すると、Projectグラフを再構築せず入力seekで
+        高速に抽出する。
         """
         at = float(at)
         if at < 0:
             raise ValueError(f"thumbnail: at は0以上が必要です: {at}")
+        if source is not None:
+            source, total = self._review_source(source, "thumbnail")
+            if at >= total:
+                raise ValueError(
+                    f"thumbnail: at({at}) は素材尺({total})未満が必要です")
+            self._extract_source_frame(source, at, out, timeout=timeout)
+            print(f"完了: {out}")
+            return out
         self._prepare_thumbnail_graph()
+        if self.duration is not None and at >= self.duration:
+            raise ValueError(
+                f"thumbnail: at({at}) は総尺({self.duration})未満が必要です")
         self._extract_frame(at, out, timeout=timeout)
         print(f"完了: {out}")
+        return out
+
+    def _review_source(self, source, func):
+        """thumbnail/storyboardの既レンダ動画を検証し、(path, duration)を返す。"""
+        path = os.path.abspath(os.fsdecode(source))
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"{func}: source が見つかりません: {source}")
+        info = self._probe_media(path)
+        if not info:
+            raise ValueError(f"{func}: source のメディア情報を取得できません: {source}")
+        if not info.get("has_video"):
+            raise ValueError(
+                f"{func}: source に映像ストリームがありません: {source}")
+
+        def _valid_duration(value):
+            return (not isinstance(value, bool)
+                    and isinstance(value, (int, float))
+                    and _math.isfinite(value) and value > 0)
+
+        # MP4等はstream尺を持つので映像尺を優先する。
+        # libvpx-vp9 WebM等のstream durationを持たないため、
+        # 映像ストリームの存在を確認した上でformat尺へフォールバックする。
+        video_total = info.get("video_duration")
+        total = (video_total if _valid_duration(video_total)
+                 else info.get("duration"))
+        if not _valid_duration(total):
+            raise ValueError(
+                f"{func}: source の映像尺を取得できません: {source}")
+        return path, float(total)
+
+    def _extract_source_frame(self, source, at, out, *, timeout=600):
+        """既レンダ動画を入力側seekし、Projectグラフなしで1フレーム抽出する。"""
+        out = os.path.abspath(os.fsdecode(out))
+        directory = os.path.dirname(out)
+        os.makedirs(directory, exist_ok=True)
+        tmp_out = _unique_tmp_path(out)
+        cmd = [
+            "ffmpeg", "-y", "-ss", str(float(at)), "-i", source,
+            "-map", "0:v:0", "-frames:v", "1", "-update", "1",
+            "-pix_fmt", "rgba", "-an", tmp_out,
+        ]
+        print(f"完成動画からサムネイル抽出 @{at}s: {out}")
+        try:
+            _run_ffmpeg(cmd, timeout=timeout)
+            if not os.path.isfile(tmp_out) or os.path.getsize(tmp_out) <= 0:
+                raise RuntimeError(
+                    f"フレーム抽出結果が生成されませんでした: {out}")
+            os.replace(tmp_out, out)
+        finally:
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
         return out
 
     def _prepare_thumbnail_graph(self):
@@ -1115,14 +1262,15 @@ class Project:
             self._thumbnail_at = None
         return out
 
-    def storyboard(self, out_path, *, cols=4, interval=None):
+    def storyboard(self, out_path, *, cols=4, interval=None, source=None,
+                   timeout=600):
         """タイムラインの絵コンテ（サムネイル格子画像）を1枚のPNGとして生成する。
 
         interval秒ごと（省略時は 総尺/12）に thumbnail() と同じ抽出経路
         （plan解決+checkpoint確保+ffmpeg単フレーム抽出）でサムネイルを取り出し、
         PILでcols列のグリッドに結合する（各コマ左上に時刻ラベルを焼き込む）。
-        事前にrender()した最終動画は不要（このメソッド単体で完結する実装方式。
-        thumbnail()を都度呼ぶためコマ数ぶんffmpegが実行される）。
+        事前renderなしの場合も、Projectグラフの準備とFFmpeg実行は各1回だけ。
+        source に既レンダ動画を指定すれば入力seekで軽量に抽出する。
 
         戻り値: 書き出したパス(out_path)。
         """
@@ -1145,11 +1293,13 @@ class Project:
             f"_frames_{os.getpid()}_{_uuid.uuid4().hex[:8]}")
         os.makedirs(tmp_dir, exist_ok=True)
         try:
-            # プラン解決・レイヤーexec・checkpoint確保は一度だけ実施し、
-            # 各コマは確定済みグラフに対する -ss 単フレーム抽出だけをループする
-            # （thumbnail() を毎コマ呼ぶと全パイプラインがコマ数ぶん再実行される）。
-            self._prepare_thumbnail_graph()
-            total = self.duration
+            if source is None:
+                # プラン解決・レイヤーexec・checkpoint確保は一度だけ実施する。
+                self._prepare_thumbnail_graph()
+                total = self.duration
+                review_source = None
+            else:
+                review_source, total = self._review_source(source, "storyboard")
             if not total or total <= 0:
                 raise RuntimeError("storyboard: タイムラインの総尺を確定できませんでした")
             step = interval if interval is not None else max(total / 12.0, 0.01)
@@ -1161,12 +1311,33 @@ class Project:
                 t += step
 
             frame_paths = []
-            for i, tsec in enumerate(times):
-                fp = os.path.join(tmp_dir, f"frame_{i:03d}.png")
-                self._extract_frame(min(tsec, max(0.0, total - 0.001)), fp)
-                frame_paths.append((tsec, fp))
+            if review_source is None:
+                unique_indices, requested_indices = (
+                    self._storyboard_frame_plan(times, total))
+                pattern = os.path.join(tmp_dir, "frame_%03d.png")
+                self._extract_storyboard_frames(
+                    unique_indices, pattern, timeout=timeout)
+                frame_by_index = {
+                    frame_index: os.path.join(tmp_dir, f"frame_{i:03d}.png")
+                    for i, frame_index in enumerate(unique_indices)
+                }
+                frame_paths = [
+                    (tsec, frame_by_index[frame_index])
+                    for tsec, frame_index in zip(times, requested_indices)
+                ]
+            else:
+                for i, tsec in enumerate(times):
+                    fp = os.path.join(tmp_dir, f"frame_{i:03d}.png")
+                    self._extract_source_frame(
+                        review_source,
+                        min(tsec, max(0.0, total - 0.001)),
+                        fp, timeout=timeout)
+                    frame_paths.append((tsec, fp))
 
-            thumbs = [Image.open(fp).convert("RGB") for _, fp in frame_paths]
+            thumbs = []
+            for _, fp in frame_paths:
+                with Image.open(fp) as image:
+                    thumbs.append(image.convert("RGB"))
             tw, th = thumbs[0].size
             n = len(thumbs)
             rows = (n + cols - 1) // cols
@@ -1204,6 +1375,40 @@ class Project:
         finally:
             _shutil.rmtree(tmp_dir, ignore_errors=True)
         return out_path
+
+    def _storyboard_frame_plan(self, times, total):
+        """要求時刻を有効なCFR frame番号へ変換し、重複をまとめる。"""
+        fps = float(self.fps)
+        # タイムラインに存在するframeのnは n/fps < total。
+        # 末尾直前の時刻をceilした結果が範囲外に出ないよう、
+        # 実在する最終frameへクランプする。
+        last_index = _builtins.max(
+            0, int(_math.ceil(float(total) * fps - 1e-9)) - 1)
+        requested = []
+        unique = []
+        seen = set()
+        for tsec in times:
+            frame_index = int(_math.ceil(float(tsec) * fps - 1e-9))
+            frame_index = _builtins.min(
+                _builtins.max(0, frame_index), last_index)
+            requested.append(frame_index)
+            if frame_index not in seen:
+                seen.add(frame_index)
+                unique.append(frame_index)
+        return unique, requested
+
+    def _extract_storyboard_frames(self, frame_indices, pattern, *, timeout=600):
+        """確定済みProjectグラフから複数frameを1回のFFmpegで抽出する。"""
+        if not frame_indices:
+            raise ValueError("storyboard: 抽出frameが空です")
+        self._storyboard_frame_indices = tuple(int(i) for i in frame_indices)
+        try:
+            cmd = self._build_ffmpeg_cmd(pattern)
+            print(f"絵コンテ一括抽出: {len(frame_indices)}コマ")
+            print(f"  ffmpeg {' '.join(cmd[1:])}")
+            _run_ffmpeg(cmd, timeout=timeout)
+        finally:
+            self._storyboard_frame_indices = None
 
     def inspect(self, out_html=None, *, title=None):
         """scriptvedit.viz による検査ビュー。
@@ -1304,7 +1509,7 @@ class Project:
         """cache='use' のファイル存在チェック"""
         for spec in self._layer_specs:
             if spec["cache"] == "use":
-                webm_path, json_path = _layer_cache_paths(spec["filename"], self)
+                webm_path, json_path = self._layer_cache_paths_for(spec)
                 if not os.path.exists(webm_path):
                     raise FileNotFoundError(
                         f"キャッシュファイルが見つかりません: {webm_path}\n"
@@ -1358,7 +1563,7 @@ class Project:
         比較は「現在の依存集合とメタの完全一致」（キー集合の増減・差し替えも検出。
         監査 issue #16 P0）。
         """
-        _, json_path = _layer_cache_paths(spec["filename"], self)
+        _, json_path = self._layer_cache_paths_for(spec)
         if not os.path.exists(json_path):
             return False  # 成果物と完了メタの整合を必須化（メタ欠損=不完全）
         try:
@@ -1392,14 +1597,14 @@ class Project:
                     f"cache='make' で再生成してください（cache='use' 指定のため続行します）。")
             return True
         if cache == "auto":
-            webm_path, _ = _layer_cache_paths(spec["filename"], self)
+            webm_path, _ = self._layer_cache_paths_for(spec)
             # 素材更新済みの古いキャッシュは使わず再実行
             return os.path.exists(webm_path) and self._layer_cache_is_fresh(spec)
         return False  # off, make
 
     def _load_cached_layer(self, spec):
         """キャッシュからObject生成 + anchors.jsonマージ"""
-        webm_path, json_path = _layer_cache_paths(spec["filename"], self)
+        webm_path, json_path = self._layer_cache_paths_for(spec)
         start_idx = len(self.objects)
         # キャッシュwebmをObjectとして生成
         cached_obj = Object.__new__(Object)
@@ -1522,7 +1727,7 @@ class Project:
         for i, spec in enumerate(self._layer_specs):
             # "make" は常に生成（"auto" はキャッシュ有無に関わらず生成コマンドを持たない）
             if spec["cache"] == "make":
-                webm_path, _ = _layer_cache_paths(spec["filename"], self)
+                webm_path, _ = self._layer_cache_paths_for(spec)
                 cmd = self._build_layer_cache_cmd(i, webm_path)
                 cache_cmds[webm_path] = cmd
         return cache_cmds
@@ -1567,18 +1772,36 @@ class Project:
 
         cmd.extend([
             "-c:v", "ffv1", "-level", "3",
-            "-pix_fmt", "yuva444p",
+            # 色変換を挟まない中間形式（理由と実測値は state.py の _BAKE_PIX_FMT）
+            "-pix_fmt", _BAKE_PIX_FMT,
             "-t", str(dur), cache_path,
         ])
         return cmd
 
     def _build_morph_webm_cmd(self, frame_pattern, cache_path, duration, fps, quality="final"):
-        """PNG連番 → alpha映像 のffmpegコマンドを構築"""
+        """PNG連番 → alpha映像 のffmpegコマンドを構築
+
+        末尾に1フレーム複製して出力する（tpad=stop_mode=clone）。
+
+        理由: overlay の enable 窓は閉区間 between(t, start, start+dur) で、
+        覆うフレーム数は floor(fps*dur)+1。一方このクリップは
+        _morph_frame_count = ceil(fps*dur) フレームしか無いため、
+        fps*dur が整数になる通常ケース（time(1.0) 等）でちょうど1フレーム
+        足りず、その1枚だけ第2入力がEOF → eof_action=pass でベースの
+        背景色（黒）が素通しして「モーフ末尾の黒落ち」になっていた。
+        複製フレームは到達先画像そのものなので、伸ばしても見た目は変わらない。
+        窓の外に出る余剰フレームは enable で表示されない。
+        """
+        n_frames = _morph_frame_count(fps, duration)
         return ["ffmpeg", "-y", "-framerate", str(fps),
                 "-i", frame_pattern,
+                "-vf", "tpad=stop_mode=clone:stop=1",
                 "-c:v", "ffv1", "-level", "3",
-                "-pix_fmt", "yuva444p",
-                "-t", str(duration), cache_path]
+                # morphのPNG連番(RGBA)をそのまま格納する。yuva444pだとここで
+                # RGBA→YUV変換が入り、PILの描画結果と往復一致しなくなる
+                # （理由と実測値は state.py の _BAKE_PIX_FMT）
+                "-pix_fmt", _BAKE_PIX_FMT,
+                "-frames:v", str(n_frames + 1), cache_path]
 
     @staticmethod
     def _require_morph_duration(bakeable_ops, dur, source):
@@ -2094,6 +2317,8 @@ class Project:
         cmds = {}
         for obj in self.objects:
             if isinstance(obj, Object) and obj.media_type == "web":
+                if not obj._web_capture_spec(self)["visible"]:
+                    continue
                 webm_path = _web_cache_path(obj, self)
                 cmds[webm_path] = obj._build_web_cmd(self, webm_path)
         return cmds
@@ -2121,6 +2346,8 @@ class Project:
         for obj in self.objects:
             if not isinstance(obj, Object) or obj.media_type != "web":
                 continue
+            if not obj._web_capture_spec(self)["visible"]:
+                continue
             webm_path = _web_cache_path(obj, self)
 
             if not os.path.exists(webm_path):
@@ -2146,6 +2373,28 @@ class Project:
 
             obj.source = webm_path
             obj.media_type = "video"
+
+    def _prune_window_invisible_web_objects(self):
+        """部分レンダ窓の外にあるWeb Objectを今回の入力から除外する。"""
+        if self._render_window is None:
+            return
+        keep = [
+            not (isinstance(obj, Object) and obj.media_type == "web"
+                 and not obj._web_capture_spec(self)["visible"])
+            for obj in self.objects
+        ]
+        # _layers はobjectsのslice indexを保持する。objectsだけを詰めると
+        # 後続layer cacheが隣レイヤーを混入/欠落するため、旧indexまでの
+        # keep件数で全境界を同時に写し替える。
+        kept_before = [0]
+        for selected in keep:
+            kept_before.append(kept_before[-1] + int(selected))
+        self.objects = [obj for obj, selected in zip(self.objects, keep)
+                        if selected]
+        self._layers = [
+            (kept_before[start_idx], kept_before[end_idx], priority)
+            for start_idx, end_idx, priority in self._layers
+        ]
 
     def _parallel_workers(self):
         """キャッシュ並列生成のワーカ数を決定（configure(parallel=N)優先、既定は控えめ）"""
@@ -2183,11 +2432,13 @@ class Project:
                 f"({self._layer_specs[i]['filename']}): {e}") from e
 
     def _build_layer_cache_cmd(self, spec_index, webm_path):
-        """レイヤーキャッシュ用ffmpegコマンド（透明webm VP9 alpha）
+        """レイヤーキャッシュ用ffmpegコマンド（透過を保つ中間ファイル）
 
+        エンコード設定は spec の cache_quality で決まる（_LAYER_CACHE_QUALITY）。
         webm_path: 出力先パス。呼び出し側で計算して渡す
         （_layer_cache_pathsはFFP依存のため、二重計算するとレイヤーファイルの
         mtime変化等で構築時と実行時のパスが食い違うおそれがある）。
+        拡張子は品質ごとに異なる（draft/balanced=.webm, lossless=.mkv）。
         """
         spec = self._layer_specs[spec_index]
         objects, anchors = self._get_layer_data(spec_index)
@@ -2241,21 +2492,15 @@ class Project:
             cmd.extend(["-filter_complex", ";".join(filter_parts)])
             cmd.extend(["-map", current_base])
 
-        cmd.extend([
-            "-c:v", "libvpx-vp9",
-            "-pix_fmt", "yuva420p",
-            "-b:v", "0",
-            "-crf", "30",
-            "-auto-alt-ref", "0",
-            "-t", str(dur),
-            webm_path,
-        ])
+        # 品質段階に応じたエンコード引数（draft/balanced=VP9 alpha, lossless=FFV1）
+        cmd.extend(_layer_cache_encode_args(spec.get("cache_quality")))
+        cmd.extend(["-t", str(dur), webm_path])
         return cmd
 
     def _render_layer_to_cache(self, spec_index):
         """レイヤーキャッシュ生成実行"""
         spec = self._layer_specs[spec_index]
-        webm_path, json_path = _layer_cache_paths(spec["filename"], self)
+        webm_path, json_path = self._layer_cache_paths_for(spec)
         os.makedirs(os.path.dirname(webm_path), exist_ok=True)
 
         cmd = self._build_layer_cache_cmd(spec_index, webm_path)
@@ -2347,6 +2592,280 @@ class Project:
                 return length
         return fallback
 
+    # --- 時間分割並列レンダ（render(parallel=N)） ---
+    #
+    # 原理: 最終レンダのフィルタ式は全て絶対タイムライン時刻 t 基準
+    # （tpad/enable='between(t,..)'/u=clip((t-start)/dur,..)/drawtext）なので、
+    # チャンク側で「背景のPTSを+t0し、全フィルタ評価後に-t0で戻す」だけで
+    # 各チャンクのフレームは全編レンダと同一になる（フィルタ文字列も同一）。
+    # 各オブジェクトはtpad整列直後に trim=start=t0-margin で頭を破棄し、
+    # チャンク外フレームが重いフィルタへ流れないようにする（＝ここが高速化の本体）。
+    # 音声は loudnorm/duck_under が全尺依存のため分割せず、全編1本を並列レンダして
+    # concat(-c copy)結果へmuxする。チャプター(FFMETADATA)もmux時に付与する。
+
+    def _parallel_chunk_count(self, parallel, output_path):
+        """時間分割並列レンダの実チャンク数を決定する（適用不可なら1=従来経路）。
+
+        フォールバック条件は例外にせず通知して従来レンダを行う
+        （parallelは高速化ヒントであり、結果の意味を変えないため）。
+        """
+        if parallel is None or parallel <= 1:
+            return 1
+        fmt = self._resolve_output_format(output_path)
+        if fmt["kind"] != "h264" or fmt["alpha"]:
+            print(f"parallel={parallel}: この出力形式({fmt['kind']}"
+                  f"{'/alpha' if fmt['alpha'] else ''})は時間分割並列に未対応のため"
+                  f"従来レンダで実行します")
+            return 1
+        if self._render_window is not None:
+            print(f"parallel={parallel}: start/end 部分レンダとは併用できないため"
+                  f"従来レンダで実行します")
+            return 1
+        n_total, bounds = self._parallel_chunk_bounds(
+            self.duration, self.fps, parallel)
+        if len(bounds) - 1 <= 1:
+            print(f"parallel={parallel}: 総フレーム数({n_total})が少なく分割の"
+                  f"意味がないため従来レンダで実行します")
+            return 1
+        return len(bounds) - 1
+
+    @staticmethod
+    def _parallel_chunk_bounds(duration, fps, n):
+        """総尺をフレーム境界でn分割する。戻り値: (総フレーム数, 境界フレーム番号リスト)
+
+        境界は k/fps に正確に一致させる（チャンク開始時刻がフレーム格子に
+        載っていないと、concat結合時にフレームの重複/欠落が起きるため）。
+        総フレーム数は「pts < duration のフレーム数」= ceil(duration*fps)
+        （浮動小数の丸め誤差はepsで吸収）。nが総フレーム数を超える場合は
+        縮退させ、全チャンクが1フレーム以上になることを保証する。
+        """
+        n_total = _builtins.max(1, int(_math.ceil(duration * fps - 1e-6)))
+        n_eff = _builtins.max(1, _builtins.min(int(n), n_total))
+        # round(i*n_total/n_eff): 刻み幅>=1 なので単調増加が保証される
+        return n_total, [_builtins.round(i * n_total / n_eff)
+                         for i in range(n_eff + 1)]
+
+    def _render_parallel(self, output_path, n, timeout):
+        """映像をNチャンクへ時間分割して並列レンダし、concatで結合する。
+
+        戻り値: 実際に使ったチャンク数（統計行の表示用）。
+        出力の確定は従来経路と同じく一時パス→os.replaceの原子的作法に従う。
+        """
+        import tempfile
+        fmt = self._resolve_output_format(output_path)
+        final_path = fmt["output_path"]
+        fps = self.fps
+        n_total, bounds = self._parallel_chunk_bounds(self.duration, fps, n)
+        n_eff = len(bounds) - 1
+        renderable = [o for o in self.objects if isinstance(o, Object)]
+        use_audio = any(o.has_audio for o in renderable)
+        # x264スレッドの過剰予約を防ぐ: 全チャンク合計で概ねCPU数に収める
+        # （フィルタ評価は各プロセスでほぼ単一スレッドのため、そちらが並列化の本体）
+        cpu = os.cpu_count() or 4
+        threads = _builtins.max(1, (cpu + n_eff - 1) // n_eff)
+        work_dir = tempfile.mkdtemp(prefix="svpar_")
+        try:
+            chunk_paths = []
+            chunk_cmds = []
+            for i in range(n_eff):
+                cpath = os.path.join(work_dir, f"chunk_{i:03d}.mp4")
+                chunk_paths.append(cpath)
+                chunk_cmds.append(self._build_chunk_ffmpeg_cmd(
+                    cpath, bounds[i], bounds[i + 1], threads))
+            audio_path = None
+            audio_cmd = None
+            if use_audio:
+                audio_path = os.path.join(work_dir, "audio.m4a")
+                audio_cmd = self._build_audio_leg_cmd(audio_path)
+            print(f"時間分割並列レンダ: {n_eff}チャンク "
+                  f"(総{n_total}フレーム / {self.duration}s / "
+                  f"チャンク毎 -threads {threads}"
+                  f"{' / 音声は全編1本を並行レンダ' if use_audio else ''})")
+            for i in range(n_eff):
+                print(f"  chunk{i}: フレーム[{bounds[i]}, {bounds[i + 1]}) "
+                      f"t=[{bounds[i] / fps:.3f}s, {bounds[i + 1] / fps:.3f}s)")
+
+            times = {}
+            errors = []
+
+            def _run_job(name, cmd):
+                jt0 = _time.perf_counter()
+                _run_ffmpeg(cmd, timeout=timeout)
+                times[name] = _time.perf_counter() - jt0
+
+            workers = n_eff + (1 if audio_cmd is not None else 0)
+            with _futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = {}
+                if audio_cmd is not None:
+                    futs[ex.submit(_run_job, "audio", audio_cmd)] = "audio"
+                for i, ccmd in enumerate(chunk_cmds):
+                    futs[ex.submit(_run_job, f"chunk{i}", ccmd)] = f"chunk{i}"
+                for fut in _futures.as_completed(futs):
+                    try:
+                        fut.result()
+                    except Exception as e:  # 全ジョブの完了を待ってから報告
+                        errors.append((futs[fut], e))
+            if errors:
+                name, e = errors[0]
+                raise RuntimeError(
+                    f"並列レンダの {name} が失敗しました: {e}") from e
+            for name in sorted(times):
+                print(f"  {name}: {times[name]:.2f}s")
+
+            # concatリスト（クォート内の ' はエスケープ。区切りは/でOS差を吸収）
+            list_path = os.path.join(work_dir, "concat.txt")
+            with open(list_path, "w", encoding="utf-8") as f:
+                for p in chunk_paths:
+                    quoted = p.replace("\\", "/").replace("'", "'\\''")
+                    f.write(f"file '{quoted}'\n")
+            meta_path = None
+            if self._markers:
+                meta_path = self._chapters_metadata_path()
+                self._write_chapters_metadata(meta_path)
+            mux_cmd = self._build_concat_mux_cmd(
+                list_path, audio_path, meta_path, final_path)
+            tmp_path = _unique_tmp_path(final_path)
+            run_cmd = list(mux_cmd)
+            run_cmd[-1] = tmp_path
+            try:
+                _run_ffmpeg(run_cmd, timeout=timeout)
+                os.replace(tmp_path, final_path)
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        finally:
+            _shutil.rmtree(work_dir, ignore_errors=True)
+        return n_eff
+
+    def _build_chunk_ffmpeg_cmd(self, chunk_path, k0, k1, threads):
+        """フレーム区間[k0, k1)の映像チャンクをレンダするffmpegコマンドを構築する。
+
+        フィルタ式は全編レンダと同一（絶対時刻t基準）。背景PTSの+t0シフトと
+        末尾の-t0戻し、各オブジェクトのhead_trimだけがチャンク固有の差分。
+        チャンクは常に音声なしのh264（音声は_build_audio_leg_cmdで別レンダ）。
+        """
+        fps = self.fps
+        nf = k1 - k0
+        t0 = k0 / fps
+        w_end = k1 / fps
+        dur = nf / fps
+        inputs = ["-f", "lavfi", "-i",
+                  f"color=c={self.background_color}"
+                  f":s={self.width}x{self.height}:d={dur}:r={fps}"]
+
+        renderable = [o for o in self.objects if isinstance(o, Object)]
+        sorted_objects = sorted(renderable, key=lambda o: o.priority)
+        chunk_objs = []
+        for o in sorted_objects:
+            if not o.has_video:
+                continue
+            if o.start_time >= w_end:
+                continue  # チャンク終了後に始まる → 不可視
+            if o.duration is not None and o.start_time + o.duration <= t0:
+                continue  # チャンク開始前に終わる（duration未確定は安全側で残す）
+            chunk_objs.append(o)
+
+        filter_parts = []
+        input_map = {}
+        for i, obj in enumerate(chunk_objs):
+            input_map[id(obj)] = i + 1
+            inputs.extend(_build_input_args(obj, fps))
+
+        current_base = "[0:v]"
+        head_trim = None
+        if k0 > 0:
+            # 背景PTSを絶対時刻へシフト → 全t依存式が全編レンダと同一になる
+            filter_parts.append(f"[0:v]setpts=PTS+{t0!r}/TB[chbase]")
+            current_base = "[chbase]"
+            # 頭破棄はフレーム境界の判定誤差を避けるため2フレームぶん手前から残す
+            # （overlayのframesyncは「主入力pts以下の最新フレーム」を選ぶので、
+            #   余分に残った先行フレームは正しさに影響しない）
+            head_trim = _builtins.max(0.0, t0 - 2.0 / fps)
+        for obj in chunk_objs:
+            input_idx = input_map[id(obj)]
+            dur_o = self._resolve_obj_duration(obj)
+            parts, out_label = _build_video_overlay_parts(
+                obj, input_idx, current_base, dur_o, head_trim=head_trim)
+            filter_parts.extend(parts)
+            current_base = out_label
+        video_map = current_base
+        if k0 > 0:
+            # 出力PTSをチャンク先頭=0へ戻す（concatで連続再生になる）
+            filter_parts.append(f"{video_map}setpts=PTS-{t0!r}/TB[chout]")
+            video_map = "[chout]"
+        if getattr(self, "_draft", False):
+            # ドラフト縮小は従来経路（_build_ffmpeg_cmd）と同一の式
+            filter_parts.append(
+                f"{video_map}scale=trunc(iw/4)*2:trunc(ih/4)*2[chdraft]")
+            video_map = "[chdraft]"
+
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+        cmd.extend(inputs)
+        if filter_parts:
+            cmd.extend(["-filter_complex", ";".join(filter_parts)])
+            vm_inner = video_map[1:-1]
+            if video_map.startswith("[") and vm_inner.endswith(":v") \
+                    and vm_inner[:-2].isdigit():
+                video_map = vm_inner  # 生入力参照はブラケットを外す（従来と同じ作法）
+            cmd.extend(["-map", video_map])
+        else:
+            cmd.extend(["-map", "0:v"])
+        fmt_chunk = {"kind": "h264", "alpha": False, "has_audio": False,
+                     "output_path": chunk_path}
+        cmd.extend(self._encode_args(fmt_chunk, False))
+        cmd.extend(["-threads", str(threads)])
+        # -t に加えて -frames:v で正確なフレーム数を保証（浮動小数の防波堤）
+        cmd.extend(["-t", str(dur), "-frames:v", str(nf), chunk_path])
+        return cmd
+
+    def _build_audio_leg_cmd(self, audio_path):
+        """音声だけを全編1本でレンダするコマンドを構築する（並列レンダ用）。
+
+        loudnorm/duck_under等は全尺依存のためチャンク分割できない。
+        既存の音声チェーン（_build_ffmpeg_cmd）を_audio_only_renderフラグで
+        映像枝なしに切り替えて再利用し、逐次レンダとの乖離を防ぐ。
+        adelay等は絶対時刻基準なので出力音声は逐次レンダと同一になる。
+        """
+        saved_objects = self.objects
+        self._audio_only_render = True
+        try:
+            self.objects = [o for o in saved_objects
+                            if isinstance(o, Object) and o.has_audio]
+            return self._build_ffmpeg_cmd(audio_path)
+        finally:
+            self.objects = saved_objects
+            self._audio_only_render = False
+
+    def _build_concat_mux_cmd(self, list_path, audio_path, meta_path, out_path):
+        """チャンクconcat + 音声mux + チャプター付与の最終コマンドを構築する。
+
+        映像・音声とも再エンコードなし（-c copy）。各チャンクはIDRフレーム
+        始まりのMP4なのでconcat demuxerで無劣化結合できる。
+        """
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-f", "concat", "-safe", "0", "-i", list_path]
+        next_idx = 1
+        a_idx = None
+        m_idx = None
+        if audio_path is not None:
+            cmd.extend(["-i", audio_path])
+            a_idx = next_idx
+            next_idx += 1
+        if meta_path is not None:
+            cmd.extend(["-f", "ffmetadata", "-i", meta_path])
+            m_idx = next_idx
+        cmd.extend(["-map", "0:v"])
+        if a_idx is not None:
+            cmd.extend(["-map", f"{a_idx}:a"])
+        cmd.extend(["-c", "copy"])
+        if m_idx is not None:
+            cmd.extend(["-map_metadata", str(m_idx),
+                        "-map_chapters", str(m_idx)])
+        cmd.append(out_path)
+        return cmd
+
     def _resolve_output_format(self, output_path):
         """出力パスの拡張子・draft/alpha/thumbnail設定から出力形式を決定する。
 
@@ -2357,6 +2876,9 @@ class Project:
           output_path: 実際にffmpegへ渡す出力パス（連番PNGは %05d 化）
         """
         alpha = bool(getattr(self, "_alpha", False))
+        if getattr(self, "_storyboard_frame_indices", None) is not None:
+            return {"kind": "storyboard", "alpha": False, "has_audio": False,
+                    "output_path": output_path}
         if getattr(self, "_thumbnail_at", None) is not None:
             return {"kind": "thumb", "alpha": False, "has_audio": False,
                     "output_path": output_path}
@@ -2387,8 +2909,14 @@ class Project:
         fmt = self._resolve_output_format(output_path)
         output_path = fmt["output_path"]
 
+        # 音声レグ（並列レンダ）: 映像は-mapしないため、全尺キャンバスの
+        # 生成コストを避けてダミーの極小入力に差し替える（入力indexは維持）
+        audio_only = bool(getattr(self, "_audio_only_render", False))
+
         # 背景入力（alpha出力時は透明キャンバス）
-        if fmt["alpha"]:
+        if audio_only:
+            bg_src = f"color=c=black:s=16x16:d=0.1:r={self.fps}"
+        elif fmt["alpha"]:
             bg_src = (f"color=c=black@0.0:s={self.width}x{self.height}"
                       f":d={self.duration}:r={self.fps},format=rgba")
         else:
@@ -2408,7 +2936,8 @@ class Project:
 
         # --- 映像チェーン ---
         current_base = "[0:v]"
-        video_objects = [o for o in sorted_objects if o.has_video]
+        video_objects = [] if audio_only \
+            else [o for o in sorted_objects if o.has_video]
 
         for obj in video_objects:
             input_idx = input_map[id(obj)]
@@ -2489,8 +3018,13 @@ class Project:
                         "other 側の音声が adelete 等で除外されていないか確認してください。")
                 oi = idx_by_id[id(other)]
                 other_ref = audio_labels[oi]
+                # sidechaincompress はサイドチェイン入力の EOF で
+                # メイン(BGM)も終端しうる。検出用枝のみ無音で
+                # 延長し、ナレーション終了後は原音量で継続させる。
                 filter_parts.append(
-                    f"{other_ref}asplit[dmix{ai}][dside{ai}]")
+                    f"{other_ref}asplit[dmix{ai}][dside_src{ai}]")
+                filter_parts.append(
+                    f"[dside_src{ai}]apad[dside{ai}]")
                 audio_labels[oi] = f"[dmix{ai}]"
                 my_ref = audio_labels[ai]
                 p = duck.params
@@ -2515,12 +3049,52 @@ class Project:
                     f"{amix_in}amix=inputs={len(audio_labels)}:normalize=0{audio_out}"
                 )
 
-            # normalize_audio（loudnorm）: 最終音声にラウドネス正規化を適用
+            # normalize_audio: loudnorm → sample rate確定 → peak limiter。
+            # リサンプルは補間により新しいピークを作り得るため、リミッターを
+            # 必ず最終sample rateの後段に置く。
             if self._loudnorm_target is not None and audio_out is not None:
                 ln_in = audio_out if audio_out.startswith("[") else f"[{audio_out}]"
+                opts = self._loudnorm_options or {
+                    "true_peak": -1.5, "lra": 11,
+                    "limiter": False, "sample_rate": None,
+                }
+                if (fmt["kind"] == "webm"
+                        and opts["sample_rate"] not in (None, 48000)):
+                    raise ValueError(
+                        "normalize_audio: WebMのlibopus音声は48kHz固定です。"
+                        "sample_rate=48000 または None を指定してください")
+                aac_sample_rates = {
+                    8000, 11025, 12000, 16000, 22050, 24000,
+                    32000, 44100, 48000, 64000, 88200, 96000,
+                }
+                if (fmt["kind"] == "h264"
+                        and opts["sample_rate"] is not None
+                        and opts["sample_rate"] not in aac_sample_rates):
+                    raise ValueError(
+                        "normalize_audio: AAC出力で未対応のsample_rateです: "
+                        f"{opts['sample_rate']}。対応値: "
+                        + ", ".join(str(v) for v in sorted(aac_sample_rates)))
+                true_peak = opts["true_peak"]
+                # AAC/Opusの量子化でtrue peakがわずかに再上昇するため、
+                # ユーザー指定は最終出力目標とし、loudnorm/limiterには
+                # 0.5dBのcodec headroomを確保する。loudnormの許容下限は-9。
+                processing_peak = _builtins.max(-9.0, float(true_peak) - 0.5)
                 filter_parts.append(
-                    f"{ln_in}loudnorm=I={self._loudnorm_target}:TP=-1.5:LRA=11[aout_ln]")
-                audio_out = "[aout_ln]"
+                    f"{ln_in}loudnorm=I={self._loudnorm_target}"
+                    f":TP={processing_peak}:LRA={opts['lra']}[aout_ln]")
+                normalized = "[aout_ln]"
+                if opts["sample_rate"] is not None:
+                    filter_parts.append(
+                        f"{normalized}aresample={opts['sample_rate']}[aout_sr]")
+                    normalized = "[aout_sr]"
+                if opts["limiter"]:
+                    # alimiter.limit は dB ではなく線形振幅で受け取る。
+                    limit = 10 ** (processing_peak / 20.0)
+                    filter_parts.append(
+                        f"{normalized}alimiter=limit={limit:.9f}"
+                        ":attack=5:release=50:level=0:latency=1[aout_lim]")
+                    normalized = "[aout_lim]"
+                audio_out = normalized
 
         # 出力前の映像後処理（draft縮小・GIFパレット生成）
         video_map = current_base
@@ -2537,13 +3111,20 @@ class Project:
                 f"[gsrc][gpal]paletteuse=dither=bayer:bayer_scale=5"
                 f":diff_mode=rectangle[vgif]")
             video_map = "[vgif]"
+        elif fmt["kind"] == "storyboard":
+            select_expr = "+".join(
+                f"eq(n\\,{index})"
+                for index in self._storyboard_frame_indices)
+            filter_parts.append(f"{video_map}select='{select_expr}'[vstory]")
+            video_map = "[vstory]"
 
         cmd = ["ffmpeg", "-y"]
         cmd.extend(inputs)
 
         # チャプター: FFMETADATAを追加入力にして -map_metadata で埋め込む
+        # （音声レグでは付けない。並列レンダはconcat mux時に付与する）
         meta_idx = None
-        emit_meta = bool(self._markers) and fmt["has_audio"]
+        emit_meta = bool(self._markers) and fmt["has_audio"] and not audio_only
         if emit_meta:
             meta_path = self._chapters_metadata_path()
             if not getattr(self, "_dry_run", False):
@@ -2564,7 +3145,8 @@ class Project:
             if video_map.startswith("[") and vm_inner.endswith(":v") \
                     and vm_inner[:-2].isdigit():
                 video_map = vm_inner
-            cmd.extend(["-map", video_map])
+            if not audio_only:
+                cmd.extend(["-map", video_map])
             if use_audio:
                 cmd.extend(["-map", audio_out])
 
@@ -2572,12 +3154,28 @@ class Project:
             cmd.extend(["-map_metadata", str(meta_idx)])
 
         # --- 出力形式ごとのエンコード指定 ---
-        cmd.extend(self._encode_args(fmt, use_audio))
+        if audio_only:
+            # 音声レグ: 逐次レンダのh264音声設定（aac 160k + 任意-ar）と同一にする
+            cmd.extend(["-vn", "-c:a", "aac", "-b:a", "160k"])
+            opts = self._loudnorm_options \
+                if self._loudnorm_target is not None else None
+            if opts and opts["sample_rate"] is not None:
+                cmd.extend(["-ar", str(opts["sample_rate"])])
+        else:
+            cmd.extend(self._encode_args(fmt, use_audio))
 
         # thumbnail: 単一フレーム抽出（-ss + -frames:v 1、-update で単一画像出力）
         if fmt["kind"] == "thumb":
             cmd.extend(["-ss", str(self._thumbnail_at), "-frames:v", "1",
                         "-update", "1", output_path])
+            return cmd
+
+        if fmt["kind"] == "storyboard":
+            cmd.extend([
+                "-fps_mode", "vfr", "-frames:v",
+                str(len(self._storyboard_frame_indices)),
+                "-start_number", "0", output_path,
+            ])
             return cmd
 
         # 部分レンダ: 出力側 -ss/-t で窓を切り出す（フィルタのt基準は保つ）
@@ -2601,6 +3199,8 @@ class Project:
         args = []
         if kind == "thumb":
             return ["-pix_fmt", "rgba", "-an"]
+        if kind == "storyboard":
+            return ["-c:v", "png", "-pix_fmt", "rgba", "-an"]
         if kind == "gif":
             # パレット適用済みなのでコーデック指定は不要。音声なし。
             return ["-an"]
@@ -2616,7 +3216,7 @@ class Project:
             args = ["-c:v", "libvpx-vp9", "-pix_fmt", pix,
                     "-b:v", "0", "-crf", crf, "-auto-alt-ref", "0"]
             if use_audio:
-                args.extend(["-c:a", "libopus"])
+                args.extend(["-c:a", "libopus", "-b:a", "160k"])
             else:
                 args.append("-an")
             return args
@@ -2633,7 +3233,13 @@ class Project:
             args.extend(self._encoder_args)
         args.extend(["-pix_fmt", "yuv420p"])
         if use_audio:
-            args.extend(["-c:a", "aac"])
+            # FFmpegの低ビットレート既定AACは鋭いSEで数dBのピーク再上昇を
+            # 起こし得る。160kを明示し、normalize_audioのcodec headroomが
+            # 有効に働く品質へ固定する。
+            args.extend(["-c:a", "aac", "-b:a", "160k"])
+            opts = self._loudnorm_options if self._loudnorm_target is not None else None
+            if opts and opts["sample_rate"] is not None:
+                args.extend(["-ar", str(opts["sample_rate"])])
         else:
             args.append("-an")
         return args
@@ -2641,7 +3247,7 @@ class Project:
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
 from scriptvedit.audio import _probe_audio_length
-from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _file_fingerprint, _is_bakeable, _is_pending_cache_path, _layer_cache_paths, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _split_ops, _validate_morph_position, _web_cache_path
+from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _file_fingerprint, _is_bakeable, _is_pending_cache_path, _layer_cache_encode_args, _layer_cache_paths, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _resolve_layer_cache_quality, _split_ops, _validate_morph_position, _web_cache_path
 from scriptvedit.expr import Expr, lt, max, min, step
 from scriptvedit.ffmpeg import _decoder_input_args, _ffmpeg_available_encoders, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.audio import _build_audio_effect_filters, _build_audio_pre_filters
@@ -2649,7 +3255,7 @@ from scriptvedit.filters.video import _build_effect_filters, _build_input_args, 
 from scriptvedit.objects import Object, _web_frames_dir
 from scriptvedit.assets import resolve_layer_path
 from scriptvedit.plugins import _EFFECT_PLUGINS, _autoload_plugins
-from scriptvedit.state import _ACTIVE_QUALITY, _ARTIFACT_DIR, _CACHE_DIR, _CONFIGURE_KEYS, _ENCODER_MAP, _ENGINE_VER, _GEN_COUNTER, _PRESETS, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
+from scriptvedit.state import _ACTIVE_QUALITY, _ARTIFACT_DIR, _BAKE_PIX_FMT, _CACHE_DIR, _CONFIGURE_KEYS, _ENCODER_MAP, _ENGINE_VER, _GEN_COUNTER, _PRESETS, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
 from scriptvedit.timeline import Pause, Scene, _AnchorMarker, _ScenePad
 from scriptvedit.validate import _require_number, _require_time, _validate_ffmpeg_color
 from scriptvedit.web import label

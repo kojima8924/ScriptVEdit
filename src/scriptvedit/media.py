@@ -56,10 +56,15 @@ def _source_signature(path):
 
 
 def _xfade_scale_chain(w, h):
-    """xfade入力の正規化フィルタ（共通サイズ・SAR・alpha付きフォーマット）"""
+    """xfade入力の正規化フィルタ（共通サイズ・SAR・alpha付きフォーマット）
+
+    format が yuva444p でなく _BAKE_PIX_FMT（bgra）なのは、ここを YUV にすると
+    xfade の合成自体が YUV 空間で行われ、RGBA→YUV の行列変換で往復が
+    ビット完全にならないため（理由と実測値は state.py の _BAKE_PIX_FMT 参照）。
+    """
     return (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000,"
-            f"setsar=1,format=yuva444p")
+            f"setsar=1,format={_BAKE_PIX_FMT}")
 
 
 def _finalize_generated_object(cache_path, cmd, origin_sources, total_dur):
@@ -123,7 +128,8 @@ def slideshow(images, each=3.0, transition="fade", t_dur=0.5, size=None):
     sigs = ["slideshow"]
     sigs.extend(_source_signature(img) for img in images)
     sigs.extend([f"each={each}", f"tr={transition}", f"tdur={t_dur}",
-                 f"size={w}x{h}", f"fps={fps}", f"ev={_ENGINE_VER}"])
+                 f"size={w}x{h}", f"fps={fps}", f"ev={_ENGINE_VER}",
+                 f"bpf={_BAKE_PIXFMT_VER}"])
     key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
     cache_path = os.path.join(_ARTIFACT_DIR, "xfade", f"{key}.mkv")
 
@@ -143,7 +149,7 @@ def slideshow(images, each=3.0, transition="fade", t_dur=0.5, size=None):
             f"{cur}[s{i}]xfade=transition={transition}:duration={t_dur}:offset={offset}{out}")
         cur = out
     cmd.extend(["-filter_complex", ";".join(parts), "-map", cur,
-                "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuva444p",
+                "-c:v", "ffv1", "-level", "3", "-pix_fmt", _BAKE_PIX_FMT,
                 "-t", str(total), cache_path])
     return _finalize_generated_object(cache_path, cmd, list(images), total)
 
@@ -202,7 +208,8 @@ def transition(obj_a, obj_b, kind="fade", duration=1.0):
     sigs = ["transition",
             _source_signature(obj_a.source), _source_signature(obj_b.source),
             f"da={dur_a}", f"db={dur_b}", f"kind={kind}", f"dur={duration}",
-            f"size={w}x{h}", f"fps={fps}", f"ev={_ENGINE_VER}"]
+            f"size={w}x{h}", f"fps={fps}", f"ev={_ENGINE_VER}",
+            f"bpf={_BAKE_PIXFMT_VER}"]
     key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
     cache_path = os.path.join(_ARTIFACT_DIR, "xfade", f"{key}.mkv")
 
@@ -222,7 +229,7 @@ def transition(obj_a, obj_b, kind="fade", duration=1.0):
     parts.append(
         f"[t0][t1]xfade=transition={kind}:duration={duration}:offset={offset}[tout]")
     cmd.extend(["-filter_complex", ";".join(parts), "-map", "[tout]",
-                "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuva444p",
+                "-c:v", "ffv1", "-level", "3", "-pix_fmt", _BAKE_PIX_FMT,
                 "-t", str(total), cache_path])
     return _finalize_generated_object(cache_path, cmd, origin_sources, total)
 
@@ -319,7 +326,8 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
     sigs = ["video_sequence"]
     sigs.extend(_source_signature(s) for s in sources)
     sigs.extend([f"tr={transition}", f"tdur={t_dur}", f"size={w}x{h}",
-                 f"fps={fps}", f"audio={all_audio}", f"ev={_ENGINE_VER}"])
+                 f"fps={fps}", f"audio={all_audio}", f"ev={_ENGINE_VER}",
+                 f"bpf={_BAKE_PIXFMT_VER}"])
     key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
     cache_path = os.path.join(_ARTIFACT_DIR, "xfade", f"{key}.mkv")
 
@@ -353,7 +361,7 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
         maps.extend(["-map", acur])
     cmd.extend(["-filter_complex", ";".join(parts)])
     cmd.extend(maps)
-    cmd.extend(["-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuva444p"])
+    cmd.extend(["-c:v", "ffv1", "-level", "3", "-pix_fmt", _BAKE_PIX_FMT])
     if all_audio:
         cmd.extend(["-c:a", "pcm_s16le"])
     cmd.extend(["-t", str(total), cache_path])
@@ -368,5 +376,5 @@ from scriptvedit.cache import _file_fingerprint, _is_cache_artifact_path, _norm_
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache
 from scriptvedit.objects import Object
 from scriptvedit.project import Project
-from scriptvedit.state import _ARTIFACT_DIR, _ENGINE_VER, _detect_media_type, _suggest_hint
+from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIX_FMT, _BAKE_PIXFMT_VER, _ENGINE_VER, _detect_media_type, _suggest_hint
 from scriptvedit.validate import _require_number

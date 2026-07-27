@@ -9,9 +9,9 @@
     "-c:v",
     "libvpx-vp9",
     "-i",
-    "__cache__/artifacts/layer/test14_maku/5a6137c6114c0a63.webm",
+    "__cache__/artifacts/layer/test14_maku/75737667ba25f588.webm",
     "-i",
-    "__cache__/artifacts/checkpoint/ac9b64e5/5234257f3c3911f0.mkv",
+    "__cache__/artifacts/checkpoint/ac9b64e5/e8617f336c4e9a5d.mkv",
     "-filter_complex",
     "[0:v][1:v]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,3.0)'[v1];[2:v]tpad=start_duration=3.0:start_mode=clone[obj2];[v1][obj2]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,3.0/,6.0)'[v2]",
     "-map",
@@ -26,7 +26,7 @@
     "test15.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/checkpoint/ac9b64e5/5234257f3c3911f0.mkv": [
+    "__cache__/artifacts/checkpoint/ac9b64e5/e8617f336c4e9a5d.mkv": [
       "ffmpeg",
       "-y",
       "-loop",
@@ -42,10 +42,10 @@
       "-level",
       "3",
       "-pix_fmt",
-      "yuva444p",
+      "bgra",
       "-t",
       "3",
-      "__cache__/artifacts/checkpoint/ac9b64e5/5234257f3c3911f0.mkv"
+      "__cache__/artifacts/checkpoint/ac9b64e5/e8617f336c4e9a5d.mkv"
     ]
   }
 }

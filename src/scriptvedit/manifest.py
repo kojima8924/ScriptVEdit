@@ -172,6 +172,26 @@ _MANIFEST_PARAM_META = {
                             "desc": "字幕の縁取り太さpx（text() と同じ。読みやすさ向上に有効）"},
     ("narrate", "shadow"): {"type": "any", "default": [0, 0],
                             "desc": "字幕の影オフセット (x, y) px（text() と同じ）"},
+    ("narrate", "subtitle_text"): {"type": "string", "default": None,
+                                     "desc": "読み上げ文とは別の字幕表示文"},
+    ("narrate", "subtitle_formatter"): {"type": "any", "default": None,
+                                          "desc": "字幕文を受けて文字列を返すcallable"},
+    ("narrate", "subtitle_max_chars"): {"type": "int", "default": None,
+                                          "min": 1, "desc": "日本語禁則折り返しの1行文字数"},
+    ("narrate", "subtitle_max_lines"): {"type": "int", "default": None,
+                                          "min": 1, "desc": "字幕の最大行数（超過時はエラー）"},
+    ("narrate", "subtitle_safe_area"): {"type": "any", "default": None,
+                                          "desc": "字幕を収める画面比率マージン"},
+    ("normalize_audio", "true_peak"): {"type": "number", "default": -1.5,
+                                          "min": -9, "max": 0,
+                                          "desc": "最終lossy音声のtrue peak目標(dBTP)。内部で0.5dB余裕を確保"},
+    ("normalize_audio", "lra"): {"type": "number", "default": 11,
+                                    "min": 1, "max": 50, "desc": "目標LRA(LU)"},
+    ("normalize_audio", "limiter"): {"type": "bool", "default": True,
+                                        "desc": "loudnorm後のピークリミッター"},
+    ("normalize_audio", "sample_rate"): {"type": "int", "default": 48000,
+                                            "min": 8000, "max": 384000,
+                                            "desc": "最終音声sample rate。Noneで自動"},
     ("typewriter", "font"): {"type": "string", "desc": "フォントファイルパス（省略時は自動選択）"},
     ("counter", "font"): {"type": "string", "desc": "フォントファイルパス（省略時は自動選択）"},
     # choices（実装の検証コードと同じ集合を参照する）
@@ -238,7 +258,12 @@ _MANIFEST_NOTES = {
     "scale": ["pad サイズ決定のため、u のみに依存する数値評価可能な式であること"],
     "narrate": ['backend="voicevox"（既定候補）は VOICEVOX（別プロセス）の起動が必要',
                 'backend="edge" なら pip install edge-tts で使える（オンライン必須）',
-                "backend=None は自動選択（VOICEVOX 起動中なら voicevox、無ければ edge）"],
+                "backend=None は自動選択（VOICEVOX 起動中なら voicevox、無ければ edge）",
+                "subtitle_textで読み上げと表示文を分離でき、subtitle_max_charsは日本語禁則対応",
+                "subtitle_safe_areaは領域に収まる字幕矩形の位置を画面内へクランプする"],
+    "duck_under": ["sidechainは自動で無音延長され、other終了後もBGMは指定尺まで続く"],
+    "audio_sequence": ["返却Objectのdurationは連結後の実尺へ自動設定される",
+                       "Narrationを渡すと字幕もcrossfade込みで配置され、数値@へ追従する"],
     "voice": ['backend="voicevox"（既定候補）は VOICEVOX（別プロセス）の起動が必要',
               'backend="edge" なら pip install edge-tts で使える（オンライン必須）',
               "speaker の意味はバックエンドごとに違う（数値ID / 音声名）"],
@@ -279,7 +304,8 @@ _MANIFEST_EXAMPLES = {
     "again": "bgm <= again(0.3)",
     "duck_under": "bgm <= duck_under(voice_obj, ratio=8)",
     "sfx": "sfx('効果音.mp3', at=2.5, volume=0.8)",
-    "narrate": "n = narrate('こんにちは', speaker=1)   # n.duration で尺が取れる",
+    "narrate": ("n = narrate('長い読み上げ原稿', speaker=1, subtitle_text='短い字幕', "
+                "subtitle_max_chars=14, subtitle_safe_area=0.05)"),
     "group": "g = group(obj_a, obj_b)\ng <= move(x=lambda u: u)",
     "pip": "video <= pip(x=0.75, y=0.75, scale=0.3, radius=12)",
     "anchor": "obj.time(3, name='intro')\npause.until('intro.end')",
@@ -414,6 +440,15 @@ _MANIFEST_CONSTRAINTS = [
         "text": "render() の timeout は既定値 None（無制限）。制限が必要な場合だけ"
                 "秒数を明示する。単一出力は一時パスから原子的に確定し、明示"
                 "タイムアウトまたはCtrl+Cによる中断時は書きかけを削除する。",
+    },
+    {
+        "id": "web_preview_optimized",
+        "topic": "Web/Canvas",
+        "severity": "info",
+        "applies_to": ["Project.render", "Project.storyboard", "Project.thumbnail"],
+        "text": "draftではWeb screenshotをconfigure(draft_web_fps=8)以下へ落とし、"
+                "部分レンダは交差フレームだけ撮影する。Canvas内部は静的audit対象外なので、"
+                "storyboard()で確認する。完成動画があればsource=を指定すると高速。",
     },
 ]
 
@@ -838,6 +873,9 @@ def _manifest_enums():
         # Project.layer(cache=...) の検証タプル（project.py）と一致させること。
         # 整合は tests/test_issue17_docs.py が実装側の許可値と突き合わせて検証する
         "layer_cache": ["off", "auto", "use", "make"],
+        # Project.layer(cache_quality=...) の許可値（cache.py の
+        # _LAYER_CACHE_QUALITY が正）。中間ファイルの品質/サイズを選ぶ
+        "layer_cache_quality": sorted(_LAYER_CACHE_QUALITY),
         "quality": ["final", "fast"],
         "policy": ["auto", "force", "off"],
         "media_type": ["image", "video", "audio", "web"],
@@ -1179,7 +1217,7 @@ def describe_markdown(manifest=None):
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
 from scriptvedit.effects.composite import _BLEND_MODES, _BLEND_MODE_ALIASES
-from scriptvedit.cache import _respects_fast_hint
+from scriptvedit.cache import _LAYER_CACHE_QUALITY, _respects_fast_hint
 from scriptvedit.expr import Expr
 from scriptvedit.media import _XFADE_TRANSITIONS
 from scriptvedit.objects import Object, group

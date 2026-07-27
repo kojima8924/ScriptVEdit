@@ -439,35 +439,53 @@ def abs(x):
         return _make_func("abs", [x])
     return _builtins.abs(x)
 
-def min(*args):
+def min(*args, **kwargs):
     if any(isinstance(a, Expr) for a in args):
+        if kwargs:
+            raise TypeError(
+                "scriptvedit.min: Expr では key/default を指定できません")
         # ffmpegのmin/maxは厳密に2引数固定 → 3引数以上は左畳み込みでネストする
         exprs = [_to_expr(a) for a in args]
         result = exprs[0]
         for e in exprs[1:]:
             result = _make_func("min", [result, e])
         return result
-    return _builtins.min(*args)
+    # star import後もPython組み込みの完全な呼び出し規約
+    # （iterable/key/default、複数引数/key）を維持する。
+    return _builtins.min(*args, **kwargs)
 
-def max(*args):
+def max(*args, **kwargs):
     if any(isinstance(a, Expr) for a in args):
+        if kwargs:
+            raise TypeError(
+                "scriptvedit.max: Expr では key/default を指定できません")
         # ffmpegのmin/maxは厳密に2引数固定 → 3引数以上は左畳み込みでネストする
         exprs = [_to_expr(a) for a in args]
         result = exprs[0]
         for e in exprs[1:]:
             result = _make_func("max", [result, e])
         return result
-    return _builtins.max(*args)
+    return _builtins.max(*args, **kwargs)
 
-def round(x):
+def round(x, ndigits=None):
     if isinstance(x, Expr):
+        if ndigits is not None:
+            raise TypeError(
+                "scriptvedit.round: Expr では ndigits を指定できません")
         return _make_func("round", [x])
-    return _builtins.round(x)
+    if ndigits is None:
+        return _builtins.round(x)
+    return _builtins.round(x, ndigits)
 
-def pow(x, y):
+def pow(x, y, mod=None):
     if isinstance(x, Expr) or isinstance(y, Expr):
+        if mod is not None:
+            raise TypeError(
+                "scriptvedit.pow: Expr では3引数形式を指定できません")
         return _make_func("pow", [_to_expr(x), _to_expr(y)])
-    return _builtins.pow(x, y)
+    if mod is None:
+        return _builtins.pow(x, y)
+    return _builtins.pow(x, y, mod)
 
 # 定数
 PI = 3.141592653589793

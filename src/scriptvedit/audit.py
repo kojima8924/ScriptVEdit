@@ -13,6 +13,7 @@
   bgm-loop (info)                … loop() 使用（短い曲のループは人間に気付かれやすい）
   bgm-too-short (warning)        … BGM（duck_underを持つ音声）の実尺が表示区間より短い
   no-normalize-audio (info)      … 音声があるのに normalize_audio() 未設定
+  web-content-uninspected (info) … Canvas/DOM内部は静的lint対象外。storyboard確認を促す
 
 severity の使い分け: warning=過去に人間レビューで実際に差し戻された類、
 info=判断が分かれる・意図的な場合もある注意喚起。
@@ -164,6 +165,19 @@ def _audit_audio(project, objects, findings):
             "投稿先の音量基準に合わせるなら p.normalize_audio() を推奨）"))
 
 
+def _audit_web(objects, findings):
+    """Web/Canvas内部を静的audit済みと誤認しないための明示的なinfo。"""
+    web_objects = [obj for obj in objects if getattr(obj, "_web_source", None)]
+    if not web_objects:
+        return
+    findings.append(_finding(
+        "info", "web-content-uninspected",
+        f"Web/Canvas Objectが{len(web_objects)}件あります。Canvas/DOM内部の文字サイズ・"
+        "重なり・safe areaは静的auditの対象外です。"
+        "p.storyboard('board.png')で代表フレームを一括確認するか、"
+        "完成動画がある場合はsource=を指定して高速確認してください"))
+
+
 def audit_project(project):
     """Project を検査して findings のリストを返す（本体実装）。
 
@@ -176,6 +190,7 @@ def audit_project(project):
     _audit_quality_hints(objects, findings)
     _audit_text_readability(project, objects, findings)
     _audit_audio(project, objects, findings)
+    _audit_web(objects, findings)
     return findings
 
 

@@ -39,8 +39,11 @@ def _probe_audio_length(path):
     proj = Project._current
     if proj is not None:
         info = proj._probe_media(path)
-        if info and info.get("duration"):
-            return info["duration"]
+        if info:
+            # 動画コンテナは映像の方が長いことがある。自動設定した
+            # audio_sequence.duration が実際の連結音声より伸びないよう、
+            # 音声ストリーム尺を優先する。
+            return info.get("audio_duration") or info.get("duration")
     return None
 
 
@@ -49,37 +52,88 @@ def _validate_audio_source(func, path):
         raise TypeError(f"{func}: ソースはパス文字列で指定してください: {path!r}")
     if not os.path.exists(path):
         raise FileNotFoundError(f"{func}: 音声ファイルが見つかりません: {path}")
-    if _detect_media_type(path) not in ("audio", "video"):
+    media_type = _detect_media_type(path)
+    if media_type not in ("audio", "video"):
         raise ValueError(f"{func}: 音声(または動画音声)のみ指定できます: {path}")
+    if media_type == "video" and Project._current is not None:
+        info = Project._current._probe_media(path)
+        if info is not None and not info.get("has_audio", False):
+            raise ValueError(
+                f"{func}: 動画に音声ストリームがありません: {path}")
 
 
 def audio_sequence(*objs, crossfade=1.0):
     """複数の音声を acrossfade で連結した1つの音声Objectを生成（キャッシュ生成物）。
-    objs は音声Object または音声パス文字列（2つ以上）。"""
+    objs は音声Object、Narration、または音声パス文字列（2つ以上）。
+    Narrationを渡すと字幕もcrossfade込みの相対時刻へ配置し、返却Objectを
+    数値時刻へ ``@`` した際に字幕も一緒に移動する。"""
     if len(objs) < 2:
         raise ValueError("audio_sequence: 2つ以上の音声を指定してください")
     _require_number("audio_sequence", "crossfade", crossfade, 0.01, None)
     proj = Project._current
     sources = []
+    input_volumes = []
+    linked_subtitles = []
     consumed = []  # 全検証を通過してからまとめて消費する（途中失敗で Project を壊さない）
     for o in objs:
+        narration = o if isinstance(o, Narration) else None
+        if narration is not None:
+            o = narration.audio
         if isinstance(o, Object):
             if o.media_type != "audio":
                 raise ValueError(
                     f"audio_sequence: 音声Objectのみ連結できます: {o.source}")
-            if o.transforms or o.effects or o.audio_effects:
+            if o.transforms or o.effects:
                 raise ValueError(
-                    f"audio_sequence: '{o.source}' に Effect/AudioEffect が適用されています。\n"
+                    f"audio_sequence: '{o.source}' に Effect が適用されています。\n"
                     f"連結時は素のObjectを渡し、効果は連結後の生成Objectに付けてください"
                     f"（例: seq <= again(0.5)）。")
+            input_volume = 1.0
+            if o.audio_effects:
+                # narrate(volume=...) は voice() が音声Objectへ again(Const) を
+                # 付けて表現する。Narrationを直接受け取る公開APIなのに、この標準
+                # オプションまで「加工済み」として拒否しないよう、定数音量だけを
+                # 連結前の各入力へ移植する。それ以外は従来どおり明示拒否する。
+                if narration is None or any(
+                        effect.name != "again" for effect in o.audio_effects):
+                    raise ValueError(
+                        f"audio_sequence: '{o.source}' に AudioEffect が適用されています。\n"
+                        f"Narrationの volume 以外の効果は連結後の生成Objectに付けてください"
+                        f"（例: seq <= again(0.5)）。")
+                for effect in o.audio_effects:
+                    value = getattr(effect.params.get("value"), "value", None)
+                    if (isinstance(value, bool)
+                            or not isinstance(value, (int, float))):
+                        raise ValueError(
+                            "audio_sequence: Narrationの volume は定数値のみ連結できます。"
+                            "動的な音量効果は連結後の生成Objectに付けてください。")
+                    try:
+                        value = float(value)
+                    except (OverflowError, TypeError, ValueError):
+                        value = float("inf")
+                    if not _math.isfinite(value):
+                        raise ValueError(
+                            "audio_sequence: Narrationの volume は有限値で指定してください。")
+                    input_volume *= value
+                    if not _math.isfinite(input_volume):
+                        raise ValueError(
+                            "audio_sequence: Narrationの volume の積が大きすぎます。"
+                            "連結後の生成Objectで音量を調整してください。")
             sources.append(o.source)
+            input_volumes.append(input_volume)
+            linked_subtitles.append(
+                narration.subtitle if narration is not None else None)
             if proj is not None and o in proj.objects:
                 consumed.append(o)
         elif isinstance(o, str):
             _validate_audio_source("audio_sequence", o)
             sources.append(o)
+            input_volumes.append(1.0)
+            linked_subtitles.append(None)
         else:
-            raise TypeError(f"audio_sequence: 音声Objectかパス文字列のみ: {type(o)}")
+            raise TypeError(
+                "audio_sequence: Narration、音声Object、またはパス文字列のみ: "
+                f"{type(o)}")
     n = len(sources)
     lengths = [_probe_audio_length(s) or 5.0 for s in sources]
     # acrossfade は各入力が crossfade 以上の長さを要する。
@@ -96,7 +150,12 @@ def audio_sequence(*objs, crossfade=1.0):
         proj.objects.remove(o)
 
     sigs = ["audio_sequence"]
-    sigs.extend(_source_signature(s) for s in sources)
+    sigs.extend(_source_signature(source) for source in sources)
+    # 音量1.0だけの従来ケースは既存キャッシュ鍵を維持する。入力ごとの音量が
+    # 実際に出力へ影響する場合だけ追加署名を入れ、異なる音量同士を分離する。
+    if any(volume != 1.0 for volume in input_volumes):
+        sigs.append(
+            "input_volumes=" + ",".join(repr(volume) for volume in input_volumes))
     sigs.extend([f"cf={crossfade}", f"ev={_ENGINE_VER}"])
     key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
     cache_path = os.path.join(_ARTIFACT_DIR, "aseq", f"{key}.m4a")
@@ -105,14 +164,43 @@ def audio_sequence(*objs, crossfade=1.0):
     for s in sources:
         cmd.extend(["-i", s])
     parts = []
-    cur = "[0:a]"
+    input_refs = []
+    for i, volume in enumerate(input_volumes):
+        ref = f"[{i}:a]"
+        if volume != 1.0:
+            out = f"[avol{i}]"
+            parts.append(f"{ref}volume={volume!r}{out}")
+            ref = out
+        input_refs.append(ref)
+    cur = input_refs[0]
     for i in range(1, n):
         out = f"[axf{i}]"
-        parts.append(f"{cur}[{i}:a]acrossfade=d={crossfade}{out}")
+        parts.append(f"{cur}{input_refs[i]}acrossfade=d={crossfade}{out}")
         cur = out
     cmd.extend(["-filter_complex", ";".join(parts), "-map", cur,
                 "-c:a", "aac", "-b:a", "192k", cache_path])
-    return _finalize_generated_object(cache_path, cmd, list(sources), total)
+    obj = _finalize_generated_object(cache_path, cmd, list(sources), total)
+    # 尺は全入力のプローブ時に確定済み。time(total) を要求せず
+    # そのままタイムラインの総尺と進行に反映する。
+    obj.duration = total
+    # Narration字幕は入力audioがタイムラインから消費されても順次時刻を
+    # 失わないよう、連結後Objectからの相対offsetへ固定する。
+    timeline_links = []
+    offset = 0.0
+    for subtitle, length in zip(linked_subtitles, lengths):
+        if subtitle is not None:
+            # 絶対時刻へ固定せず、sequenceの実開始（順次/@/アンカー解決後）
+            # からの相対配置としてProject resolverへ渡す。
+            subtitle._timeline_owner = obj
+            subtitle._timeline_offset = offset
+            subtitle._fixed_start = None
+            subtitle._start_after = None
+            subtitle._advance = False
+            timeline_links.append((subtitle, offset))
+        offset += length - crossfade
+    if timeline_links:
+        obj._timeline_links = tuple(timeline_links)
+    return obj
 
 
 def sfx(source, at, *, volume=1.0):
@@ -215,14 +303,162 @@ class Narration:
     def __repr__(self):
         return f"Narration(audio={self.audio!r}, subtitle={self.subtitle!r})"
 
+    def __matmul__(self, at):
+        """``narration @ t`` で音声と字幕を同じ時刻へ同期配置する。"""
+        self.audio @ at
+        if self.subtitle is not None:
+            self.subtitle @ at
+        return self
+
     @property
     def duration(self):
         return self.audio.duration
 
 
+_SUBTITLE_NO_LINE_START = frozenset(
+    "、。，．・：；？！ー―…‥ヽヾゝゞ々〃仝〆〇"
+    "ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶ"
+    "）〕］｝〉》」』】〙〗〟’”｠»)]},.!?:;%"
+)
+_SUBTITLE_NO_LINE_END = frozenset(
+    "（〔［｛〈《「『【〘〖〝‘“｟«([{"
+)
+
+
+def _validate_subtitle_line_limit(name, value):
+    """字幕の文字数/行数上限を正の整数へ正規化する。"""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            f"narrate: {name} は1以上の整数で指定してください: {value!r}")
+    return value
+
+
+def _wrap_subtitle_text(content, max_chars):
+    """明示改行を保ち、日本語の行頭/行末禁則を避けながら固定文字数で折り返す。
+
+    max_chars は表示幅の推測値ではなく、Unicode文字数（改行を除く）の上限。
+    禁則を満たす分割点が上限内にない極端な記号列だけはハード分割する。
+    """
+    if max_chars is None:
+        return content
+
+    result = []
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    for paragraph in normalized.split("\n"):
+        if not paragraph:
+            result.append("")
+            continue
+
+        start = 0
+        length = len(paragraph)
+        while length - start > max_chars:
+            hard_end = start + max_chars
+            end = hard_end
+
+            # 「次行が句読点」「現在行が開き括弧」で始終しない分割点を
+            # 上限から後方へ探す。日本語本文は空白を持たないため、単語分割
+            # ライブラリに依存せず決定的に処理する。
+            while end > start + 1:
+                starts_badly = paragraph[end] in _SUBTITLE_NO_LINE_START
+                ends_badly = paragraph[end - 1] in _SUBTITLE_NO_LINE_END
+                if not starts_badly and not ends_badly:
+                    break
+                end -= 1
+            if end <= start or (
+                    paragraph[end] in _SUBTITLE_NO_LINE_START
+                    or paragraph[end - 1] in _SUBTITLE_NO_LINE_END):
+                end = hard_end
+
+            line = paragraph[start:end].rstrip()
+            # 空白だけの区間でも進行を保証する。
+            result.append(line if line else paragraph[start:end])
+            start = end
+            while start < length and paragraph[start].isspace():
+                start += 1
+        result.append(paragraph[start:])
+    return "\n".join(result)
+
+
+def _prepare_subtitle_text(text_content, *, subtitle_text=None,
+                           subtitle_formatter=None,
+                           subtitle_max_chars=None,
+                           subtitle_max_lines=None):
+    """narrate() の表示文を解決し、formatter→折り返し→行数検証を行う。"""
+    max_chars = _validate_subtitle_line_limit(
+        "subtitle_max_chars", subtitle_max_chars)
+    max_lines = _validate_subtitle_line_limit(
+        "subtitle_max_lines", subtitle_max_lines)
+    if subtitle_text is not None and not isinstance(subtitle_text, str):
+        raise TypeError(
+            "narrate: subtitle_text は文字列またはNoneで指定してください: "
+            f"{subtitle_text!r}")
+
+    content = str(text_content) if subtitle_text is None else subtitle_text
+    if subtitle_formatter is not None:
+        if not callable(subtitle_formatter):
+            raise TypeError(
+                "narrate: subtitle_formatter は callable またはNoneを指定して"
+                f"ください: {subtitle_formatter!r}")
+        content = subtitle_formatter(content)
+        if not isinstance(content, str):
+            raise TypeError(
+                "narrate: subtitle_formatter の戻り値は文字列が必要です: "
+                f"{type(content).__name__}")
+
+    content = _wrap_subtitle_text(content, max_chars)
+    line_count = content.count("\n") + 1
+    if max_lines is not None and line_count > max_lines:
+        raise ValueError(
+            "narrate: 字幕が subtitle_max_lines を超えました "
+            f"({line_count}行 > {max_lines}行)。subtitle_textを短くするか、"
+            "subtitle_max_chars/subtitle_max_linesを調整してください")
+    return content
+
+
+def _normalize_subtitle_safe_area(value):
+    """字幕safe areaを(left, top, right, bottom)の比率マージンへ正規化する。
+
+    数値は四辺共通、2要素は(horizontal, vertical)、4要素は
+    (left, top, right, bottom) として扱う。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(
+            f"narrate: subtitle_safe_area は比率の数値/タプルです: {value!r}")
+    if isinstance(value, (int, float)):
+        margins = (value, value, value, value)
+    elif isinstance(value, (tuple, list)) and len(value) == 2:
+        horizontal, vertical = value
+        margins = (horizontal, vertical, horizontal, vertical)
+    elif isinstance(value, (tuple, list)) and len(value) == 4:
+        margins = tuple(value)
+    else:
+        raise ValueError(
+            "narrate: subtitle_safe_area は数値、(horizontal, vertical)、"
+            f"または(left, top, right, bottom)で指定してください: {value!r}")
+
+    for margin in margins:
+        if (isinstance(margin, bool) or not isinstance(margin, (int, float))
+                or not _math.isfinite(margin) or margin < 0 or margin >= 1):
+            raise ValueError(
+                "narrate: subtitle_safe_area の各値は0以上1未満の有限数です: "
+                f"{value!r}")
+    left, top, right, bottom = (float(v) for v in margins)
+    if left + right >= 1 or top + bottom >= 1:
+        raise ValueError(
+            "narrate: subtitle_safe_area の左右/上下マージン合計は1未満が"
+            f"必要です: {value!r}")
+    return left, top, right, bottom
+
+
 def narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
             volume=1.0,
-            subtitle=True, subtitle_style=None,
+            subtitle=True, subtitle_text=None, subtitle_formatter=None,
+            subtitle_max_chars=None, subtitle_max_lines=None,
+            subtitle_safe_area=None, subtitle_style=None,
             x=0.5, y=0.9, size=36, color="white", font=None,
             box=True, box_color="black@0.6", box_border=10,
             border=0, border_color="black", shadow=(0, 0),
@@ -230,8 +466,11 @@ def narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
             anchor="center", **tts_kwargs):
     """TTSナレーション音声 + 同期字幕を1回の呼び出しで生成・配置する。
 
-    voice()(scriptvedit.tts)でtext_contentを音声合成し、subtitle=Trueなら同じ内容の
-    text()字幕Objectも生成する。字幕の表示窓は音声の実長(tts_duration)に
+    voice()(scriptvedit.tts)でtext_contentを音声合成し、subtitle=Trueなら
+    text()字幕Objectも生成する。subtitle_text で読み上げと異なる表示文を指定でき、
+    subtitle_formatter は表示文を受け取って文字列を返すcallableとして、その後
+    subtitle_max_charsによる日本語禁則対応の折り返しを行う。subtitle_max_linesを
+    超えた場合は内容を黙って切らずValueErrorにする。字幕の表示窓は音声の実長に
     一致させ、両者は同じ開始時刻からタイムラインに配置される。
     複数回呼べば、音声の実長ぶんタイムラインが進むため順次配置される
     （字幕は各回の音声窓にだけ表示される）。
@@ -242,6 +481,10 @@ def narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
     border=2 等の縁取りや shadow=(2, 2) の影は字幕の読みやすさ向上に有効。
     subtitle_style を渡すと、これらの既定値を辞書キー（同名）で個別に上書きできる
     （例: subtitle_style={"size": 44, "y": 0.85, "border": 2}）。
+    subtitle_safe_area は画面比率の余白で、数値（四辺共通）、
+    (horizontal, vertical)、(left, top, right, bottom)を受け付ける。指定時は
+    drawtextが実測する文字矩形が余白領域以下なら、その位置を領域内へクランプする
+    （長文はsubtitle_max_chars/max_linesも併用。subtitle_styleのsafe_areaで上書き可）。
     backend/speaker/volume/pitch/**tts_kwargs は voice() と同じ意味で音声側にのみ作用する
     （backend: "voicevox"/"edge"/"sapi"。None で自動選択）。
 
@@ -253,6 +496,21 @@ def narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
         n = narrate("こんにちは、世界", backend="edge")           # edge-tts
         # n.audio / n.subtitle、または audio, sub = narrate(...)
     """
+    subtitle_content = None
+    st = None
+    safe_area = None
+    if subtitle:
+        # 外部TTSを呼ぶ前に新規字幕オプションを検証し、入力ミスで合成コストを
+        # 発生させない。formatterも表示文にだけ作用し、読み上げ文は変えない。
+        subtitle_content = _prepare_subtitle_text(
+            text_content, subtitle_text=subtitle_text,
+            subtitle_formatter=subtitle_formatter,
+            subtitle_max_chars=subtitle_max_chars,
+            subtitle_max_lines=subtitle_max_lines)
+        st = dict(subtitle_style or {})
+        safe_area = _normalize_subtitle_safe_area(
+            st.get("safe_area", subtitle_safe_area))
+
     try:
         # 属性参照ではなくモジュール直接 import（名前空間注入の影響を受けない）
         _tts_mod = _import_module("scriptvedit.tts")
@@ -272,9 +530,8 @@ def narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
 
     text_obj = None
     if subtitle:
-        st = dict(subtitle_style or {})
         text_obj = text(
-            text_content,
+            subtitle_content,
             x=st.get("x", x), y=st.get("y", y), size=st.get("size", size),
             color=st.get("color", color), font=st.get("font", font),
             box=st.get("box", box), box_color=st.get("box_color", box_color),
@@ -284,6 +541,15 @@ def narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
             shadow=st.get("shadow", shadow),
             shadow_color=st.get("shadow_color", shadow_color),
             alpha=st.get("alpha", alpha), anchor=st.get("anchor", anchor))
+        if safe_area is not None:
+            # text()の一般APIと既存キャッシュ署名を変えず、narrate字幕だけに
+            # 描画時のsafe-areaクランプを付加する。
+            text_obj._text_spec["safe_area"] = safe_area
+            # text()生成後に追加した描画条件も合成sourceへ含め、checkpoint等が
+            # safe_area違いの字幕を同一素材として再利用しないようにする。
+            text_obj.source = _text_synthetic_source(
+                f"{text_obj.source}|safe_area={safe_area!r}")
+            text_obj._text_spec["synthetic_source"] = text_obj.source
         # current_timeを進めず音声と同じ開始点に配置（音声側で進行させる）
         text_obj.show(dur)
 
@@ -412,7 +678,7 @@ from scriptvedit.media import _finalize_generated_object, _source_signature
 from scriptvedit.objects import AudioEffect, Object
 from scriptvedit.project import Project
 from scriptvedit.state import _ARTIFACT_DIR, _ENGINE_VER, _detect_media_type, _suggest_hint
-from scriptvedit.text import text
+from scriptvedit.text import _text_synthetic_source, text
 from scriptvedit.timeline import anchor
 from scriptvedit.validate import _require_number, _validate_ffmpeg_color
 from scriptvedit.web import subtitle

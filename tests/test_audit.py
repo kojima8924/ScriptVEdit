@@ -200,3 +200,20 @@ def test_clean_project_is_clean():
     o.time(2) <= fade(0.5) & move(x=0.5, y=0.5)
     text("読みやすい文字", size=60, border=3).time(2)
     assert p.audit(quiet=True) == []
+
+
+def test_web_content_reports_manual_storyboard_review(tmp_path):
+    """Canvas内部を検査済みと誤認しないようinfoで代表フレーム確認を促す。"""
+    html = tmp_path / "canvas.html"
+    html.write_text(
+        "<script>function renderFrame(state) {}</script>", encoding="utf-8")
+    p = _mk(width=320, height=180)
+    Object(str(html), duration=1, size=(320, 180))
+
+    finding = next(
+        item for item in p.audit(quiet=True)
+        if item["code"] == "web-content-uninspected")
+
+    assert finding["severity"] == "info"
+    assert "storyboard" in finding["message"]
+    assert p.audit(strict=True, quiet=True)

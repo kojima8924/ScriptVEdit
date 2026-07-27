@@ -7,9 +7,9 @@
     "-i",
     "color=c=black:s=1280x720:d=8:r=30",
     "-i",
-    "__cache__/artifacts/checkpoint/a04e6a90/571dae99a45c4539.mkv",
+    "__cache__/artifacts/checkpoint/a04e6a90/36196fbe4d84fdf1.mkv",
     "-i",
-    "__cache__/artifacts/checkpoint/442998c8/b6d8d4af421b6760.mkv",
+    "__cache__/artifacts/checkpoint/442998c8/80739ba4dbbd29b8.mkv",
     "-c:v",
     "libvpx-vp9",
     "-i",
@@ -19,7 +19,7 @@
     "-i",
     "__cache__/artifacts/web/subtitle_22b370f4/f249dbbcfb29e26f.webm",
     "-i",
-    "__cache__/artifacts/checkpoint/ac32771b/445b9f9be9c1c3c6.mkv",
+    "__cache__/artifacts/checkpoint/ac32771b/03b1f2c05ec904fb.mkv",
     "-filter_complex",
     "[0:v][1:v]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,8)'[v1];[v1][2:v]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,2.5)'[v2];[3:v]tpad=start_duration=2.5:start_mode=clone[obj3];[v2][obj3]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,2.5/,4.5)'[v3];[4:v]tpad=start_duration=4.5:start_mode=clone[obj4];[v3][obj4]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,4.5/,7.0)'[v4];[v4][5:v]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,1.0)'[v5]",
     "-map",
@@ -118,7 +118,7 @@
       "1.0",
       "__cache__/artifacts/web/bubble_2042e1cb/4611cc2d153bd633.webm"
     ],
-    "__cache__/artifacts/checkpoint/a04e6a90/571dae99a45c4539.mkv": [
+    "__cache__/artifacts/checkpoint/a04e6a90/36196fbe4d84fdf1.mkv": [
       "ffmpeg",
       "-y",
       "-loop",
@@ -134,12 +134,12 @@
       "-level",
       "3",
       "-pix_fmt",
-      "yuva444p",
+      "bgra",
       "-t",
       "8",
-      "__cache__/artifacts/checkpoint/a04e6a90/571dae99a45c4539.mkv"
+      "__cache__/artifacts/checkpoint/a04e6a90/36196fbe4d84fdf1.mkv"
     ],
-    "__cache__/artifacts/checkpoint/442998c8/b6d8d4af421b6760.mkv": [
+    "__cache__/artifacts/checkpoint/442998c8/80739ba4dbbd29b8.mkv": [
       "ffmpeg",
       "-y",
       "-c:v",
@@ -153,12 +153,12 @@
       "-level",
       "3",
       "-pix_fmt",
-      "yuva444p",
+      "bgra",
       "-t",
       "2.5",
-      "__cache__/artifacts/checkpoint/442998c8/b6d8d4af421b6760.mkv"
+      "__cache__/artifacts/checkpoint/442998c8/80739ba4dbbd29b8.mkv"
     ],
-    "__cache__/artifacts/checkpoint/ac32771b/445b9f9be9c1c3c6.mkv": [
+    "__cache__/artifacts/checkpoint/ac32771b/03b1f2c05ec904fb.mkv": [
       "ffmpeg",
       "-y",
       "-c:v",
@@ -172,10 +172,10 @@
       "-level",
       "3",
       "-pix_fmt",
-      "yuva444p",
+      "bgra",
       "-t",
       "1.0",
-      "__cache__/artifacts/checkpoint/ac32771b/445b9f9be9c1c3c6.mkv"
+      "__cache__/artifacts/checkpoint/ac32771b/03b1f2c05ec904fb.mkv"
     ]
   }
 }

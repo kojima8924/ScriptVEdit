@@ -39,10 +39,11 @@ myvideo/
    (固定尺だと音声が切れる。`voice()` で先に合成して長さを測る)
 2. **素材を集める・作る** — §4 の品質規則に従う
 3. **レイヤーを書く** — `p.inspect("timeline.html")` で配置をガントチャート確認
-4. **ドラフト確認** — `p.render(out, draft=True)`(半解像度)や
-   `start=/end=` の部分レンダで速く回す
+4. **ドラフト確認** — `p.render(out, draft=True)`(半解像度・Web既定8fps)や
+   `start=/end=` の部分レンダ(Webも交差フレームだけ撮影)で速く回す
 5. **フレームを抽出して目視** — `p.storyboard()` / `p.thumbnail()` /
    `scriptvedit.testkit.extract_frame`。機械チェックだけで完成としない
+   (完成動画があれば`source=out`を渡すとProject再構築なしで高速)
 6. **audit を通す** — `p.audit()` の warning をゼロに(§5)
 7. **本番レンダ** — 長時間になるため、エージェント経由なら
    セッションと運命を共にしない独立プロセスで起動する(§6)
@@ -69,6 +70,8 @@ myvideo/
 ### 音声
 - **BGM には必ず `duck_under()`**(ナレーション中だけ自動で音量が下がる)、
   仕上げに **`normalize_audio()`**
+- `duck_under()`はsidechain終端を自動padするため、ナレーション末尾へ手動の無音素材を
+  足す必要はない。`normalize_audio()`は既定で48kHz化後にピークリミッターも適用する
 - **BGM は動画より長い曲を選ぶ**(短い曲のループはつなぎ目が視聴者に気付かれる)
 - ナレーションが複数行あるなら、**先に 1 本の音声ファイルへミックスしてから**
   `duck_under()` に渡す(行ごとの Object に個別ダッキングは構造的に成立しない)
@@ -119,6 +122,8 @@ nohup python main.py > output/render.log 2>&1 &
 | `sapi` | なし(Windows のみ) |
 
 合成結果はキャッシュされるので、同じ台詞の 2 回目以降は一瞬で返る。
+表示文を短くする場合は`subtitle_text`、日本語折り返しは`subtitle_max_chars`、
+行数上限は`subtitle_max_lines`、画面端保護は`subtitle_safe_area`を使う。
 
 ## 8. 機能が足りないとき — プラグイン
 
