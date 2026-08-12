@@ -33,7 +33,7 @@ pip install -e .[all]       # morph / web / beat / tts(edge-tts) / tools の全�
 
 ## ディレクトリ構成
 
-本体は `src/scriptvedit/` の37モジュール（約15,900行）のパッケージ。
+本体は `src/scriptvedit/` の37モジュール（合計約18,700行）のパッケージ。
 
 ```
 ScriptVEdit/
@@ -1461,5 +1461,5 @@ ScriptVEdit は「Python DSL として書いていて楽しく、かつコーデ
 - 単一インデックス `obj[1.5]`（freeze）/ 逆順スライス `obj[::-1]`（reverse。現状 step は明示エラー）。
 - 単位リテラル `3*s` / `500*ms` / `2*beats`（`scriptvedit.beat` 連携）。
 
-#### OSS化
+#### 配布・エコシステム
 - pip 公開、docsサイト、プラグインエコシステム（プラグイン機構と地続き）。
