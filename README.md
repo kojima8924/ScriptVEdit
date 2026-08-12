@@ -1,11 +1,26 @@
 # ScriptVEdit
 
-Pythonスクリプトで動画を構成するDSL。ffmpegによるレンダリング。
+**動画のタイムラインを Python コードで記述し、FFmpeg コマンドへ変換して映像を生成する DSL。**
+
+素材の配置・変形・エフェクト・音声をすべて Python スクリプトとして書く。GUI の編集操作を経ずに
+コードだけで動画を組み立てられるため、人間が書くだけでなく**コーディングAIに動画を作らせる**用途にも使える
+（本プロジェクトの解説動画自体も ScriptVEdit で制作している）。
+
+- **演算子で書く DSL** — `<=` で適用、`|` / `&` で連結。`obj[2:5]`（素材の切り出し）/ `obj @ 12`（タイムラインへ絶対配置）/
+  `a >> b`（直後に連結）/ `clip * 3`（リピート）/ `-clip`（逆再生）といった糖衣を持つ（→「設計思想」「タイムライン演算子」節）
+- **素材キャッシュ** — 中間結果を**内容ハッシュ**の鍵で自動保存・復元し、変えていない部分は再レンダしない（→「チェックポイントキャッシュ」節）
+- **アンカーによる同期** — 「あの表示が終わってから」をレイヤーをまたいだ名前で参照でき、尺の変更が後続へ自動で波及する（→「anchor / pause / until」節）
+- **時間分割並列レンダ** — 総尺をフレーム境界で N 分割し、別プロセスで並列レンダして無劣化 concat。
+  実測（2分56秒・87オブジェクトの実プロジェクトを20コアPCで計測）で**逐次 1012 秒 → 並列8 で 106 秒**（→「時間分割並列レンダ」節）
+- **AI が読める機能マニフェスト** — `python -m scriptvedit describe` で全機能のシグネチャ・引数レンジを JSON / Markdown 出力（→「ケイパビリティ・マニフェスト」節）
+
+素材は画像・動画・音声のほか、HTML（Playwright 経由）・LaTeX 数式（KaTeX 同梱・オフライン）・TTS 音声も
+同じ Object として扱える。出力は mp4 / gif / webp / 連番PNG / 透過webm。
 
 ## インストール
 
 ```
-git clone <repo> && cd scriptvedit
+git clone https://github.com/kojima8924/ScriptVEdit.git && cd ScriptVEdit
 pip install -e .            # コアは標準ライブラリのみ
 pip install -e .[all]       # morph / web / beat / tts(edge-tts) / tools の全機能
 ```
@@ -21,7 +36,7 @@ pip install -e .[all]       # morph / web / beat / tts(edge-tts) / tools の全�
 本体は `src/scriptvedit/` の37モジュール（約15,900行）のパッケージ。
 
 ```
-scriptvedit/
+ScriptVEdit/
 ├── src/scriptvedit/     パッケージ本体（37モジュール）
 │   ├── project.py       Project / render / チェックポイント
 │   ├── objects.py       Object / Transform / Effect
@@ -94,7 +109,7 @@ export SCRIPTVEDIT_ASSETS=/srv/media/video-assets:/mnt/stock
 2. 実行中のレイヤーファイルの位置から上方向に探索
 3. パッケージ位置から上方向に探索（editable インストール時のリポジトリ同梱 `assets/`）
 
-想定運用は「自分の動画プロジェクトのフォルダで scriptvedit をライブラリとして使い、そのフォルダ固有の `assets/` を持つ」こと。
+想定運用は「自分の動画プロジェクトのフォルダで ScriptVEdit をライブラリとして使い、そのフォルダ固有の `assets/` を持つ」こと。
 そのため 1・2 が 3 より先に来る（逆順にすると利用者の `assets/` が永久に無視される）。探索結果はキャッシュしないため、cwd 変更・レイヤー切替に追随する。
 
 ## プロジェクトの新規作成（scriptvedit new）
@@ -1039,8 +1054,8 @@ p.render("out.mp4", parallel=4)   # 4分割並列。未指定/1 なら従来ど�
 - **配分**: 各チャンクへ `-threads ceil(CPU数/N)` を渡してエンコーダスレッドの
   過剰予約を防ぐ。`configure(parallel=N)`（キャッシュ並列生成のワーカ数）とは別物
 - **向き不向き**: フィルタ評価が支配的な長尺プロジェクトほど効く
-  （実測: 2分56秒・87オブジェクトの実プロジェクトで 1012s → 並列2: 255s /
-  並列4: 149s / 並列8: 106s。20コア機）。並列2で4倍になるのは、逐次レンダが
+  （実測条件: 2分56秒・87オブジェクトの実プロジェクトを20コアPCで計測 —
+  逐次 1012s → 並列2: 255s / 並列4: 149s / 並列8: 106s）。並列2で4倍になるのは、逐次レンダが
   「後半オブジェクトの tpad クローン区間（開始前）にも drawtext 等を評価する」
   浪費を head_trim が同時に排除するためで、分割は単なる並列化以上に効く。逐次レンダが1秒未満で終わる極小
   プロジェクト（目安5〜10秒尺以下）では、プロセス起動+concatの固定
@@ -1411,9 +1426,18 @@ python scripts/tools_baseline.py verify baseline_snapshots.json
 
 [MIT License](LICENSE)。同梱の `assets/` はすべて自作のテスト用素材で（`scripts/generate_test_assets.py` が生成）、コードと同じく MIT が適用されます（[ASSETS.md](ASSETS.md)）。`src/scriptvedit/templates/vendor/katex/` の KaTeX のみ同ディレクトリのライセンスに従います。
 
+## 作者・AI利用について
+
+作者: 小嶋 明（[kojima8924](https://github.com/kojima8924)） / ポートフォリオ: <https://kojima8924.github.io/>
+
+DSL の記法、素材キャッシュ、要素配置のアンカー解決、区間ごとの並列レンダリングといった仕組みは
+AI と相談しながらほぼ本人が決めた。一方で、それらを含む実装全般・テストケースの生成・
+スクリーンショットによる出力確認は AI エージェントへ委任している。
+エフェクトの品質と、テーマだけ与えて AI に作らせた動画の出来は本人が目視で評価した。
+
 ## ロードマップ
 
-scriptvedit は「Python DSL として書いていて楽しく、かつコーディングAIが駆動しやすい動画エディタ」を目指している。
+ScriptVEdit は「Python DSL として書いていて楽しく、かつコーディングAIが駆動しやすい動画エディタ」を目指している。
 
 ### 特徴的な実装済み機能
 - **プラグイン機構**: `@effect_plugin` で、コアを編集せず `plugins/*.py` に新エフェクトを登録（→「プラグイン機構」節）。
