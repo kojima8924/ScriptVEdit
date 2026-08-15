@@ -48,6 +48,8 @@ from scipy.interpolate import RBFInterpolator
 import cv2
 from tqdm import tqdm
 
+from scriptvedit.validate import _reject_unknown_keys
+
 
 # ============================================================
 # 定数
@@ -436,18 +438,6 @@ def build_warp_fields(src_pos, dst_pos, src_col, dst_col,
 # ============================================================
 # レンダリング
 # ============================================================
-
-def premultiply_alpha(rgba: np.ndarray) -> np.ndarray:
-    """アルファ事前乗算（sRGB値のまま・0〜255スケール）
-
-    互換のため残している旧実装。ガンマ符号化されたsRGB値を乗算・平均すると
-    中間色が沈むため、レンダリングでは linear_premultiply() を使う。
-    """
-    f = rgba.astype(np.float32)
-    a = f[:, :, 3:4] / 255.0
-    f[:, :, :3] *= a
-    return f
-
 
 def linear_premultiply(rgba: np.ndarray) -> np.ndarray:
     """uint8 RGBA → 「リニア光 × アルファ事前乗算」の float32 RGBA（0〜1）
@@ -1040,12 +1030,7 @@ def generate_rgba_frames(path_a, path_b, out_dir, n_frames, blend_fn=None, **par
         blend_fn = ease_in_out
 
     # 未知キーはタイポの可能性が高いため明示的にエラーにする
-    unknown = set(params) - MORPH_PARAM_KEYS
-    if unknown:
-        raise ValueError(
-            f"未知のパラメータ: {sorted(unknown)}"
-            f"（有効なキー: {sorted(MORPH_PARAM_KEYS)}）"
-        )
+    _reject_unknown_keys(None, params, MORPH_PARAM_KEYS)
 
     method = _resolve_method(params)
     params = _split_method_params(method, params)
@@ -1262,12 +1247,7 @@ PARTICLE_PARAM_KEYS = frozenset(
 
 def _check_particle_params(params):
     """未知キーはタイポの可能性が高いため明示的にエラーにする"""
-    unknown = set(params) - PARTICLE_PARAM_KEYS
-    if unknown:
-        raise ValueError(
-            f"未知のパラメータ: {sorted(unknown)}"
-            f"（有効なキー: {sorted(PARTICLE_PARAM_KEYS)}）"
-        )
+    _reject_unknown_keys(None, params, PARTICLE_PARAM_KEYS)
 
 
 def generate_explode_frames(path_a, out_dir, n_frames, blend_fn=None, **params):

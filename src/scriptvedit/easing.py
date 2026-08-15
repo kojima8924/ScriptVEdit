@@ -379,24 +379,11 @@ def keyframes(*args, easing=None):
             f"keyframes: キーフレームは最大{_MAX_PATH_POINTS}点までです（指定={len(points)}）")
     points.sort(key=lambda p: p[0])
     def _inner(u):
-        u = _to_expr(u)
-        values = []
-        bounds = []
-        for i in range(len(points) - 1):
-            t0, v0 = points[i]
-            t1, v1 = points[i + 1]
-            seg_len = t1 - t0
-            if seg_len <= 0: continue
-            local_t = clip((u - Const(t0)) / Const(seg_len), 0, 1)
-            if easing is not None:
-                local_t = easing(local_t)
-            values.append(lerp(v0, v1, local_t))
-            bounds.append(t1)
-        values.append(Const(points[-1][1]))  # u>=最後の境界の既定値
-        return _piecewise_tree(u, values, bounds)
+        # 区分線形補間の実体は effects/paths の共通実装（生成される Expr は同一）
+        return _piecewise_scalar_expr(u, points, easing)
     return _inner
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.effects.paths import _MAX_PATH_POINTS, _piecewise_tree
+from scriptvedit.effects.paths import _MAX_PATH_POINTS, _piecewise_scalar_expr
 from scriptvedit.expr import Const, E, _to_expr, abs, clip, cos, floor, if_, lerp, lt, mod, pow, sin, sqrt

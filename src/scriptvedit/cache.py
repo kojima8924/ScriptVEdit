@@ -168,13 +168,21 @@ def _op_fingerprint_str(op):
     return "|".join(parts)
 
 
+def _sig_key(sigs):
+    """署名リストからキャッシュ鍵（"||" 結合 → sha256 → 先頭16桁）を作る。
+
+    "||" 結合・sha256・[:16] は既存キャッシュ資産とスナップショットに焼き込まれた
+    不変条件。1バイトでも変えると全キャッシュ無効化＋dry_runコマンド崩壊になる。
+    """
+    return hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+
+
 def _op_prefix_fingerprint(ops_list):
     """ops列のSHA256[:16]フィンガープリントを計算"""
     sigs = []
     for typ, op in ops_list:
         sigs.append(f"{typ}:{_op_fingerprint_str(op)}")
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
-    return key
+    return _sig_key(sigs)
 
 
 def _is_bakeable(op_type, op):
@@ -284,7 +292,7 @@ def _checkpoint_cache_path(original_source, ops, duration=None, fps=None, qualit
     proj = Project._current
     if proj is not None:
         sigs.append(f"pctx={proj.width}x{proj.height}@{proj.fps}")
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     # video入力 + transform-only でも動画ならmkv (ffv1)
     ext = ".mkv" if (duration is not None or is_video) else ".png"
     cache_dir = os.path.join(_ARTIFACT_DIR, "checkpoint", _src_bucket(original_source))
@@ -316,7 +324,7 @@ def _morph_cache_path(src_path, morph_op, duration, fps, quality="final"):
     # 中間物は draft/本番で同一内容のため rq(_ACTIVE_QUALITY)は鍵に含めない
     sigs.append(f"ev={_ENGINE_VER}")
     sigs.append(f"mv={_MORPH_RENDER_VER}")
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     cache_dir = os.path.join(_ARTIFACT_DIR, "morph", _src_bucket(src_path))
     return os.path.join(cache_dir, f"{key}.mkv")
 
@@ -335,7 +343,7 @@ def _particle_cache_path(img_path, particle_op, duration, fps, quality="final"):
     # 中間物は draft/本番で同一内容のため rq(_ACTIVE_QUALITY)は鍵に含めない
     sigs.append(f"ev={_ENGINE_VER}")
     sigs.append(f"mv={_MORPH_RENDER_VER}")
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     cache_dir = os.path.join(_ARTIFACT_DIR, "particle", _src_bucket(img_path))
     return os.path.join(cache_dir, f"{key}.mkv")
 
@@ -490,7 +498,7 @@ def _web_cache_path(obj, project):
                 deps_fps.append(dep)
         sigs.append(f"deps={hashlib.sha256('|'.join(deps_fps).encode()).hexdigest()[:12]}")
     sigs.append(f"ev={_ENGINE_VER}")
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     name = obj._web_name or "web"
     return os.path.join(_ARTIFACT_DIR, "web", name, f"{key}.webm")
 
@@ -584,7 +592,7 @@ def _layer_cache_paths(filename, project, quality=None):
     # 名前だけでなく**実際のエンコード引数**を含めることで、将来 crf/pix_fmt を
     # 調整したときに古い中間ファイルが黙って再利用されるのを防ぐ。
     sigs.append(f"q={quality}:{' '.join(_LAYER_CACHE_QUALITY[quality][1])}")
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     layer_dir = os.path.join(_ARTIFACT_DIR, "layer", basename)
     return (os.path.join(layer_dir, f"{key}{ext}"),
             os.path.join(layer_dir, f"{key}.anchors.json"))

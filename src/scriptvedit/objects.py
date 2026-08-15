@@ -747,14 +747,14 @@ class Object:
         layer_files = []
         for spec in sub_project._layer_specs:
             sigs.append(
-                f"layer={_source_signature(spec['filename'])}|p={spec['priority']}")
+                f"layer={_src_signature(spec['filename'])}|p={spec['priority']}")
             layer_files.append(spec["filename"])
         dep_sources = []
         for srcs in sub_project._layer_sources.values():
             dep_sources.extend(srcs)
         dep_sources = sorted(set(dep_sources))
         for src in dep_sources:
-            sigs.append(f"dep={_source_signature(src)}")
+            sigs.append(f"dep={_src_signature(src)}")
         # 登録済み全プラグインのコード指紋を混ぜる（サブレイヤーがどのプラグインを
         # 呼ぶかは静的に判別できないため全登録分。プラグインファイルだけ変更した
         # 場合も cache='auto' が再生成する。issue #16 P1）
@@ -770,7 +770,7 @@ class Object:
         # 局所バージョン（高コストなWeb/画像キャッシュ全体は無効化しない）。
         sigs.append("audio_graph=2")
         sigs.append(f"ev={_ENGINE_VER}")
-        key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+        key = _sig_key(sigs)
         cache_path = os.path.join(_ARTIFACT_DIR, "subproject", f"{key}.webm")
 
         parent_mode = getattr(parent, "_mode", None) if parent else None
@@ -844,7 +844,7 @@ class Object:
             sigs.append(f"fps={fps}")
             # 中間ベイクのpix_fmt世代（.mkvを焼く動画computeのみ。静止画PNGは無関係）
             sigs.append(f"bpf={_BAKE_PIXFMT_VER}")
-        key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+        key = _sig_key(sigs)
         src_hash = hashlib.sha256(
             self.source.replace("\\", "/").encode()).hexdigest()[:8]
         ext = ".mkv" if duration is not None else ".png"
@@ -1314,11 +1314,10 @@ def group(*objects):
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.cache import _build_unified_ops, _file_fingerprint, _op_prefix_fingerprint, _ops_effective_quality, _web_cache_path
+from scriptvedit.cache import _build_unified_ops, _file_fingerprint, _op_prefix_fingerprint, _ops_effective_quality, _sig_key, _src_signature, _web_cache_path
 from scriptvedit.expr import min
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions
-from scriptvedit.media import _source_signature
 from scriptvedit.plugins import _EFFECT_PLUGINS
 from scriptvedit.project import Project
 from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIX_FMT, _BAKE_PIXFMT_VER, _CACHE_DIR, _ENGINE_VER, _GEN_COUNTER, _GEN_COUNTER_LOCK, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint

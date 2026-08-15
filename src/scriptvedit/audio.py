@@ -141,14 +141,14 @@ def audio_sequence(*objs, crossfade=1.0):
         proj.objects.remove(o)
 
     sigs = ["audio_sequence"]
-    sigs.extend(_source_signature(source) for source in sources)
+    sigs.extend(_src_signature(source) for source in sources)
     # 音量1.0だけの従来ケースは既存キャッシュ鍵を維持する。入力ごとの音量が
     # 実際に出力へ影響する場合だけ追加署名を入れ、異なる音量同士を分離する。
     if any(volume != 1.0 for volume in input_volumes):
         sigs.append(
             "input_volumes=" + ",".join(repr(volume) for volume in input_volumes))
     sigs.extend([f"cf={crossfade}", f"ev={_ENGINE_VER}"])
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     cache_path = os.path.join(_ARTIFACT_DIR, "aseq", f"{key}.m4a")
 
     cmd = ["ffmpeg", "-y"]
@@ -208,10 +208,10 @@ def sfx(source, at, *, volume=1.0):
     n = len(times)
     total = _builtins.max(times) + srclen
 
-    sigs = ["sfx", _source_signature(source),
+    sigs = ["sfx", _src_signature(source),
             "at=" + ",".join(str(t) for t in times),
             f"vol={volume}", f"ev={_ENGINE_VER}"]
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     cache_path = os.path.join(_ARTIFACT_DIR, "sfx", f"{key}.m4a")
 
     parts = ["[0:a]asplit=" + str(n) + "".join(f"[s{i}]" for i in range(n))]
@@ -583,10 +583,10 @@ def audio_viz(source, *, kind="waves", color="white", size=None, duration=None):
     else:
         viz = f"showcqt=s={w}x{h}:fps={fps}"
 
-    sigs = ["audio_viz", _source_signature(source),
+    sigs = ["audio_viz", _src_signature(source),
             f"kind={kind}", f"color={color}", f"size={w}x{h}",
             f"fps={fps}", f"dur={dur}", f"ev={_ENGINE_VER}"]
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     cache_path = os.path.join(_ARTIFACT_DIR, "aviz", f"{key}.mkv")
 
     cmd = ["ffmpeg", "-y", "-i", source,
@@ -626,7 +626,7 @@ def beat_sync(audio_source, *, min_bpm=60, max_bpm=200):
             "を実行してください。"
             f"(元エラー: {e})") from e
 
-    sig = _source_signature(audio_source)
+    sig = _src_signature(audio_source)
     key_str = (f"{sig}||min_bpm={min_bpm}||max_bpm={max_bpm}||ev={_ENGINE_VER}")
     key = hashlib.sha256(key_str.encode("utf-8")).hexdigest()[:16]
     cache_path = os.path.join(_ARTIFACT_DIR, "beats", f"{key}.json")
@@ -646,25 +646,17 @@ def beat_sync(audio_source, *, min_bpm=60, max_bpm=200):
     except Exception as e:
         raise RuntimeError(f"beat_sync: ビート検出に失敗しました: {e}") from e
 
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    # 一時パスは pid + 乱数でユニーク化（並列実行での衝突防止）→ os.replace で原子的に確定
-    tmp_path = _unique_tmp_path(cache_path)
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False)
-        os.replace(tmp_path, cache_path)
-    finally:
-        try:
-            os.remove(tmp_path)  # 失敗時の残骸掃除（成功時は replace 済みで存在しない）
-        except OSError:
-            pass
+    # 原子的書き込み（一時パスは pid + 乱数でユニーク化 → os.replace で確定。
+    # 並列実行での衝突・書きかけの残留を防ぐ）
+    _atomic_write_text(cache_path, json.dumps(result, ensure_ascii=False))
     return result
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
+from scriptvedit.cache import _sig_key, _src_signature
 from scriptvedit.effects.basic import again
-from scriptvedit.ffmpeg import _unique_tmp_path
-from scriptvedit.media import _finalize_generated_object, _source_signature
+from scriptvedit.ffmpeg import _atomic_write_text
+from scriptvedit.media import _finalize_generated_object
 from scriptvedit.objects import AudioEffect, Object
 from scriptvedit.project import Project
 from scriptvedit.state import _ARTIFACT_DIR, _ENGINE_VER, _detect_media_type, _suggest_hint

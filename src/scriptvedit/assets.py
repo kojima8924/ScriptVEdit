@@ -165,19 +165,6 @@ def _ensure_under(base, path, relpath):
             f"  許可される範囲: {base_real} 配下のみ")
 
 
-def imported_dir():
-    """共有ライブラリからの自動コピー先（<project>/assets/_imported）"""
-    return os.path.join(assets_dir(), IMPORTED_DIR)
-
-
-def _fmt_size(n):
-    if n >= 1 << 20:
-        return f"{n / (1 << 20):.1f}MB"
-    if n >= 1 << 10:
-        return f"{n / (1 << 10):.1f}KB"
-    return f"{n}B"
-
-
 def _same_content(a, b):
     """2ファイルの内容が同じか（内容ハッシュ。キャッシュ鍵と同じ判定基準）"""
     from scriptvedit.cache import _file_fingerprint
@@ -190,18 +177,22 @@ def _same_content(a, b):
 
 
 def _copy_atomic(src, dst):
-    """一時ファイル → os.replace でアトミックにコピー（中断で壊れた素材を残さない）"""
+    """一時ファイル → os.replace でアトミックにコピー（中断で壊れた素材を残さない）
+
+    一時パスは _unique_tmp_path（pid + 乱数）でユニーク化し、
+    同一素材の並列取り込みでも相互に壊さない。
+    """
+    from scriptvedit.ffmpeg import _unique_tmp_path
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    tmp = dst + f".tmp{os.getpid()}"
+    tmp = _unique_tmp_path(dst)
     try:
         _shutil.copyfile(src, tmp)
         os.replace(tmp, dst)
     finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def _find_in_library(parts):
@@ -273,6 +264,7 @@ def asset(relpath, *, must_exist=True):
     lib_hit = _find_in_library(parts)
     if lib_hit:
         _copy_atomic(lib_hit, imported)
+        from scriptvedit.cache import _fmt_size
         try:
             size = _fmt_size(os.path.getsize(imported))
         except OSError:

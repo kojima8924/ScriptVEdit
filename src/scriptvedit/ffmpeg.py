@@ -20,6 +20,43 @@ def _unique_tmp_path(final_path):
     return f"{base}.tmp{os.getpid()}_{_uuid.uuid4().hex[:8]}{ext}"
 
 
+def _atomic_write_bytes(path, data):
+    """一時パスへ書き込み → os.replace で確定（壊れた部分ファイルを残さない）
+
+    一時パスは _unique_tmp_path で pid + 乱数を付けてユニーク化するため、
+    同一の確定先へ複数プロセス/ワーカが同時到達しても互いに壊さない。
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp_path = _unique_tmp_path(path)
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.remove(tmp_path)  # 失敗時の残骸掃除（成功時は replace 済みで存在しない）
+        except OSError:
+            pass
+
+
+def _atomic_write_text(path, text, encoding="utf-8"):
+    """テキスト版の原子的書き込み（_atomic_write_bytes と同じ機構）
+
+    テキストモードで書く（改行変換は既定のまま = 従来の open("w") と同一挙動）。
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp_path = _unique_tmp_path(path)
+    try:
+        with open(tmp_path, "w", encoding=encoding) as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.remove(tmp_path)  # 失敗時の残骸掃除（成功時は replace 済みで存在しない）
+        except OSError:
+            pass
+
+
 def _externalize_long_filters(cmd):
     """フィルタ文字列が閾値を超える場合、一時ファイル + FFmpeg 8 の `-/オプション` 構文に差し替える
 

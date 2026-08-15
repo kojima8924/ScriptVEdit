@@ -107,7 +107,7 @@ from scriptvedit.assets import (  # noqa: F401
 )
 from scriptvedit.state import (  # noqa: F401
     _ACTIVE_QUALITY, _ARTIFACT_DIR, _AUDIO_EXTS, _AVAILABLE_ENCODERS, _BAKEABLE_EFFECTS,
-    _CACHE_DIR, _CHECKPOINT_DIR, _CONFIGURE_KEYS, _ENCODER_MAP, _ENGINE_VER, _GEN_COUNTER,
+    _CACHE_DIR, _CONFIGURE_KEYS, _ENCODER_MAP, _ENGINE_VER, _GEN_COUNTER,
     _GEN_COUNTER_LOCK, _IMAGE_EXTS, _PRESETS, _REVERSE_MAX_SEC, _TERMINAL_FRAME_EFFECTS,
     _TIME_LIVE_EFFECTS, _VIDEO_EXTS, _WEB_EXTS, _detect_media_type, _suggest_hint,
 )
@@ -131,11 +131,12 @@ from scriptvedit.easing import (  # noqa: F401
     steps,
 )
 from scriptvedit.validate import (  # noqa: F401
-    _COLOR_NAME_RGB, _parse_color_rgb, _require_number, _validate_ffmpeg_color,
+    _COLOR_NAME_RGB, _parse_color_rgb, _reject_unknown_keys, _require_number,
+    _validate_ffmpeg_color,
 )
 from scriptvedit.ffmpeg import (  # noqa: F401
-    _FILTER_SCRIPT_THRESHOLD, _decoder_input_args, _externalize_long_filters,
-    _ffmpeg_available_encoders, _run_ffmpeg, _run_ffmpeg_to_cache,
+    _FILTER_SCRIPT_THRESHOLD, _atomic_write_bytes, _atomic_write_text, _decoder_input_args,
+    _externalize_long_filters, _ffmpeg_available_encoders, _run_ffmpeg, _run_ffmpeg_to_cache,
 )
 from scriptvedit.cache import (  # noqa: F401
     _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops,
@@ -143,8 +144,8 @@ from scriptvedit.cache import (  # noqa: F401
     _is_cache_artifact_path, _is_pending_cache_path, _iter_cache_files, _layer_cache_paths,
     _effective_quality, _morph_cache_path, _morph_input_frame_path, _op_fingerprint_str,
     _op_prefix_fingerprint, _ops_effective_quality, _respects_fast_hint,
-    _particle_cache_path, _prune_empty_dirs, _split_ops, _validate_morph_position,
-    _web_cache_path, cache_clear, cache_gc, cache_stats,
+    _particle_cache_path, _prune_empty_dirs, _sig_key, _split_ops, _src_signature,
+    _validate_morph_position, _web_cache_path, cache_clear, cache_gc, cache_stats,
 )
 from scriptvedit.text import (  # noqa: F401
     _ASS_NAMED_COLORS, _DEFAULT_FONT_CANDIDATES, _TEXT_ANCHORS, _build_drawtext_filter,
@@ -201,7 +202,7 @@ from scriptvedit.audio import (  # noqa: F401
     beat_sync, duck_under, loop, narrate, sfx, voice,
 )
 from scriptvedit.media import (  # noqa: F401
-    _XFADE_TRANSITIONS, _finalize_generated_object, _source_signature, _validate_xfade_kind,
+    _XFADE_TRANSITIONS, _finalize_generated_object, _validate_xfade_kind,
     _xfade_scale_chain, slideshow, transition, video_sequence,
 )
 from scriptvedit.web import (  # noqa: F401

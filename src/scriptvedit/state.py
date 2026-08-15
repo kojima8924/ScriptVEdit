@@ -94,7 +94,6 @@ def _suggest_hint(name, candidates, prefix="\nもしかして: "):
 
 
 _CACHE_DIR = "__cache__"
-_CHECKPOINT_DIR = os.path.join(_CACHE_DIR, "checkpoints")
 _ARTIFACT_DIR = os.path.join(_CACHE_DIR, "artifacts")
 _ENGINE_VER = "8"
 

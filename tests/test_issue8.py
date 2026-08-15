@@ -170,16 +170,20 @@ def test_tts_atomic_temp_paths_are_unique_and_cleaned(monkeypatch, tmp_path):
     """TTS一時ファイルは同じ確定先でも衝突せず、例外時も残らない"""
     from scriptvedit import tts as svtts
 
+    # _atomic_write_bytes は ffmpeg モジュールへ集約されたため、
+    # 一時パス生成のフックも ffmpeg 側の _unique_tmp_path に当てる
+    from scriptvedit import ffmpeg as svff
+
     final = tmp_path / "voice.wav"
     created = []
-    original_unique = svtts._unique_tmp_path
+    original_unique = svff._unique_tmp_path
 
     def recording_unique(path):
         result = original_unique(path)
         created.append(result)
         return result
 
-    monkeypatch.setattr(svtts, "_unique_tmp_path", recording_unique)
+    monkeypatch.setattr(svff, "_unique_tmp_path", recording_unique)
     svtts._atomic_write_bytes(str(final), b"one")
     svtts._atomic_write_bytes(str(final), b"two")
     assert len(set(created)) == 2

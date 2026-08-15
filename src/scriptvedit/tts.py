@@ -61,7 +61,7 @@ import urllib.request
 import warnings
 import wave
 
-from scriptvedit.ffmpeg import _unique_tmp_path
+from scriptvedit.ffmpeg import _atomic_write_bytes, _unique_tmp_path
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 50021
@@ -138,21 +138,6 @@ def _cache_path(backend, text, speaker, speed, pitch, cache_dir, engine=None):
         sig += f"||engine={engine}"
     key = hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
     return os.path.join(cache_dir, f"{key}.wav")
-
-
-def _atomic_write_bytes(path, data):
-    """一時パスへ書き込み → os.replace で確定（壊れた部分ファイルを残さない）"""
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp_path = _unique_tmp_path(path)
-    try:
-        with open(tmp_path, "wb") as f:
-            f.write(data)
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
 
 
 def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
@@ -404,7 +389,7 @@ def _edge_import():
 def _edge_available():
     """edge-tts が import できるか（自動選択の判定用）"""
     try:
-        import edge_tts  # noqa: F401
+        _edge_import()
         return True
     except ImportError:
         return False

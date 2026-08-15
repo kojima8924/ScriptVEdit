@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import os
-import hashlib
 
 
 # --- トランジション/スライドショー（xfade） ---
@@ -30,17 +29,6 @@ def _validate_xfade_kind(func_name, kind):
         raise ValueError(
             f"{func_name}: 未知のtransition '{kind}'。{hint}\n"
             f"有効な名前: {', '.join(sorted(_XFADE_TRANSITIONS))}")
-
-
-def _source_signature(path):
-    """素材パスの署名を返す（キャッシュ生成物はパス署名、通常素材はFFP署名）"""
-    if _is_cache_artifact_path(path):
-        # キャッシュ生成物はパス自体が内容由来の鍵を含む（dry_runでは未生成でFFP不可）
-        return f"src={_norm_src_path(path)}"
-    try:
-        return f"ffp={_file_fingerprint(path)}"
-    except OSError:
-        return f"src={_norm_src_path(path)}"
 
 
 def _xfade_scale_chain(w, h):
@@ -114,11 +102,11 @@ def slideshow(images, each=3.0, transition="fade", t_dur=0.5, size=None):
 
     # キャッシュ署名
     sigs = ["slideshow"]
-    sigs.extend(_source_signature(img) for img in images)
+    sigs.extend(_src_signature(img) for img in images)
     sigs.extend([f"each={each}", f"tr={transition}", f"tdur={t_dur}",
                  f"size={w}x{h}", f"fps={fps}", f"ev={_ENGINE_VER}",
                  f"bpf={_BAKE_PIXFMT_VER}"])
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     cache_path = os.path.join(_ARTIFACT_DIR, "xfade", f"{key}.mkv")
 
     # コマンド構築: 各画像を each+t_dur 秒（最後は each 秒）でループ入力し xfade 連結
@@ -194,11 +182,11 @@ def transition(obj_a, obj_b, kind="fade", duration=1.0):
 
     # キャッシュ署名
     sigs = ["transition",
-            _source_signature(obj_a.source), _source_signature(obj_b.source),
+            _src_signature(obj_a.source), _src_signature(obj_b.source),
             f"da={dur_a}", f"db={dur_b}", f"kind={kind}", f"dur={duration}",
             f"size={w}x{h}", f"fps={fps}", f"ev={_ENGINE_VER}",
             f"bpf={_BAKE_PIXFMT_VER}"]
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     cache_path = os.path.join(_ARTIFACT_DIR, "xfade", f"{key}.mkv")
 
     # コマンド構築: 両素材を共通サイズ/fpsへ正規化し xfade で連結
@@ -312,11 +300,11 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
     fps = proj.fps if proj else 30
 
     sigs = ["video_sequence"]
-    sigs.extend(_source_signature(s) for s in sources)
+    sigs.extend(_src_signature(s) for s in sources)
     sigs.extend([f"tr={transition}", f"tdur={t_dur}", f"size={w}x{h}",
                  f"fps={fps}", f"audio={all_audio}", f"ev={_ENGINE_VER}",
                  f"bpf={_BAKE_PIXFMT_VER}"])
-    key = hashlib.sha256("||".join(sigs).encode()).hexdigest()[:16]
+    key = _sig_key(sigs)
     cache_path = os.path.join(_ARTIFACT_DIR, "xfade", f"{key}.mkv")
 
     # コマンド構築: 各クリップを共通サイズ/fpsへ正規化し xfade（+acrossfade）連結
@@ -360,7 +348,7 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.cache import _file_fingerprint, _is_cache_artifact_path, _norm_src_path
+from scriptvedit.cache import _sig_key, _src_signature
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache
 from scriptvedit.objects import Object
 from scriptvedit.project import Project

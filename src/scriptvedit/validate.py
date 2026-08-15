@@ -112,6 +112,22 @@ def _require_number(func_name, param_name, value, lo=None, hi=None):
     return value
 
 
+def _reject_unknown_keys(func_name, params, valid_keys):
+    """**params の未知キー（タイポの可能性大）を構築時に明示エラーにする。
+
+    func_name が None のときはプレフィックス無しの従来文言
+    （morph モジュール単体利用時の書式）を維持する。
+    エラーメッセージの書式は既存テスト・利用者スクリプトが照合しているため
+    変えないこと。
+    """
+    unknown = set(params) - set(valid_keys)
+    if unknown:
+        prefix = f"{func_name}: 未知のパラメータ " if func_name else "未知のパラメータ: "
+        raise ValueError(
+            f"{prefix}{sorted(unknown)}"
+            f"（有効なキー: {sorted(valid_keys)}）")
+
+
 def _require_time(func_name, param_name, value, *, lo=None, lo_exclusive=False):
     """時刻・尺パラメータ共通の検証（有限・非bool・下限）。
 

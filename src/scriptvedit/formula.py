@@ -17,6 +17,7 @@ import hashlib
 
 from scriptvedit.state import _ARTIFACT_DIR
 from scriptvedit.cache import _file_fingerprint
+from scriptvedit.ffmpeg import _unique_tmp_path
 from scriptvedit.objects import Object
 from scriptvedit.validate import _FFMPEG_COLOR_NAMES, _require_number
 from scriptvedit.web import _TEMPLATES_DIR, _template_path
@@ -161,53 +162,61 @@ def _render_formula_png(spec, out_path, fn="formula"):
     url = "file:///" + html_path.replace(os.sep, "/")
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    tmp_path = f"{out_path}.{os.getpid()}.tmp"
+    # 一時パスは pid + 乱数でユニーク化（pid だけだと同一プロセス内の
+    # 並列ワーカ同士で衝突しうる）。成功時のみ os.replace で確定する
+    tmp_path = _unique_tmp_path(out_path)
 
-    with sync_playwright() as pw:
-        try:
-            browser = pw.chromium.launch()
-        except Exception as e:
-            raise RuntimeError(
-                f"{fn}: Chromium の起動に失敗しました。\n"
-                f"  playwright install chromium\n"
-                f"を実行してブラウザを導入してください。\n元エラー: {e}") from None
-        try:
-            page = browser.new_page(viewport={"width": 1200, "height": 800})
-            page.goto(url)
-            # 同梱KaTeXのロード完了を待つ（CDN不使用のためオフラインでも成立する）
-            page.wait_for_function(
-                "typeof globalThis.katex === 'object' "
-                "&& typeof globalThis.renderFormula === 'function'", timeout=10000)
-            err = page.evaluate("d => globalThis.renderFormula(d)", spec)
-            if err:
-                idx = err.get("index", 0)
-                bad = spec["lines"][idx] if idx < len(spec["lines"]) else ""
-                where = f"（{idx + 1}行目）" if len(spec["lines"]) > 1 else ""
-                raise ValueError(
-                    f"{fn}: LaTeX の構文エラーです{where}: {bad!r}\n"
-                    f"KaTeX: {err.get('error')}\n"
-                    f"KaTeX がサポートするコマンドのみ使用できます"
-                    f"（\\sum \\frac \\sqrt \\int \\begin{{cases}} 等）。")
-            box = page.evaluate("() => globalThis.formulaBox()")
-            w = int(box["w"] + 0.999)
-            h = int(box["h"] + 0.999)
-            if w < 1 or h < 1:
-                raise ValueError(
-                    f"{fn}: 数式のレンダリング結果が空です: {spec['lines']!r}")
-            if w > _FORMULA_MAX_PX or h > _FORMULA_MAX_PX:
-                raise ValueError(
-                    f"{fn}: 数式が大きすぎます（{w}x{h}px, 上限 {_FORMULA_MAX_PX}px）。"
-                    f"size={spec['size']} を小さくするか数式を分割してください。")
-            # 数式全体が収まるビューポートにしてから要素スクリーンショット
-            # （要素bboxぴったり = 余白トリム不要。omit_background で背景透過）
-            page.set_viewport_size({"width": w, "height": h})
-            # type="png" は必須（一時ファイル名が .tmp のため拡張子から推定できない）
-            page.locator("#formula").screenshot(
-                path=tmp_path, type="png", omit_background=True)
-        finally:
-            browser.close()
+    try:
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch()
+            except Exception as e:
+                raise RuntimeError(
+                    f"{fn}: Chromium の起動に失敗しました。\n"
+                    f"  playwright install chromium\n"
+                    f"を実行してブラウザを導入してください。\n元エラー: {e}") from None
+            try:
+                page = browser.new_page(viewport={"width": 1200, "height": 800})
+                page.goto(url)
+                # 同梱KaTeXのロード完了を待つ（CDN不使用のためオフラインでも成立する）
+                page.wait_for_function(
+                    "typeof globalThis.katex === 'object' "
+                    "&& typeof globalThis.renderFormula === 'function'", timeout=10000)
+                err = page.evaluate("d => globalThis.renderFormula(d)", spec)
+                if err:
+                    idx = err.get("index", 0)
+                    bad = spec["lines"][idx] if idx < len(spec["lines"]) else ""
+                    where = f"（{idx + 1}行目）" if len(spec["lines"]) > 1 else ""
+                    raise ValueError(
+                        f"{fn}: LaTeX の構文エラーです{where}: {bad!r}\n"
+                        f"KaTeX: {err.get('error')}\n"
+                        f"KaTeX がサポートするコマンドのみ使用できます"
+                        f"（\\sum \\frac \\sqrt \\int \\begin{{cases}} 等）。")
+                box = page.evaluate("() => globalThis.formulaBox()")
+                w = int(box["w"] + 0.999)
+                h = int(box["h"] + 0.999)
+                if w < 1 or h < 1:
+                    raise ValueError(
+                        f"{fn}: 数式のレンダリング結果が空です: {spec['lines']!r}")
+                if w > _FORMULA_MAX_PX or h > _FORMULA_MAX_PX:
+                    raise ValueError(
+                        f"{fn}: 数式が大きすぎます（{w}x{h}px, 上限 {_FORMULA_MAX_PX}px）。"
+                        f"size={spec['size']} を小さくするか数式を分割してください。")
+                # 数式全体が収まるビューポートにしてから要素スクリーンショット
+                # （要素bboxぴったり = 余白トリム不要。omit_background で背景透過）
+                page.set_viewport_size({"width": w, "height": h})
+                # type="png" は明示指定（一時ファイル名から形式を推定させない）
+                page.locator("#formula").screenshot(
+                    path=tmp_path, type="png", omit_background=True)
+            finally:
+                browser.close()
 
-    os.replace(tmp_path, out_path)  # アトミック置換（中断で壊れたPNGを残さない）
+        os.replace(tmp_path, out_path)  # アトミック置換（中断で壊れたPNGを残さない）
+    finally:
+        try:
+            os.remove(tmp_path)  # 失敗時の残骸掃除（成功時は replace 済みで存在しない）
+        except OSError:
+            pass
     return out_path
 
 

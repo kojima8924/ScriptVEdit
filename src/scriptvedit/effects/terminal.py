@@ -36,12 +36,7 @@ def morph_to(target, blend=None, **morph_params):
     except ImportError:
         pass
     else:
-        unknown = set(morph_params) - set(MORPH_PARAM_KEYS)
-        if unknown:
-            raise ValueError(
-                f"morph_to: 未知のパラメータ {sorted(unknown)}"
-                f"（有効なキー: {sorted(MORPH_PARAM_KEYS)}）"
-            )
+        _reject_unknown_keys("morph_to", morph_params, MORPH_PARAM_KEYS)
     # ターゲットObjectをProjectから除外（morphに消費される）
     proj = Project._current
     if proj is not None and target in proj.objects:
@@ -71,11 +66,7 @@ def _check_particle_params(func, params):
         from scriptvedit.morph import PARTICLE_PARAM_KEYS
     except ImportError:
         return
-    unknown = set(params) - set(PARTICLE_PARAM_KEYS)
-    if unknown:
-        raise ValueError(
-            f"{func}: 未知のパラメータ {sorted(unknown)}"
-            f"（有効なキー: {sorted(PARTICLE_PARAM_KEYS)}）")
+    _reject_unknown_keys(func, params, PARTICLE_PARAM_KEYS)
 
 
 def explode_to(blend=None, **particle_params):
@@ -129,3 +120,4 @@ def assemble_from(source, blend=None, **particle_params):
 from scriptvedit.expr import _resolve_param
 from scriptvedit.objects import Effect, Object
 from scriptvedit.project import Project
+from scriptvedit.validate import _reject_unknown_keys

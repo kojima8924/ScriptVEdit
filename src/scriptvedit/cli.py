@@ -182,10 +182,7 @@ def _main(argv=None):
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        if args.stats:
-            cache_stats(args.dir)
-        else:
-            cache_stats(args.dir)  # 既定は統計表示
+        cache_stats(args.dir)  # 既定は統計表示（--stats 指定時も同じ）
         return 0
     if args.command == "new":
         try:

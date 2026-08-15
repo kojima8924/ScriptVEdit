@@ -115,18 +115,26 @@ def _check_ffmpeg():
         )
 
 
+def _ensure_parent(path):
+    """保存先の親ディレクトリを作成し、正規化したパス文字列を返す。
+
+    親が存在しなくても作成するため、どの分岐から呼んでも
+    FileNotFoundError にならない。
+    """
+    target = os.fspath(path)
+    parent = os.path.dirname(os.path.abspath(target))
+    os.makedirs(parent, exist_ok=True)
+    return target
+
+
 def _save_actual(actual, save_actual):
     """失敗時のデバッグ用に実フレームを PNG 保存する。
 
-    保存先の親ディレクトリが存在しなくても作成してから保存するため、
-    どの失敗分岐から呼んでも FileNotFoundError にならない。
     save_actual が None の場合は何もしない。
     """
     if save_actual is None:
         return
-    target = os.fspath(save_actual)
-    parent = os.path.dirname(os.path.abspath(target))
-    os.makedirs(parent, exist_ok=True)
+    target = _ensure_parent(save_actual)
     Image.fromarray(actual, mode="RGB").save(target)
 
 
@@ -161,9 +169,7 @@ def extract_frame(video_path, at, out_png=None, *, accurate=True):
     _check_ffmpeg()
 
     if out_png is not None:
-        target = os.fspath(out_png)
-        parent = os.path.dirname(os.path.abspath(target))
-        os.makedirs(parent, exist_ok=True)
+        target = _ensure_parent(out_png)
         tmp_path = None
     else:
         # 一時 PNG を作って読み込み後に削除(Windows のファイルロックを避けるため
@@ -312,9 +318,7 @@ def frame_diff(img_a, img_b, out_png=None, *, change_threshold=2):
     }
 
     if out_png is not None:
-        target = os.fspath(out_png)
-        parent = os.path.dirname(os.path.abspath(target))
-        os.makedirs(parent, exist_ok=True)
+        target = _ensure_parent(out_png)
         # 差分を 0-255 → 0-1 に正規化してヒートマップ化
         heat = _heatmap_colorize(per_pixel_max.astype(np.float64) / 255.0)
         Image.fromarray(heat, mode="RGB").save(target)

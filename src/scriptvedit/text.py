@@ -730,20 +730,9 @@ def karaoke(lines, *, style=None):
     key = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
     ass_path = os.path.join(_ARTIFACT_DIR, "karaoke", f"{key}.ass")
     if not os.path.exists(ass_path):
-        os.makedirs(os.path.dirname(ass_path), exist_ok=True)
-        # 固定 ".tmp" だと同一内容の並列生成で相互に書きかけを壊す。
-        # pid+uuid でユニーク化する（issue #13 P2-15。内容は同一鍵なので
-        # os.replace の後勝ちでも成果物は等価）
-        tmp_path = _unique_tmp_path(ass_path)
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            os.replace(tmp_path, ass_path)
-        finally:
-            try:
-                os.remove(tmp_path)  # 失敗時の残骸掃除（成功時は存在しない）
-            except OSError:
-                pass
+        # 原子的書き込み（一時パスは pid+uuid でユニーク化。同一内容の並列生成でも
+        # 相互に壊さず、os.replace の後勝ちでも成果物は等価。issue #13 P2-15）
+        _atomic_write_text(ass_path, content)
 
     return subtitles(ass_path)
 
@@ -751,7 +740,7 @@ def karaoke(lines, *, style=None):
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
 from scriptvedit.cache import _file_fingerprint
 from scriptvedit.expr import Const, Var, _resolve_param, round, sign
-from scriptvedit.ffmpeg import _unique_tmp_path
+from scriptvedit.ffmpeg import _atomic_write_text
 from scriptvedit.objects import Object
 from scriptvedit.project import Project
 from scriptvedit.state import _ARTIFACT_DIR
