@@ -7,6 +7,7 @@ import warnings
 import time as _time
 import shutil as _shutil
 import threading as _threading
+import builtins as _builtins
 
 from scriptvedit.state import _CACHE_DIR
 
@@ -420,11 +421,57 @@ def _split_ops(ops):
     return bakeable, live
 
 
+def _fold_time_effects(duration, effects, upto=None, *, audio=False):
+    """時間系エフェクトを並び順に尺へ畳み込む（映像/音声共通ヘルパ）。
+
+    映像: trim / speed / freeze_frame / repeat、
+    音声(audio=True): atrim / atempo / arepeat（freeze_frame は音声に無い）。
+    upto 指定時はその Effect の直前まで畳み込む（reverse/freeze_frame の
+    「このEffectの入力実効尺」推定用）。
+    Object.length()（objects.py）と _estimate_effect_input_length
+    （filters/video.py）の共通実装。
+    """
+    trim_name = "atrim" if audio else "trim"
+    tempo_name = "atempo" if audio else "speed"
+    tempo_key = "rate" if audio else "factor"
+    repeat_name = "arepeat" if audio else "repeat"
+    cur = duration
+    for e in effects:
+        if e is upto:
+            break
+        if e.name == trim_name:
+            s = e.params.get("start") or 0
+            if s:
+                cur = _builtins.max(0.0, cur - s)
+            d = e.params.get("duration")
+            if d is not None:
+                cur = _builtins.min(cur, d)
+        elif e.name == tempo_name:
+            f = e.params.get(tempo_key, 1.0)
+            if f > 0:
+                cur = cur / f
+        elif not audio and e.name == "freeze_frame":
+            # at がその時点の実効尺以上なら静止区間は成立しないため加算しない
+            # （_build_video_pre_filters 側では ValueError になるが、length()は
+            #   実尺との整合を保つため at>=尺 では +duration を計上しない）
+            at = e.params.get("at", 0.0)
+            if at < cur:
+                cur = cur + e.params.get("duration", 0.0)
+        elif e.name == repeat_name:
+            cur = cur * e.params.get("count", 1)
+    return cur
+
+
 def _apply_time_effects_to_duration(dur, effects):
     """時間系 live Effect（speed/freeze_frame）を尺に反映した表示尺を返す。
 
     speed: 尺 / factor、freeze_frame: 尺 + duration、reverse: 変化なし。
     effects の並び順に適用する。
+
+    ※ _fold_time_effects と似ているが統合しない: こちらは checkpoint 後の
+    live op 列専用で trim を意図的に畳まない（trim は bakeable でベイク側の
+    尺に反映済み）。また要素が Effect 以外でも落ちないよう getattr で名前を
+    取る。speed のガードも `if f:`（truthy）のままにしてある。
     """
     cur = dur
     for e in effects:

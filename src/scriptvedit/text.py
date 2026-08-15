@@ -234,7 +234,7 @@ def _text_anchor_xy(x_expr, y_expr, u_expr, anchor, *, safe_area=None,
 def _build_drawtext_filter(spec, text_opt, start, dur, *, enable=None):
     """1個の drawtext フィルタ文字列を構築（text/typewriter/counter 共通）。
     text_opt: 完成済みの "textfile=..." または "text=..." オプション文字列。"""
-    u_expr = f"clip((t-{start})/{dur}\\,0\\,1)"
+    u_expr = _u_expr(start, dur)
     font = _escape_ffpath(spec["font"])
     safe_padding = (0, 0, 0, 0)
     if spec.get("safe_area") is not None:
@@ -349,7 +349,7 @@ def _build_text_filters(obj, start, dur):
         # value = from_ + (to-from_)*u を drawtext の %{eif} で整数表示（inline展開）
         # %{eif} は切り捨てのため、四捨五入相当に +0.5*sign(to-from_) を加えて
         # 目標値 to に到達させる（u<1 でも to まで表示されるように）。
-        u_expr = f"clip((t-{start})/{dur}\\,0\\,1)"
+        u_expr = _u_expr(start, dur)
         val_expr = (spec["from_"] + (spec["to"] - spec["from_"]) * Var("u")
                     + 0.5 * sign(spec["to"] - spec["from_"]))
         val_ff = val_expr.to_ffmpeg(u_expr)
@@ -741,6 +741,7 @@ def karaoke(lines, *, style=None):
 from scriptvedit.cache import _file_fingerprint
 from scriptvedit.expr import Const, Var, _resolve_param, round, sign
 from scriptvedit.ffmpeg import _atomic_write_text
+from scriptvedit.filters.video import _u_expr
 from scriptvedit.objects import Object
 from scriptvedit.project import Project
 from scriptvedit.state import _ARTIFACT_DIR

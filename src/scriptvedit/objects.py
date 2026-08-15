@@ -920,49 +920,13 @@ class Object:
             audio_active = bool(info.get("has_audio", False))
         durs = []
         if self.has_video:
-            v = base_dur
-            # 映像 時間系（trim/speed/freeze_frame）を並び順に反映
-            for e in self.effects:
-                if e.name == "trim":
-                    d = e.params.get("duration")
-                    s = e.params.get("start") or 0
-                    if s:
-                        v = _builtins.max(0.0, v - s)
-                    if d is not None:
-                        v = min(v, d)
-                elif e.name == "speed":
-                    factor = e.params.get("factor", 1.0)
-                    if factor > 0:
-                        v = v / factor
-                elif e.name == "freeze_frame":
-                    # at がその時点の実効尺以上なら静止区間は成立しないため加算しない
-                    # （_build_video_pre_filters 側では ValueError になるが、length()は
-                    #   実尺との整合を保つため at>=尺 では +duration を計上しない）
-                    at = e.params.get("at", 0.0)
-                    if at < v:
-                        v = v + e.params.get("duration", 0.0)
-                elif e.name == "repeat":
-                    v = v * e.params.get("count", 1)
-            durs.append(v)
+            # 映像 時間系（trim/speed/freeze_frame/repeat）を並び順に反映
+            durs.append(_fold_time_effects(base_dur, self.effects))
         if audio_active:
-            a = base_dur
-            # 音声 atrim/atempo を並び順に反映
+            # 音声 atrim/atempo/arepeat を並び順に反映
             # （speed()由来の自動atempoも音声の実尺を実際に変えるため含める）
-            for e in self.audio_effects:
-                if e.name == "atrim":
-                    d = e.params.get("duration")
-                    s = e.params.get("start") or 0
-                    if s:
-                        a = _builtins.max(0.0, a - s)
-                    if d is not None:
-                        a = min(a, d)
-                elif e.name == "atempo":
-                    rate = e.params.get("rate", 1.0)
-                    if rate > 0:
-                        a = a / rate
-                elif e.name == "arepeat":
-                    a = a * e.params.get("count", 1)
-            durs.append(a)
+            durs.append(_fold_time_effects(
+                base_dur, self.audio_effects, audio=True))
         if not durs:
             # 両 stream とも削除/不在 → 元尺を返す（0 は返さない）
             return base_dur
@@ -1314,8 +1278,7 @@ def group(*objects):
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.cache import _build_unified_ops, _file_fingerprint, _op_prefix_fingerprint, _ops_effective_quality, _sig_key, _src_signature, _web_cache_path
-from scriptvedit.expr import min
+from scriptvedit.cache import _build_unified_ops, _file_fingerprint, _fold_time_effects, _op_prefix_fingerprint, _ops_effective_quality, _sig_key, _src_signature, _web_cache_path
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions
 from scriptvedit.plugins import _EFFECT_PLUGINS

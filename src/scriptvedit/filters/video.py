@@ -1,12 +1,37 @@
 # -*- coding: utf-8 -*-
 
+import os
 import subprocess
 import math as _math
 import warnings
 import builtins as _builtins
 
 
+# --- 共通式ヘルパー ---
+
+def _u_expr(start, dur, var="t"):
+    """エフェクト進行度 u の正規化式文字列を返す（clip((var-start)/dur, 0, 1)）。
+
+    var: 時間変数名。通常フィルタ（scale/rotate/overlay等）は小文字 "t"、
+    geq/blend 等 framesync 系は大文字 "T"（小文字 t は未定義）。
+    カンマは filtergraph 用に "\\," へエスケープ済み。
+    """
+    return f"clip(({var}-{start})/{dur}\\,0\\,1)"
+
+
+# geq の RGB 素通し接頭辞（アルファのみ加工する geq 式の共通部分。
+# fade/wipe/opacity/rounded で `f"{_GEQ_RGB}:a='...'"` の形で使う）
+_GEQ_RGB = "geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)'"
+
+
 # --- メディア情報ヘルパー ---
+
+# メディア寸法probeのプロセス内メモ（(path, size, mtime_ns) → (w, h)）。
+# _probe_video_codec（ffmpeg.py）と同じキー方式。probe失敗の (None, None) も
+# メモする（同一ファイルへの繰り返しprobeと警告スパムを防ぐ）。
+# ffprobe不在（FileNotFoundError）はメモしない（PATH修正後に回復できるように）。
+_MEDIA_DIMS_MEMO = {}
+
 
 def _get_media_dimensions(filepath):
     """メディアの幅・高さを取得 (ffprobe)
@@ -17,6 +42,7 @@ def _get_media_dimensions(filepath):
     付いたり付かなかったりする）。dry_run の出力はキャッシュ状態に依存させない。
     ※ 実レンダでは通常どおり probe され、pad（SEGVバリア）が正しく入る。
     """
+    # dry_run の特殊分岐はプロセス内で状態が変わるため、メモ化の前に判定する
     if _is_pending_cache_path(filepath):
         # dry_run中の未生成キャッシュ予定パスはprobeしない（警告スパム防止）
         return None, None
@@ -24,21 +50,31 @@ def _get_media_dimensions(filepath):
     if getattr(proj, "_dry_run", False) and _is_cache_artifact_path(filepath):
         return None, None
     try:
+        st = os.stat(filepath)
+        key = (filepath, st.st_size, st.st_mtime_ns)
+    except OSError:
+        key = None  # 不在ファイル等はメモ不可（従来どおり毎回probeへ）
+    if key is not None and key in _MEDIA_DIMS_MEMO:
+        return _MEDIA_DIMS_MEMO[key]
+    try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=width,height", "-of", "csv=p=0", filepath],
             capture_output=True, text=True, check=True, timeout=10)
         parts = result.stdout.strip().split(',')
-        return int(parts[0]), int(parts[1])
+        dims = (int(parts[0]), int(parts[1]))
     except FileNotFoundError:
         warnings.warn("ffprobeが見つかりません。PATHを確認してください。")
         return None, None
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         warnings.warn(f"メディアサイズの取得に失敗 ({filepath}): {e}")
-        return None, None
+        dims = (None, None)
     except (ValueError, IndexError) as e:
         warnings.warn(f"ffprobe出力のパースに失敗 ({filepath}): {e}")
-        return None, None
+        dims = (None, None)
+    if key is not None:
+        _MEDIA_DIMS_MEMO[key] = dims
+    return dims
 
 
 def _get_base_dimensions(obj):
@@ -162,38 +198,49 @@ def _build_video_overlay_parts(obj, input_idx, current_base, dur, head_trim=None
     out_label = f"[v{input_idx}]"
     blend_eff = next((e for e in obj.effects if e.name == "blend_mode"), None)
     if blend_eff is not None and blend_eff.params.get("mode") != "normal":
-        # blend_mode: overlayフィルタは合成モード非対応のため、
-        # このオブジェクトのみ「透明キャンバスへ通常overlayした全面フレーム」を
-        # blend=cN_mode=<mode> でベースと合成し、オブジェクトのアルファ領域だけ
-        # maskedmerge で採用する経路に切り替える。
-        # （blendはアルファ非考慮のため、透明領域まで合成されるのを防ぐ）
-        proj = Project._current
-        cw = proj.width if proj else 1920
-        ch = proj.height if proj else 1080
-        cfps = proj.fps if proj else 30
-        cdur = (proj.duration if proj and proj.duration else None) or (start + dur)
-        mode = blend_eff.params["mode"]
-        q = f"bm{input_idx}"
-        # 1) 透明キャンバスへ通常overlay（位置/enableは通常経路と同一）
-        parts.append(f"color=c=black@0.0:s={cw}x{ch}:r={cfps}:d={cdur}[{q}c]")
-        parts.append(
-            f"[{q}c]{obj_label}overlay={x_expr}:{y_expr}:eof_action=pass{enable_str},"
-            f"format=rgba,split[{q}o1][{q}o2]")
-        # 2) アルファ抽出（maskedmergeのマスク。gbrapに揃えて全plane一致）
-        parts.append(f"[{q}o2]alphaextract,format=gbrap[{q}m]")
-        parts.append(f"[{q}o1]format=gbrap[{q}oc]")
-        # 3) 全面blend（obj=top, base=bottom。c3=アルファは指定せずtopを透過）
-        parts.append(f"{current_base}format=gbrap,split[{q}b1][{q}b2]")
-        parts.append(
-            f"[{q}oc][{q}b1]blend=c0_mode={mode}:c1_mode={mode}:c2_mode={mode}[{q}bl]")
-        # 4) オブジェクトのアルファ領域のみ合成結果を採用（enable外はベース素通し）
-        merge_enable = f"=enable='{enable_expr}'" if enable_expr else ""
-        parts.append(f"[{q}b2][{q}bl][{q}m]maskedmerge{merge_enable}{out_label}")
+        _build_blend_mode_overlay(
+            parts, blend_eff, input_idx, obj_label, current_base,
+            x_expr, y_expr, enable_expr, enable_str, start, dur, out_label)
         return parts, out_label
     parts.append(
         f"{current_base}{obj_label}overlay={x_expr}:{y_expr}:eof_action=pass{enable_str}{out_label}"
     )
     return parts, out_label
+
+
+def _build_blend_mode_overlay(parts, blend_eff, input_idx, obj_label, current_base,
+                              x_expr, y_expr, enable_expr, enable_str, start, dur,
+                              out_label):
+    """blend_mode合成経路のフィルタ行を parts へ追記する。
+
+    blend_mode: overlayフィルタは合成モード非対応のため、
+    このオブジェクトのみ「透明キャンバスへ通常overlayした全面フレーム」を
+    blend=cN_mode=<mode> でベースと合成し、オブジェクトのアルファ領域だけ
+    maskedmerge で採用する経路に切り替える。
+    （blendはアルファ非考慮のため、透明領域まで合成されるのを防ぐ）
+    """
+    proj = Project._current
+    cw = proj.width if proj else 1920
+    ch = proj.height if proj else 1080
+    cfps = proj.fps if proj else 30
+    cdur = (proj.duration if proj and proj.duration else None) or (start + dur)
+    mode = blend_eff.params["mode"]
+    q = f"bm{input_idx}"
+    # 1) 透明キャンバスへ通常overlay（位置/enableは通常経路と同一）
+    parts.append(f"color=c=black@0.0:s={cw}x{ch}:r={cfps}:d={cdur}[{q}c]")
+    parts.append(
+        f"[{q}c]{obj_label}overlay={x_expr}:{y_expr}:eof_action=pass{enable_str},"
+        f"format=rgba,split[{q}o1][{q}o2]")
+    # 2) アルファ抽出（maskedmergeのマスク。gbrapに揃えて全plane一致）
+    parts.append(f"[{q}o2]alphaextract,format=gbrap[{q}m]")
+    parts.append(f"[{q}o1]format=gbrap[{q}oc]")
+    # 3) 全面blend（obj=top, base=bottom。c3=アルファは指定せずtopを透過）
+    parts.append(f"{current_base}format=gbrap,split[{q}b1][{q}b2]")
+    parts.append(
+        f"[{q}oc][{q}b1]blend=c0_mode={mode}:c1_mode={mode}:c2_mode={mode}[{q}bl]")
+    # 4) オブジェクトのアルファ領域のみ合成結果を採用（enable外はベース素通し）
+    merge_enable = f"=enable='{enable_expr}'" if enable_expr else ""
+    parts.append(f"[{q}b2][{q}bl][{q}m]maskedmerge{merge_enable}{out_label}")
 
 
 def _build_transform_filters(obj):
@@ -255,6 +302,449 @@ def _build_transform_filters(obj):
     return filters
 
 
+# --- Effectフィルタのビルダー群（_build_effect_filters のディスパッチ先） ---
+#
+# 巨大な elif 連鎖を effect 名ごとの _fx_* 関数へ分解したもの。
+# 各ビルダーは (e, eff_idx, ctx) を受け取り、ctx.filters へフィルタ文字列を
+# 追記する（生成文字列は elif 連鎖時代と完全一致）。pad_size の更新も
+# ctx.pad_size への読み書きで元の適用順どおりに行う。
+
+class _FxCtx:
+    """Effectビルダー間で共有する可変コンテキスト
+
+    filters: 生成中のフィルタリスト（各ビルダーが追記する）
+    pad_size: (max_w, max_h) or None。scale が設定し、drop_shadow/outline が
+        拡張分を加算、blur_background_fill が上書き、プラグインは pad_state
+        経由で更新する（Effectの並び順どおりに反映される）。
+    """
+    __slots__ = ("obj", "filters", "pad_size", "start", "dur",
+                 "base_dims", "label_prefix")
+
+    def __init__(self, obj, start, dur, base_dims, label_prefix):
+        self.obj = obj
+        self.filters = []
+        self.pad_size = None
+        self.start = start
+        self.dur = dur
+        self.base_dims = base_dims
+        self.label_prefix = label_prefix
+
+
+def _fx_scale(e, eff_idx, ctx):
+    """動的スケール（+ base_dims 既知時は固定サイズpad + SEGVバリア）"""
+    scale_expr = e.params.get("value", Const(1))
+    u_expr = _u_expr(ctx.start, ctx.dur)
+    ffmpeg_str = scale_expr.to_ffmpeg(u_expr)
+    ctx.filters.append(
+        f"scale=w='trunc(iw*({ffmpeg_str})/2)*2':h='trunc(ih*({ffmpeg_str})/2)*2':eval=frame"
+    )
+    # pad: scaleの出力を最大サイズの固定フレームに収め、overlay位置を安定化
+    if ctx.base_dims and ctx.base_dims[0] is not None:
+        bw, bh = ctx.base_dims
+        # 定数スケールはサンプリング不要（固定点評価の短絡）
+        if isinstance(scale_expr, Const):
+            max_s = scale_expr.value
+        else:
+            # 固定格子サンプリングで最大スケールを推定。
+            # 振動系関数（sin等）を含む式は i/100 の格子とエイリアスして
+            # 点間ピークを取りこぼす（例: 1+0.5*sin(100*PI*u) は全標本1、
+            # 実際は1.5 → pad不足でEINVAL）ため、密な素数格子で評価する
+            # （issue #13 P2-13）
+            n_grid = 4999 if _expr_has_oscillatory(scale_expr) else 100
+            try:
+                max_s = _builtins.max(
+                    scale_expr.eval_at(i / n_grid)
+                    for i in range(n_grid + 1))
+            except Exception as exc:
+                raise ValueError(
+                    f"scale式を数値評価できないため、padサイズを決定できません: {exc}\n"
+                    f"scale() には u のみに依存する数値評価可能な式を渡してください。"
+                ) from exc
+        max_w = _math.ceil(bw * max_s / 2) * 2
+        max_h = _math.ceil(bh * max_s / 2) * 2
+        ctx.filters.append("format=rgba")
+        ctx.filters.append(
+            f"pad={max_w}:{max_h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000:eval=frame"
+        )
+        # SEGVバリア: FFmpeg 8.0では scale(eval=frame)+rotate の組み合わせで
+        # SEGV(0xC0000005)が発生し、pad/format=rgba 単体では防げない。
+        # copy フィルタによるバッファ分離が必要（検証済みの回避策）。
+        ctx.filters.append("copy")
+        ctx.pad_size = (max_w, max_h)
+
+
+def _fx_fade(e, eff_idx, ctx):
+    """フェード（native fade化を試行し、不可ならgeqへフォールバック）"""
+    alpha_expr = e.params.get("alpha", Const(1.0))
+    ctx.filters.append("format=rgba")
+    # ネイティブfadeを試行（geq比で10倍高速）
+    native = _try_native_fade(alpha_expr, ctx.start, ctx.dur)
+    if native:
+        ctx.filters.extend(native)
+    else:
+        # 複雑なパターンはgeqにフォールバック
+        u_expr = _u_expr(ctx.start, ctx.dur, "T")
+        ffmpeg_str = alpha_expr.to_ffmpeg(u_expr)
+        ctx.filters.append(
+            f"{_GEQ_RGB}:a='alpha(X\\,Y)*clip({ffmpeg_str}\\,0\\,1)'"
+        )
+
+
+def _fx_rotate_to(e, eff_idx, ctx):
+    """動的回転（expand時は対角線長の固定サイズ出力）"""
+    rad_expr = e.params.get("rad", Const(0))
+    u_expr = _u_expr(ctx.start, ctx.dur)
+    ang_str = rad_expr.to_ffmpeg(u_expr)
+    expand = e.params.get("expand", True)
+    fill = e.params.get("fill", "0x00000000")
+    ctx.filters.append("format=rgba")
+    if expand:
+        # 動的回転: ow/ohは初期化時に1度だけ評価されるため
+        # rotw/rothではなく対角線長で固定サイズにする
+        ctx.filters.append(
+            f"rotate=angle='{ang_str}':fillcolor={fill}"
+            f":ow='hypot(iw,ih)':oh='hypot(iw,ih)'"
+        )
+    else:
+        ctx.filters.append(
+            f"rotate=angle='{ang_str}':fillcolor={fill}:ow=iw:oh=ih"
+        )
+
+
+def _fx_wipe(e, eff_idx, ctx):
+    """方向ワイプ（geqでアルファを進行度に応じてカット）"""
+    prog_expr = e.params.get("progress", Const(1))
+    # geqの時間変数は大文字T（小文字tは未定義。fade 経路と同じ）
+    u_expr = _u_expr(ctx.start, ctx.dur, "T")
+    ffmpeg_str = prog_expr.to_ffmpeg(u_expr)
+    direction = e.params.get("direction", "left")
+    ctx.filters.append("format=rgba")
+    if direction == "left":
+        ctx.filters.append(f"{_GEQ_RGB}:a='if(lte(X\\,W*({ffmpeg_str}))\\,alpha(X\\,Y)\\,0)'")
+    elif direction == "right":
+        ctx.filters.append(f"{_GEQ_RGB}:a='if(gte(X\\,W*(1-({ffmpeg_str})))\\,alpha(X\\,Y)\\,0)'")
+    elif direction == "up":
+        ctx.filters.append(f"{_GEQ_RGB}:a='if(gte(Y\\,H*(1-({ffmpeg_str})))\\,alpha(X\\,Y)\\,0)'")
+    elif direction == "down":
+        ctx.filters.append(f"{_GEQ_RGB}:a='if(lte(Y\\,H*({ffmpeg_str}))\\,alpha(X\\,Y)\\,0)'")
+
+
+def _fx_color_shift(e, eff_idx, ctx):
+    """色相/彩度/明度シフト（hue + eq。動的式は eval=frame）"""
+    u_expr = _u_expr(ctx.start, ctx.dur)
+    if "hue" in e.params:
+        h_str = e.params["hue"].to_ffmpeg(u_expr)
+        ctx.filters.append(f"hue=h={h_str}")
+    eq_parts = []
+    eq_dynamic = False
+    if "saturation" in e.params:
+        s_str = e.params["saturation"].to_ffmpeg(u_expr)
+        eq_parts.append(f"saturation={s_str}")
+        eq_dynamic = eq_dynamic or not isinstance(e.params["saturation"], Const)
+    if "brightness" in e.params:
+        b_str = e.params["brightness"].to_ffmpeg(u_expr)
+        eq_parts.append(f"brightness={b_str}")
+        eq_dynamic = eq_dynamic or not isinstance(e.params["brightness"], Const)
+    if eq_parts:
+        eq_filter = "eq=" + ":".join(eq_parts)
+        if eq_dynamic:
+            # eqの既定はeval=init（初期化時1回のみ評価）→ 動的式は毎フレーム評価が必要
+            eq_filter += ":eval=frame"
+        ctx.filters.append(eq_filter)
+
+
+def _fx_chroma_key(e, eff_idx, ctx):
+    """クロマキー（chromakey + rgba正規化）"""
+    color = e.params.get("color", "green")
+    sim = e.params.get("similarity", 0.1)
+    bl = e.params.get("blend", 0.0)
+    ctx.filters.append(f"chromakey=color={color}:similarity={sim}:blend={bl}")
+    # chromakeyはyuva出力 → 後段のgeq/overlay向けにrgbaへ正規化
+    ctx.filters.append("format=rgba")
+
+
+def _fx_vignette(e, eff_idx, ctx):
+    """ビネット（時間依存式は eval=frame）"""
+    # 注意: vignetteフィルタはアルファ非対応（透明部分は失われる）。全画面素材向け。
+    ang = e.params.get("angle", Const(_math.pi / 5))
+    if isinstance(ang, Const):
+        ctx.filters.append(
+            f"vignette=angle='clip({ang.to_ffmpeg('0')}\\,0\\,PI/2)'")
+    else:
+        # 時間依存式: eval=frame で毎フレーム評価（uは正規化時刻）
+        u_expr = _u_expr(ctx.start, ctx.dur)
+        ctx.filters.append(
+            f"vignette=angle='clip({ang.to_ffmpeg(u_expr)}\\,0\\,PI/2)':eval=frame")
+
+
+def _fx_pixelize(e, eff_idx, ctx):
+    """モザイク"""
+    s = e.params.get("size", 16)
+    ctx.filters.append(f"pixelize=w={s}:h={s}")
+
+
+def _fx_glow(e, eff_idx, ctx):
+    """グロー（split→gblur→blend=screen の複合チェーン。発光合成）"""
+    r = e.params.get("radius", 10)
+    it = e.params.get("intensity", 1.0)
+    p = f"{ctx.label_prefix}e{eff_idx}"
+    ctx.filters.append("format=rgba")
+    ctx.filters.append(
+        f"split[{p}a][{p}b];"
+        f"[{p}b]gblur=sigma={r}[{p}c];"
+        f"[{p}a][{p}c]blend=all_mode=screen:all_opacity={it}"
+    )
+
+
+def _fx_lut(e, eff_idx, ctx):
+    """3D LUT適用"""
+    # lut3d も fontfile/subtitles と同じパスエスケープを使う
+    ctx.filters.append(f"lut3d=file={_escape_ffpath(e.params['file'])}")
+
+
+def _fx_glitch(e, eff_idx, ctx):
+    """グリッチ（rgbashift + noise のプリセット。interval指定時は間欠発動）"""
+    strength = e.params.get("strength", 1.0)
+    iv = e.params.get("interval")
+    shift = _builtins.max(1, int(_builtins.round(4 * strength)))
+    shift_v = _builtins.max(1, shift // 2)
+    nstr = _builtins.min(100, _builtins.max(1, int(_builtins.round(20 * strength))))
+    enable = ""
+    if iv is not None:
+        # 各interval周期の先頭30%区間のみ有効化
+        on_dur = iv * 0.3
+        enable = f":enable='lt(mod(t-{ctx.start}\\,{iv})\\,{on_dur})'"
+    ctx.filters.append("format=rgba")
+    ctx.filters.append(f"rgbashift=rh={shift}:bh=-{shift}:gv={shift_v}{enable}")
+    ctx.filters.append(f"noise=alls={nstr}:allf=t+u{enable}")
+
+
+def _fx_perspective_warp(e, eff_idx, ctx):
+    """透視変形"""
+    # sense=destination: 入力の4隅を指定座標へ移動（左上,右上,左下,右下）
+    coords = ":".join(
+        f"{k}={e.params[k]}"
+        for k in ("x0", "y0", "x1", "y1", "x2", "y2", "x3", "y3"))
+    ctx.filters.append(f"perspective={coords}:sense=destination")
+
+
+def _fx_lens(e, eff_idx, ctx):
+    """レンズ歪み補正"""
+    k1 = e.params.get("k1", 0)
+    k2 = e.params.get("k2", 0)
+    ctx.filters.append(f"lenscorrection=k1={k1}:k2={k2}")
+
+
+def _fx_ken_burns(e, eff_idx, ctx):
+    """Ken Burns（動的scale + 固定サイズcrop で矩形間をパン&ズーム）"""
+    u_expr = _u_expr(ctx.start, ctx.dur)
+    s_str = e.params["s"].to_ffmpeg(u_expr)
+    x_str = e.params["x"].to_ffmpeg(u_expr)
+    y_str = e.params["y"].to_ffmpeg(u_expr)
+    ow = e.params["w"]
+    oh = e.params["h"]
+    ctx.filters.append(
+        f"scale=w='trunc(iw*({s_str})/2)*2':h='trunc(ih*({s_str})/2)*2':eval=frame")
+    ctx.filters.append(f"crop={ow}:{oh}:x='{x_str}':y='{y_str}'")
+    # SEGVバリア: scale(eval=frame)後のバッファ分離（既存scale実装と同じ回避策）
+    ctx.filters.append("copy")
+
+
+def _fx_drop_shadow(e, eff_idx, ctx):
+    """ドロップシャドウ（split→色付け+ぼかし→本体を影の上にoverlay。
+    キャンバスは影が収まるよう拡張）"""
+    dxv = e.params.get("dx", 5)
+    dyv = e.params.get("dy", 5)
+    bl = e.params.get("blur", 8)
+    op_ = e.params.get("opacity", 0.5)
+    cr, cg, cb = _parse_color_rgb(e.params.get("color", "black"))
+    m = int(_math.ceil(3 * bl))  # gblurの裾野(約3σ)
+    left = _builtins.max(0, m - dxv)
+    right = _builtins.max(0, m + dxv)
+    top = _builtins.max(0, m - dyv)
+    bottom = _builtins.max(0, m + dyv)
+    p = f"{ctx.label_prefix}e{eff_idx}"
+    # ぼかしは pad の後に適用（端まで不透明な素材でも影が枠外へにじむように）
+    blur_part = f",gblur=sigma={bl}" if bl > 0 else ""
+    ctx.filters.append("format=rgba")
+    ctx.filters.append(
+        f"split[{p}a][{p}b];"
+        f"[{p}b]geq=r='{cr}':g='{cg}':b='{cb}':a='alpha(X\\,Y)*{op_}',"
+        f"pad=iw+{left + right}:ih+{top + bottom}:{left + dxv}:{top + dyv}:color=0x00000000"
+        f"{blur_part}[{p}s];"
+        f"[{p}s][{p}a]overlay={left}:{top}:eof_action=pass"
+    )
+    # scale等で固定サイズ化済み(pad_size設定済み)なら、影の拡張分を加算して
+    # overlay中央配置((W-pad_size[0])/2)のずれを防ぐ
+    if ctx.pad_size:
+        ctx.pad_size = (ctx.pad_size[0] + left + right,
+                        ctx.pad_size[1] + top + bottom)
+
+
+def _fx_outline(e, eff_idx, ctx):
+    """縁取り（alpha膨張ベース。色付けした複製のalphaを膨張させ本体をoverlay）"""
+    # alpha膨張（dilationをwidth回連結）ベースの縁取り。
+    # 色付けした複製のalphaを膨張させ、本体をその上にoverlayする。
+    wd = e.params.get("width", 2)
+    cr, cg, cb = _parse_color_rgb(e.params.get("color", "white"))
+    p = f"{ctx.label_prefix}e{eff_idx}"
+    dil = ",".join(["dilation"] * wd)
+    ctx.filters.append("format=rgba")
+    ctx.filters.append(
+        f"split[{p}a][{p}b];"
+        f"[{p}b]pad=iw+{2 * wd}:ih+{2 * wd}:{wd}:{wd}:color=0x00000000,"
+        f"geq=r='{cr}':g='{cg}':b='{cb}':a='alpha(X\\,Y)',"
+        f"{dil}[{p}o];"
+        f"[{p}o][{p}a]overlay={wd}:{wd}:eof_action=pass"
+    )
+    # scale等で固定サイズ化済みなら、縁取りの拡張分(2*wd)を加算して中央配置ずれを防ぐ
+    if ctx.pad_size:
+        ctx.pad_size = (ctx.pad_size[0] + 2 * wd, ctx.pad_size[1] + 2 * wd)
+
+
+def _fx_mask(e, eff_idx, ctx):
+    """画像マスク（輝度をアルファとして乗算）"""
+    # 画像の輝度をアルファとして乗算。追加 -i 入力の配線を避けるため
+    # movie= ソースをチェーン内サブグラフで読み込む。
+    # マスクは scale2ref で素材サイズへ自動スケールし、
+    # blend='A*B/255' で元アルファと乗算 → alphamerge で書き戻す。
+    img = _escape_ffpath(e.params["image"])
+    p = f"{ctx.label_prefix}e{eff_idx}"
+    ctx.filters.append("format=rgba")
+    ctx.filters.append(
+        f"split[{p}a][{p}b];"
+        f"[{p}b]alphaextract[{p}oa];"
+        f"movie=filename={img}[{p}mi];"
+        f"[{p}mi][{p}oa]scale2ref[{p}ms][{p}oa2];"
+        f"[{p}ms]format=gray[{p}mg];"
+        f"[{p}oa2][{p}mg]blend=all_expr='A*B/255':eof_action=repeat[{p}na];"
+        f"[{p}a][{p}na]alphamerge"
+    )
+
+
+def _fx_mask_wipe(e, eff_idx, ctx):
+    """マスクワイプ（マスク画像の輝度をしきい値に使うワイプ）"""
+    # マスク画像の輝度をしきい値に使うワイプ
+    # （輝度 <= progress*255 の画素から順に現れる）。
+    # 注意: movie= の1フレーム入力をそのまま blend に渡すと
+    # framesync の T 評価が壊れる（実測: 約5倍速で進行）ため、
+    # loop+fps+setpts でメイン入力と同じタイムベースに正規化する。
+    # 無限ループは全レンダ経路の -t 指定で確実に打ち切られる。
+    prog_expr = e.params.get("progress", Const(1))
+    u_expr = _u_expr(ctx.start, ctx.dur, "T")
+    prog_str = prog_expr.to_ffmpeg(u_expr)
+    img = _escape_ffpath(e.params["image"])
+    proj = Project._current
+    m_fps = proj.fps if proj else 30
+    p = f"{ctx.label_prefix}e{eff_idx}"
+    ctx.filters.append("format=rgba")
+    ctx.filters.append(
+        f"split[{p}a][{p}b];"
+        f"[{p}b]alphaextract[{p}oa];"
+        f"movie=filename={img},loop=loop=-1:size=1,fps={m_fps},"
+        f"setpts=N/({m_fps}*TB)[{p}mi];"
+        f"[{p}mi][{p}oa]scale2ref[{p}ms][{p}oa2];"
+        f"[{p}ms]format=gray[{p}mg];"
+        f"[{p}oa2][{p}mg]blend="
+        f"all_expr='if(lte(B\\,255*({prog_str}))\\,A\\,0)'"
+        f":eof_action=repeat[{p}na];"
+        f"[{p}a][{p}na]alphamerge"
+    )
+
+
+def _fx_opacity(e, eff_idx, ctx):
+    """不透明度（定数は colorchannelmixer（高速）、Expr は geq で live 変化）"""
+    val = e.params.get("value", Const(1.0))
+    ctx.filters.append("format=rgba")
+    if isinstance(val, Const):
+        ctx.filters.append(f"colorchannelmixer=aa={val.value}")
+    else:
+        u_expr = _u_expr(ctx.start, ctx.dur, "T")
+        ffmpeg_str = val.to_ffmpeg(u_expr)
+        ctx.filters.append(
+            f"{_GEQ_RGB}:a='alpha(X\\,Y)*clip({ffmpeg_str}\\,0\\,1)'"
+        )
+
+
+def _fx_rounded(e, eff_idx, ctx):
+    """角丸（角の中心からの距離が radius を超える画素のアルファを0に）"""
+    # clip でX/Yを内側矩形にクランプ → 中央十字帯では距離0（常に表示）
+    # r を実寸の半分(min(W,H)/2)で上限クランプ。r>寸法/2 だと内側矩形の
+    # クランプ範囲が反転してオブジェクト全体が透明化するため防ぐ。
+    radius = e.params["radius"]
+    r = f"min({radius}\\,min(W\\,H)/2)"
+    corner = (f"lte(hypot(X-clip(X\\,{r}\\,W-1-{r})\\,"
+              f"Y-clip(Y\\,{r}\\,H-1-{r}))\\,{r})")
+    ctx.filters.append("format=rgba")
+    ctx.filters.append(
+        f"{_GEQ_RGB}:a='alpha(X\\,Y)*{corner}'"
+    )
+
+
+def _fx_blur_background_fill(e, eff_idx, ctx):
+    """ぼかし背景フィル（縦動画変換の定番。出力はキャンバスサイズ固定）"""
+    # ぼかした自分自身をキャンバス全面に敷き、中央に本体を fit で重ねる
+    proj = Project._current
+    cw = proj.width if proj else 1920
+    ch = proj.height if proj else 1080
+    sigma = e.params.get("blur", 20)
+    p = f"{ctx.label_prefix}e{eff_idx}"
+    ctx.filters.append("format=rgba")
+    ctx.filters.append(
+        f"split[{p}a][{p}b];"
+        f"[{p}b]scale={cw}:{ch}:force_original_aspect_ratio=increase,"
+        f"crop={cw}:{ch},gblur=sigma={sigma}[{p}bg];"
+        f"[{p}a]scale={cw}:{ch}:force_original_aspect_ratio=decrease[{p}fg];"
+        f"[{p}bg][{p}fg]overlay=(W-w)/2:(H-h)/2:eof_action=pass"
+    )
+    # 出力はキャンバスサイズ固定 → overlay中央配置の基準を更新
+    ctx.pad_size = (cw, ch)
+
+
+def _fx_plugin(e, eff_idx, ctx):
+    """プラグインEffect（plugins/*.py で @effect_plugin 登録）"""
+    # pad_state 経由で ctx["expand_pad"]/ctx["set_pad"] による pad_size 更新を受ける
+    pad_state = [ctx.pad_size]
+    ctx.filters.extend(_build_plugin_effect_filters(
+        ctx.obj, e, eff_idx, ctx.start, ctx.dur, ctx.base_dims,
+        ctx.label_prefix, pad_state))
+    ctx.pad_size = pad_state[0]
+
+
+# _build_effect_filters が扱わない Effect（他の段で処理される）。
+# blend_mode は overlay合成段（_build_video_overlay_parts）、
+# speed/reverse/freeze_frame は前処理（_build_video_pre_filters）で処理
+_FX_SKIP = frozenset({
+    "move", "trim", "delete", "morph_to", "shake",
+    "blend_mode", "speed", "reverse", "freeze_frame",
+})
+
+# effect名 → ビルダー関数のディスパッチテーブル（プラグインは _EFFECT_PLUGINS 参照）
+_FX_BUILDERS = {
+    "scale": _fx_scale,
+    "fade": _fx_fade,
+    "rotate_to": _fx_rotate_to,
+    "wipe": _fx_wipe,
+    "color_shift": _fx_color_shift,
+    "chroma_key": _fx_chroma_key,
+    "vignette": _fx_vignette,
+    "pixelize": _fx_pixelize,
+    "glow": _fx_glow,
+    "lut": _fx_lut,
+    "glitch": _fx_glitch,
+    "perspective_warp": _fx_perspective_warp,
+    "lens": _fx_lens,
+    "ken_burns": _fx_ken_burns,
+    "drop_shadow": _fx_drop_shadow,
+    "outline": _fx_outline,
+    "mask": _fx_mask,
+    "mask_wipe": _fx_mask_wipe,
+    "opacity": _fx_opacity,
+    "rounded": _fx_rounded,
+    "blur_background_fill": _fx_blur_background_fill,
+}
+
+
 def _build_effect_filters(obj, start, dur, base_dims=None, label_prefix="fx"):
     """scale/fade等のeffectフィルタリストを生成（move/trim/delete以外）
     base_dims指定時、scaleエフェクトにpadを追加して固定サイズ出力にする。
@@ -266,340 +756,16 @@ def _build_effect_filters(obj, start, dur, base_dims=None, label_prefix="fx"):
     1要素として返す（"split[a][b];[b]...[c];[a][c]blend=..." 形式）。
     カンマ結合されたチェーンに埋め込んでも有効な filtergraph になる。
     """
-    filters = []
-    pad_size = None
+    ctx = _FxCtx(obj, start, dur, base_dims, label_prefix)
     for eff_idx, e in enumerate(obj.effects):
-        if e.name in ("move", "trim", "delete", "morph_to", "shake",
-                      "blend_mode", "speed", "reverse", "freeze_frame"):
-            # blend_mode は overlay合成段（_build_video_overlay_parts）、
-            # speed/reverse/freeze_frame は前処理（_build_video_pre_filters）で処理
+        if e.name in _FX_SKIP:
             continue
-        if e.name == "scale":
-            scale_expr = e.params.get("value", Const(1))
-            u_expr = f"clip((t-{start})/{dur}\\,0\\,1)"
-            ffmpeg_str = scale_expr.to_ffmpeg(u_expr)
-            filters.append(
-                f"scale=w='trunc(iw*({ffmpeg_str})/2)*2':h='trunc(ih*({ffmpeg_str})/2)*2':eval=frame"
-            )
-            # pad: scaleの出力を最大サイズの固定フレームに収め、overlay位置を安定化
-            if base_dims and base_dims[0] is not None:
-                bw, bh = base_dims
-                # 定数スケールはサンプリング不要（固定点評価の短絡）
-                if isinstance(scale_expr, Const):
-                    max_s = scale_expr.value
-                else:
-                    # 固定格子サンプリングで最大スケールを推定。
-                    # 振動系関数（sin等）を含む式は i/100 の格子とエイリアスして
-                    # 点間ピークを取りこぼす（例: 1+0.5*sin(100*PI*u) は全標本1、
-                    # 実際は1.5 → pad不足でEINVAL）ため、密な素数格子で評価する
-                    # （issue #13 P2-13）
-                    n_grid = 4999 if _expr_has_oscillatory(scale_expr) else 100
-                    try:
-                        max_s = _builtins.max(
-                            scale_expr.eval_at(i / n_grid)
-                            for i in range(n_grid + 1))
-                    except Exception as exc:
-                        raise ValueError(
-                            f"scale式を数値評価できないため、padサイズを決定できません: {exc}\n"
-                            f"scale() には u のみに依存する数値評価可能な式を渡してください。"
-                        ) from exc
-                max_w = _math.ceil(bw * max_s / 2) * 2
-                max_h = _math.ceil(bh * max_s / 2) * 2
-                filters.append("format=rgba")
-                filters.append(
-                    f"pad={max_w}:{max_h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000:eval=frame"
-                )
-                # SEGVバリア: FFmpeg 8.0では scale(eval=frame)+rotate の組み合わせで
-                # SEGV(0xC0000005)が発生し、pad/format=rgba 単体では防げない。
-                # copy フィルタによるバッファ分離が必要（検証済みの回避策）。
-                filters.append("copy")
-                pad_size = (max_w, max_h)
-        elif e.name == "fade":
-            alpha_expr = e.params.get("alpha", Const(1.0))
-            filters.append("format=rgba")
-            # ネイティブfadeを試行（geq比で10倍高速）
-            native = _try_native_fade(alpha_expr, start, dur)
-            if native:
-                filters.extend(native)
-            else:
-                # 複雑なパターンはgeqにフォールバック
-                u_expr = f"clip((T-{start})/{dur}\\,0\\,1)"
-                ffmpeg_str = alpha_expr.to_ffmpeg(u_expr)
-                filters.append(
-                    f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*clip({ffmpeg_str}\\,0\\,1)'"
-                )
-        elif e.name == "rotate_to":
-            rad_expr = e.params.get("rad", Const(0))
-            u_expr = f"clip((t-{start})/{dur}\\,0\\,1)"
-            ang_str = rad_expr.to_ffmpeg(u_expr)
-            expand = e.params.get("expand", True)
-            fill = e.params.get("fill", "0x00000000")
-            filters.append("format=rgba")
-            if expand:
-                # 動的回転: ow/ohは初期化時に1度だけ評価されるため
-                # rotw/rothではなく対角線長で固定サイズにする
-                filters.append(
-                    f"rotate=angle='{ang_str}':fillcolor={fill}"
-                    f":ow='hypot(iw,ih)':oh='hypot(iw,ih)'"
-                )
-            else:
-                filters.append(
-                    f"rotate=angle='{ang_str}':fillcolor={fill}:ow=iw:oh=ih"
-                )
-        elif e.name == "wipe":
-            prog_expr = e.params.get("progress", Const(1))
-            # geqの時間変数は大文字T（小文字tは未定義。fade 経路と同じ）
-            u_expr = f"clip((T-{start})/{dur}\\,0\\,1)"
-            ffmpeg_str = prog_expr.to_ffmpeg(u_expr)
-            direction = e.params.get("direction", "left")
-            filters.append("format=rgba")
-            if direction == "left":
-                filters.append(f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='if(lte(X\\,W*({ffmpeg_str}))\\,alpha(X\\,Y)\\,0)'")
-            elif direction == "right":
-                filters.append(f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='if(gte(X\\,W*(1-({ffmpeg_str})))\\,alpha(X\\,Y)\\,0)'")
-            elif direction == "up":
-                filters.append(f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='if(gte(Y\\,H*(1-({ffmpeg_str})))\\,alpha(X\\,Y)\\,0)'")
-            elif direction == "down":
-                filters.append(f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='if(lte(Y\\,H*({ffmpeg_str}))\\,alpha(X\\,Y)\\,0)'")
-        elif e.name == "color_shift":
-            u_expr = f"clip((t-{start})/{dur}\\,0\\,1)"
-            parts = []
-            if "hue" in e.params:
-                h_str = e.params["hue"].to_ffmpeg(u_expr)
-                parts.append(f"hue=h={h_str}")
-            eq_parts = []
-            eq_dynamic = False
-            if "saturation" in e.params:
-                s_str = e.params["saturation"].to_ffmpeg(u_expr)
-                eq_parts.append(f"saturation={s_str}")
-                eq_dynamic = eq_dynamic or not isinstance(e.params["saturation"], Const)
-            if "brightness" in e.params:
-                b_str = e.params["brightness"].to_ffmpeg(u_expr)
-                eq_parts.append(f"brightness={b_str}")
-                eq_dynamic = eq_dynamic or not isinstance(e.params["brightness"], Const)
-            for p in parts:
-                filters.append(p)
-            if eq_parts:
-                eq_filter = "eq=" + ":".join(eq_parts)
-                if eq_dynamic:
-                    # eqの既定はeval=init（初期化時1回のみ評価）→ 動的式は毎フレーム評価が必要
-                    eq_filter += ":eval=frame"
-                filters.append(eq_filter)
-        elif e.name == "chroma_key":
-            color = e.params.get("color", "green")
-            sim = e.params.get("similarity", 0.1)
-            bl = e.params.get("blend", 0.0)
-            filters.append(f"chromakey=color={color}:similarity={sim}:blend={bl}")
-            # chromakeyはyuva出力 → 後段のgeq/overlay向けにrgbaへ正規化
-            filters.append("format=rgba")
-        elif e.name == "vignette":
-            # 注意: vignetteフィルタはアルファ非対応（透明部分は失われる）。全画面素材向け。
-            ang = e.params.get("angle", Const(_math.pi / 5))
-            if isinstance(ang, Const):
-                filters.append(
-                    f"vignette=angle='clip({ang.to_ffmpeg('0')}\\,0\\,PI/2)'")
-            else:
-                # 時間依存式: eval=frame で毎フレーム評価（uは正規化時刻）
-                u_expr = f"clip((t-{start})/{dur}\\,0\\,1)"
-                filters.append(
-                    f"vignette=angle='clip({ang.to_ffmpeg(u_expr)}\\,0\\,PI/2)':eval=frame")
-        elif e.name == "pixelize":
-            s = e.params.get("size", 16)
-            filters.append(f"pixelize=w={s}:h={s}")
-        elif e.name == "glow":
-            # split→gblur→blend=screen の複合チェーン（発光合成）
-            r = e.params.get("radius", 10)
-            it = e.params.get("intensity", 1.0)
-            p = f"{label_prefix}e{eff_idx}"
-            filters.append("format=rgba")
-            filters.append(
-                f"split[{p}a][{p}b];"
-                f"[{p}b]gblur=sigma={r}[{p}c];"
-                f"[{p}a][{p}c]blend=all_mode=screen:all_opacity={it}"
-            )
-        elif e.name == "lut":
-            # lut3d も fontfile/subtitles と同じパスエスケープを使う
-            filters.append(f"lut3d=file={_escape_ffpath(e.params['file'])}")
-        elif e.name == "glitch":
-            # rgbashift + noise のプリセット。interval指定時は間欠発動
-            strength = e.params.get("strength", 1.0)
-            iv = e.params.get("interval")
-            shift = _builtins.max(1, int(_builtins.round(4 * strength)))
-            shift_v = _builtins.max(1, shift // 2)
-            nstr = _builtins.min(100, _builtins.max(1, int(_builtins.round(20 * strength))))
-            enable = ""
-            if iv is not None:
-                # 各interval周期の先頭30%区間のみ有効化
-                on_dur = iv * 0.3
-                enable = f":enable='lt(mod(t-{start}\\,{iv})\\,{on_dur})'"
-            filters.append("format=rgba")
-            filters.append(f"rgbashift=rh={shift}:bh=-{shift}:gv={shift_v}{enable}")
-            filters.append(f"noise=alls={nstr}:allf=t+u{enable}")
-        elif e.name == "perspective_warp":
-            # sense=destination: 入力の4隅を指定座標へ移動（左上,右上,左下,右下）
-            coords = ":".join(
-                f"{k}={e.params[k]}"
-                for k in ("x0", "y0", "x1", "y1", "x2", "y2", "x3", "y3"))
-            filters.append(f"perspective={coords}:sense=destination")
-        elif e.name == "lens":
-            k1 = e.params.get("k1", 0)
-            k2 = e.params.get("k2", 0)
-            filters.append(f"lenscorrection=k1={k1}:k2={k2}")
-        elif e.name == "ken_burns":
-            # 動的scale + 固定サイズcrop で (x,y,w,h) 矩形間をパン&ズーム
-            u_expr = f"clip((t-{start})/{dur}\\,0\\,1)"
-            s_str = e.params["s"].to_ffmpeg(u_expr)
-            x_str = e.params["x"].to_ffmpeg(u_expr)
-            y_str = e.params["y"].to_ffmpeg(u_expr)
-            ow = e.params["w"]
-            oh = e.params["h"]
-            filters.append(
-                f"scale=w='trunc(iw*({s_str})/2)*2':h='trunc(ih*({s_str})/2)*2':eval=frame")
-            filters.append(f"crop={ow}:{oh}:x='{x_str}':y='{y_str}'")
-            # SEGVバリア: scale(eval=frame)後のバッファ分離（既存scale実装と同じ回避策）
-            filters.append("copy")
-        elif e.name == "drop_shadow":
-            # split→色付け+ぼかし→本体を影の上にoverlay（キャンバスは影が収まるよう拡張）
-            dxv = e.params.get("dx", 5)
-            dyv = e.params.get("dy", 5)
-            bl = e.params.get("blur", 8)
-            op_ = e.params.get("opacity", 0.5)
-            cr, cg, cb = _parse_color_rgb(e.params.get("color", "black"))
-            m = int(_math.ceil(3 * bl))  # gblurの裾野(約3σ)
-            left = _builtins.max(0, m - dxv)
-            right = _builtins.max(0, m + dxv)
-            top = _builtins.max(0, m - dyv)
-            bottom = _builtins.max(0, m + dyv)
-            p = f"{label_prefix}e{eff_idx}"
-            # ぼかしは pad の後に適用（端まで不透明な素材でも影が枠外へにじむように）
-            blur_part = f",gblur=sigma={bl}" if bl > 0 else ""
-            filters.append("format=rgba")
-            filters.append(
-                f"split[{p}a][{p}b];"
-                f"[{p}b]geq=r='{cr}':g='{cg}':b='{cb}':a='alpha(X\\,Y)*{op_}',"
-                f"pad=iw+{left + right}:ih+{top + bottom}:{left + dxv}:{top + dyv}:color=0x00000000"
-                f"{blur_part}[{p}s];"
-                f"[{p}s][{p}a]overlay={left}:{top}:eof_action=pass"
-            )
-            # scale等で固定サイズ化済み(pad_size設定済み)なら、影の拡張分を加算して
-            # overlay中央配置((W-pad_size[0])/2)のずれを防ぐ
-            if pad_size:
-                pad_size = (pad_size[0] + left + right, pad_size[1] + top + bottom)
-        elif e.name == "outline":
-            # alpha膨張（dilationをwidth回連結）ベースの縁取り。
-            # 色付けした複製のalphaを膨張させ、本体をその上にoverlayする。
-            wd = e.params.get("width", 2)
-            cr, cg, cb = _parse_color_rgb(e.params.get("color", "white"))
-            p = f"{label_prefix}e{eff_idx}"
-            dil = ",".join(["dilation"] * wd)
-            filters.append("format=rgba")
-            filters.append(
-                f"split[{p}a][{p}b];"
-                f"[{p}b]pad=iw+{2 * wd}:ih+{2 * wd}:{wd}:{wd}:color=0x00000000,"
-                f"geq=r='{cr}':g='{cg}':b='{cb}':a='alpha(X\\,Y)',"
-                f"{dil}[{p}o];"
-                f"[{p}o][{p}a]overlay={wd}:{wd}:eof_action=pass"
-            )
-            # scale等で固定サイズ化済みなら、縁取りの拡張分(2*wd)を加算して中央配置ずれを防ぐ
-            if pad_size:
-                pad_size = (pad_size[0] + 2 * wd, pad_size[1] + 2 * wd)
-        elif e.name == "mask":
-            # 画像の輝度をアルファとして乗算。追加 -i 入力の配線を避けるため
-            # movie= ソースをチェーン内サブグラフで読み込む。
-            # マスクは scale2ref で素材サイズへ自動スケールし、
-            # blend='A*B/255' で元アルファと乗算 → alphamerge で書き戻す。
-            img = _escape_ffpath(e.params["image"])
-            p = f"{label_prefix}e{eff_idx}"
-            filters.append("format=rgba")
-            filters.append(
-                f"split[{p}a][{p}b];"
-                f"[{p}b]alphaextract[{p}oa];"
-                f"movie=filename={img}[{p}mi];"
-                f"[{p}mi][{p}oa]scale2ref[{p}ms][{p}oa2];"
-                f"[{p}ms]format=gray[{p}mg];"
-                f"[{p}oa2][{p}mg]blend=all_expr='A*B/255':eof_action=repeat[{p}na];"
-                f"[{p}a][{p}na]alphamerge"
-            )
-        elif e.name == "mask_wipe":
-            # マスク画像の輝度をしきい値に使うワイプ
-            # （輝度 <= progress*255 の画素から順に現れる）。
-            # 注意: movie= の1フレーム入力をそのまま blend に渡すと
-            # framesync の T 評価が壊れる（実測: 約5倍速で進行）ため、
-            # loop+fps+setpts でメイン入力と同じタイムベースに正規化する。
-            # 無限ループは全レンダ経路の -t 指定で確実に打ち切られる。
-            prog_expr = e.params.get("progress", Const(1))
-            u_expr = f"clip((T-{start})/{dur}\\,0\\,1)"
-            prog_str = prog_expr.to_ffmpeg(u_expr)
-            img = _escape_ffpath(e.params["image"])
-            proj = Project._current
-            m_fps = proj.fps if proj else 30
-            p = f"{label_prefix}e{eff_idx}"
-            filters.append("format=rgba")
-            filters.append(
-                f"split[{p}a][{p}b];"
-                f"[{p}b]alphaextract[{p}oa];"
-                f"movie=filename={img},loop=loop=-1:size=1,fps={m_fps},"
-                f"setpts=N/({m_fps}*TB)[{p}mi];"
-                f"[{p}mi][{p}oa]scale2ref[{p}ms][{p}oa2];"
-                f"[{p}ms]format=gray[{p}mg];"
-                f"[{p}oa2][{p}mg]blend="
-                f"all_expr='if(lte(B\\,255*({prog_str}))\\,A\\,0)'"
-                f":eof_action=repeat[{p}na];"
-                f"[{p}a][{p}na]alphamerge"
-            )
-        elif e.name == "opacity":
-            # 不透明度: 定数は colorchannelmixer（高速）、Expr は geq で live 変化
-            val = e.params.get("value", Const(1.0))
-            filters.append("format=rgba")
-            if isinstance(val, Const):
-                filters.append(f"colorchannelmixer=aa={val.value}")
-            else:
-                u_expr = f"clip((T-{start})/{dur}\\,0\\,1)"
-                ffmpeg_str = val.to_ffmpeg(u_expr)
-                filters.append(
-                    f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)'"
-                    f":a='alpha(X\\,Y)*clip({ffmpeg_str}\\,0\\,1)'"
-                )
-        elif e.name == "rounded":
-            # 角丸: 角の中心からの距離が radius を超える画素のアルファを0に。
-            # clip でX/Yを内側矩形にクランプ → 中央十字帯では距離0（常に表示）
-            # r を実寸の半分(min(W,H)/2)で上限クランプ。r>寸法/2 だと内側矩形の
-            # クランプ範囲が反転してオブジェクト全体が透明化するため防ぐ。
-            radius = e.params["radius"]
-            r = f"min({radius}\\,min(W\\,H)/2)"
-            corner = (f"lte(hypot(X-clip(X\\,{r}\\,W-1-{r})\\,"
-                      f"Y-clip(Y\\,{r}\\,H-1-{r}))\\,{r})")
-            filters.append("format=rgba")
-            filters.append(
-                f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)'"
-                f":a='alpha(X\\,Y)*{corner}'"
-            )
-        elif e.name == "blur_background_fill":
-            # 縦動画変換の定番: ぼかした自分自身をキャンバス全面に敷き、
-            # 中央に本体を fit で重ねる（出力はキャンバスサイズ固定）
-            proj = Project._current
-            cw = proj.width if proj else 1920
-            ch = proj.height if proj else 1080
-            sigma = e.params.get("blur", 20)
-            p = f"{label_prefix}e{eff_idx}"
-            filters.append("format=rgba")
-            filters.append(
-                f"split[{p}a][{p}b];"
-                f"[{p}b]scale={cw}:{ch}:force_original_aspect_ratio=increase,"
-                f"crop={cw}:{ch},gblur=sigma={sigma}[{p}bg];"
-                f"[{p}a]scale={cw}:{ch}:force_original_aspect_ratio=decrease[{p}fg];"
-                f"[{p}bg][{p}fg]overlay=(W-w)/2:(H-h)/2:eof_action=pass"
-            )
-            # 出力はキャンバスサイズ固定 → overlay中央配置の基準を更新
-            pad_size = (cw, ch)
+        builder = _FX_BUILDERS.get(e.name)
+        if builder is not None:
+            builder(e, eff_idx, ctx)
         elif e.name in _EFFECT_PLUGINS:
-            # プラグインEffect（plugins/*.py で @effect_plugin 登録）
-            # pad_state 経由で ctx["expand_pad"]/ctx["set_pad"] による pad_size 更新を受ける
-            pad_state = [pad_size]
-            filters.extend(_build_plugin_effect_filters(
-                obj, e, eff_idx, start, dur, base_dims, label_prefix, pad_state))
-            pad_size = pad_state[0]
-    return filters, pad_size
+            _fx_plugin(e, eff_idx, ctx)
+    return ctx.filters, ctx.pad_size
 
 
 def _build_move_exprs(obj, start, dur, pad_size=None):
@@ -630,7 +796,7 @@ def _build_move_exprs(obj, start, dur, pad_size=None):
         x_param = p.get("x", Const(0.5))
         y_param = p.get("y", Const(0.5))
 
-        u_expr = f"clip((t-{start})/{dur}\\,0\\,1)"
+        u_expr = _u_expr(start, dur)
         base_x = f"{x_param.to_ffmpeg(u_expr)}*W"
         base_y = f"{y_param.to_ffmpeg(u_expr)}*H"
 
@@ -649,7 +815,7 @@ def _build_move_exprs(obj, start, dur, pad_size=None):
     if shake_effect:
         amp = shake_effect.params.get("amplitude", 0.02)
         freq = shake_effect.params.get("frequency", 10)
-        u_expr = f"clip((t-{start})/{dur}\\,0\\,1)"
+        u_expr = _u_expr(start, dur)
         x_shake = f"{amp}*W*sin({freq}*2*PI*{u_expr}+0.7)"
         y_shake = f"{amp}*H*cos({freq}*2.3*PI*{u_expr}+1.3)"
         x_result = f"trunc({x_result}+{x_shake})"
@@ -835,27 +1001,7 @@ def _estimate_effect_input_length(obj, upto_effect):
         base = getattr(obj, "_resolved_length", None)
     if not base:
         return None
-    cur = base
-    for e in obj.effects:
-        if e is upto_effect:
-            break
-        if e.name == "trim":
-            s = e.params.get("start") or 0
-            if s:
-                cur = _builtins.max(0.0, cur - s)
-            if e.params.get("duration") is not None:
-                cur = _builtins.min(cur, e.params["duration"])
-        elif e.name == "speed":
-            f = e.params.get("factor", 1.0)
-            if f:
-                cur = cur / f
-        elif e.name == "freeze_frame":
-            at = e.params.get("at", 0.0)
-            if at < cur:
-                cur = cur + e.params.get("duration", 0.0)
-        elif e.name == "repeat":
-            cur = cur * e.params.get("count", 1)
-    return cur
+    return _fold_time_effects(base, obj.effects, upto=upto_effect)
 
 
 def _build_video_pre_filters(obj, label_prefix="pre"):
@@ -930,7 +1076,7 @@ def _build_video_pre_filters(obj, label_prefix="pre"):
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.cache import _is_cache_artifact_path, _is_pending_cache_path
+from scriptvedit.cache import _fold_time_effects, _is_cache_artifact_path, _is_pending_cache_path
 from scriptvedit.expr import Const, Expr
 from scriptvedit.ffmpeg import _decoder_input_args
 from scriptvedit.plugins import _EFFECT_PLUGINS, _build_plugin_effect_filters

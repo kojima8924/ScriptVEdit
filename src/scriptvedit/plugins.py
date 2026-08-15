@@ -309,8 +309,8 @@ def _plugin_ctx(obj, e, eff_idx, start, dur, base_dims, label_prefix, pad_state)
         pad_state[0] = (int(w), int(h))
 
     return {
-        "u": f"clip((t-{start})/{dur}\\,0\\,1)",     # scale/rotate 等（t基準）
-        "u_T": f"clip((T-{start})/{dur}\\,0\\,1)",   # geq/blend 等（T基準）
+        "u": _u_expr(start, dur),        # scale/rotate 等（t基準）
+        "u_T": _u_expr(start, dur, "T"),  # geq/blend 等（T基準）
         "start": start,
         "dur": dur,
         "fps": (proj.fps if proj else 30),
@@ -504,6 +504,7 @@ def plugin_manifest(as_text=False):
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
 from scriptvedit.expr import Const, _resolve_param
+from scriptvedit.filters.video import _u_expr
 from scriptvedit.objects import Effect
 from scriptvedit.project import Project
 from scriptvedit.state import _BAKEABLE_EFFECTS, _pkg_all, _pkg_ns, _suggest_hint
