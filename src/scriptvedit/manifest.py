@@ -1,18 +1,7 @@
 # -*- coding: utf-8 -*-
 
-import subprocess
-import os
 import re
-import sys
-import json
-import hashlib
-import math as _math
-import warnings
 import builtins as _builtins
-import time as _time
-import difflib as _difflib
-import shutil as _shutil
-import concurrent.futures as _futures
 import inspect as _inspect
 
 
@@ -1220,7 +1209,7 @@ from scriptvedit.effects.composite import _BLEND_MODES, _BLEND_MODE_ALIASES
 from scriptvedit.cache import _LAYER_CACHE_QUALITY, _respects_fast_hint
 from scriptvedit.expr import Expr
 from scriptvedit.media import _XFADE_TRANSITIONS
-from scriptvedit.objects import Object, group
+from scriptvedit.objects import Object
 from scriptvedit.plugins import _EFFECT_PLUGINS, _PLUGIN_PARAM_TYPES
 from scriptvedit.project import Project
 from scriptvedit.state import _BAKEABLE_EFFECTS, _ENCODER_MAP, _PRESETS, _pkg_all, _pkg_ns, _suggest_hint

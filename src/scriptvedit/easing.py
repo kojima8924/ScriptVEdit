@@ -1,19 +1,6 @@
 # -*- coding: utf-8 -*-
 
-import subprocess
-import os
-import re
-import sys
-import json
-import hashlib
-import math as _math
-import warnings
 import builtins as _builtins
-import time as _time
-import difflib as _difflib
-import shutil as _shutil
-import concurrent.futures as _futures
-import inspect as _inspect
 
 
 # --- イージング関数 ---
@@ -268,7 +255,7 @@ def phase(start, end, fn):
     if start >= end:
         raise ValueError(f"phase: start({start}) < end({end}) が必要です")
     if start < 0 or end > 1:
-        raise ValueError(f"phase: start/end は [0, 1] の範囲が必要です")
+        raise ValueError("phase: start/end は [0, 1] の範囲が必要です")
     def _inner(u):
         u = _to_expr(u)
         t = clip((u - Const(start)) / Const(end - start), 0, 1)

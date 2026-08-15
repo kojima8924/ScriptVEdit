@@ -1,19 +1,9 @@
 # -*- coding: utf-8 -*-
 
-import subprocess
 import os
-import re
 import sys
-import json
 import hashlib
-import math as _math
 import warnings
-import builtins as _builtins
-import time as _time
-import difflib as _difflib
-import shutil as _shutil
-import concurrent.futures as _futures
-import inspect as _inspect
 
 
 # --- プラグイン機構（コア無編集で Effect を追加する） ---

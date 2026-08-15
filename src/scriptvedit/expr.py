@@ -1,19 +1,7 @@
 # -*- coding: utf-8 -*-
 
-import subprocess
-import os
-import re
-import sys
-import json
-import hashlib
 import math as _math
-import warnings
 import builtins as _builtins
-import time as _time
-import difflib as _difflib
-import shutil as _shutil
-import concurrent.futures as _futures
-import inspect as _inspect
 
 
 # --- Expr（式ビルダー） ---
@@ -590,4 +578,3 @@ P = Percent()
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.easing import phase

@@ -1,19 +1,10 @@
 # -*- coding: utf-8 -*-
 
-import subprocess
 import os
-import re
-import sys
-import json
 import hashlib
 import math as _math
-import warnings
 import builtins as _builtins
-import time as _time
-import difflib as _difflib
 import shutil as _shutil
-import concurrent.futures as _futures
-import inspect as _inspect
 
 
 class TransformChain:
@@ -1324,7 +1315,7 @@ def group(*objects):
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
 from scriptvedit.cache import _build_unified_ops, _file_fingerprint, _op_prefix_fingerprint, _ops_effective_quality, _web_cache_path
-from scriptvedit.expr import clip, min
+from scriptvedit.expr import min
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions
 from scriptvedit.media import _source_signature

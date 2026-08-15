@@ -1,19 +1,8 @@
 # -*- coding: utf-8 -*-
 
-import subprocess
 import os
-import re
-import sys
-import json
-import hashlib
 import math as _math
-import warnings
 import builtins as _builtins
-import time as _time
-import difflib as _difflib
-import shutil as _shutil
-import concurrent.futures as _futures
-import inspect as _inspect
 
 
 def chroma_key(color="green", similarity=0.1, blend=0.0):
@@ -196,9 +185,6 @@ def outline(width=2, color="white"):
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.effects.basic import blur
-from scriptvedit.effects.composite import opacity
 from scriptvedit.expr import Const, Expr, Var, _resolve_param, clip, lerp
 from scriptvedit.objects import Effect
 from scriptvedit.validate import _parse_color_rgb, _require_number, _validate_ffmpeg_color
-from scriptvedit.web import rect

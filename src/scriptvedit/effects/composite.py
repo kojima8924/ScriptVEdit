@@ -1,19 +1,7 @@
 # -*- coding: utf-8 -*-
 
-import subprocess
 import os
-import re
-import sys
-import json
-import hashlib
-import math as _math
-import warnings
 import builtins as _builtins
-import time as _time
-import difflib as _difflib
-import shutil as _shutil
-import concurrent.futures as _futures
-import inspect as _inspect
 
 
 # --- 合成・コンポジション系Effect ---
@@ -192,7 +180,7 @@ def progress_bar(*, height=6, color="white", bg="white@0.2", y=1.0):
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.effects.basic import blur, move, scale
+from scriptvedit.effects.basic import move
 from scriptvedit.effects.visual import drop_shadow, outline
 from scriptvedit.expr import Const, _resolve_param
 from scriptvedit.objects import Effect, EffectChain

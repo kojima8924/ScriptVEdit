@@ -2,7 +2,6 @@
 
 import subprocess
 import os
-import re
 import sys
 import json
 import hashlib
@@ -10,10 +9,8 @@ import math as _math
 import warnings
 import builtins as _builtins
 import time as _time
-import difflib as _difflib
 import shutil as _shutil
 import concurrent.futures as _futures
-import inspect as _inspect
 
 
 def _morph_frame_count(fps, dur):
@@ -1098,7 +1095,7 @@ class Project:
             n_chunks = self._render_parallel(output_path, n_chunks, timeout)
         else:
             cmd = self._build_ffmpeg_cmd(output_path)
-            print(f"実行コマンド:")
+            print("実行コマンド:")
             print(f"  ffmpeg {' '.join(cmd[1:])}")
             print()
             fmt = self._resolve_output_format(output_path)
@@ -1694,7 +1691,6 @@ class Project:
 
     def _get_layer_data(self, spec_index):
         """指定レイヤーのオブジェクト群とアンカー群を取得"""
-        spec = self._layer_specs[spec_index]
         # _layersのインデックスはspec_indexに対応
         if spec_index >= len(self._layers):
             return [], {}
@@ -3248,14 +3244,13 @@ class Project:
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
 from scriptvedit.audio import _probe_audio_length
 from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _file_fingerprint, _is_bakeable, _is_pending_cache_path, _layer_cache_encode_args, _layer_cache_paths, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _resolve_layer_cache_quality, _split_ops, _validate_morph_position, _web_cache_path
-from scriptvedit.expr import Expr, lt, max, min, step
+from scriptvedit.expr import Expr, max, min
 from scriptvedit.ffmpeg import _decoder_input_args, _ffmpeg_available_encoders, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.audio import _build_audio_effect_filters, _build_audio_pre_filters
 from scriptvedit.filters.video import _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _build_video_pre_filters, _get_base_dimensions, _optimize_filter_chain
 from scriptvedit.objects import Object, _web_frames_dir
 from scriptvedit.assets import resolve_layer_path
 from scriptvedit.plugins import _EFFECT_PLUGINS, _autoload_plugins
-from scriptvedit.state import _ACTIVE_QUALITY, _ARTIFACT_DIR, _BAKE_PIX_FMT, _CACHE_DIR, _CONFIGURE_KEYS, _ENCODER_MAP, _ENGINE_VER, _GEN_COUNTER, _PRESETS, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
+from scriptvedit.state import _ACTIVE_QUALITY, _ARTIFACT_DIR, _BAKE_PIX_FMT, _CONFIGURE_KEYS, _ENCODER_MAP, _ENGINE_VER, _GEN_COUNTER, _PRESETS, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
 from scriptvedit.timeline import Pause, Scene, _AnchorMarker, _ScenePad
 from scriptvedit.validate import _require_number, _require_time, _validate_ffmpeg_color
-from scriptvedit.web import label

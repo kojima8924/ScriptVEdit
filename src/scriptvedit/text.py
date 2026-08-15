@@ -1,19 +1,10 @@
 # -*- coding: utf-8 -*-
 
-import subprocess
 import os
 import re
 import sys
-import json
 import hashlib
-import math as _math
-import warnings
 import builtins as _builtins
-import time as _time
-import difflib as _difflib
-import shutil as _shutil
-import concurrent.futures as _futures
-import inspect as _inspect
 
 
 # --- テキスト/字幕（drawtext・subtitles）ヘルパー ---
@@ -764,5 +755,4 @@ from scriptvedit.ffmpeg import _unique_tmp_path
 from scriptvedit.objects import Object
 from scriptvedit.project import Project
 from scriptvedit.state import _ARTIFACT_DIR
-from scriptvedit.timeline import anchor
 from scriptvedit.validate import _require_number, _validate_ffmpeg_color

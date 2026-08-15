@@ -1,19 +1,9 @@
 # -*- coding: utf-8 -*-
 
 import subprocess
-import os
-import re
-import sys
-import json
-import hashlib
 import math as _math
 import warnings
 import builtins as _builtins
-import time as _time
-import difflib as _difflib
-import shutil as _shutil
-import concurrent.futures as _futures
-import inspect as _inspect
 
 
 # --- メディア情報ヘルパー ---
@@ -41,7 +31,7 @@ def _get_media_dimensions(filepath):
         parts = result.stdout.strip().split(',')
         return int(parts[0]), int(parts[1])
     except FileNotFoundError:
-        warnings.warn(f"ffprobeが見つかりません。PATHを確認してください。")
+        warnings.warn("ffprobeが見つかりません。PATHを確認してください。")
         return None, None
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         warnings.warn(f"メディアサイズの取得に失敗 ({filepath}): {e}")

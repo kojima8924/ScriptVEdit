@@ -1,19 +1,10 @@
 # -*- coding: utf-8 -*-
 
-import subprocess
 import os
-import re
-import sys
 import json
 import hashlib
 import math as _math
-import warnings
 import builtins as _builtins
-import time as _time
-import difflib as _difflib
-import shutil as _shutil
-import concurrent.futures as _futures
-import inspect as _inspect
 from importlib import import_module as _import_module
 
 
@@ -673,12 +664,9 @@ def beat_sync(audio_source, *, min_bpm=60, max_bpm=200):
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
 from scriptvedit.effects.basic import again
 from scriptvedit.ffmpeg import _unique_tmp_path
-from scriptvedit.effects.time import speed
 from scriptvedit.media import _finalize_generated_object, _source_signature
 from scriptvedit.objects import AudioEffect, Object
 from scriptvedit.project import Project
 from scriptvedit.state import _ARTIFACT_DIR, _ENGINE_VER, _detect_media_type, _suggest_hint
 from scriptvedit.text import _text_synthetic_source, text
-from scriptvedit.timeline import anchor
 from scriptvedit.validate import _require_number, _validate_ffmpeg_color
-from scriptvedit.web import subtitle
