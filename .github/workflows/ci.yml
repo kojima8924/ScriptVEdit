@@ -30,19 +30,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # --- FFmpeg のピン留め方針 -------------------------------------------
+      # 両 OS とも BtbN の同一日付リリースの FFmpeg 8 系ビルドへ SHA-256 検証つきで固定する。
+      #   - apt の ffmpeg は 6.x で FFmpeg 8 の -/filter_complex 構文を知らない
+      #   - setup-ffmpeg 系 action は「最新」を入れるため 9.x へ勝手に進む(2026-08 に実際に発生)
+      #   - BtbN の autobuild リリースは一定期間で削除される。ダウンロードが 404 に
+      #     なったらピンの寿命なので、次のコマンドで現行リリースの URL と SHA を取得して
+      #     この2ステップを書き換えること(監査 issue #17 の方針):
+      #       gh api "repos/BtbN/FFmpeg-Builds/releases?per_page=3" \
+      #         --jq '.[] | {tag: .tag_name, assets: [.assets[] | select(.name | contains("gpl-8")) | {name, digest}]}'
+      # ---------------------------------------------------------------------
       - name: FFmpeg を導入 (Windows)
         if: runner.os == 'Windows'
-        uses: FedericoCarboni/setup-ffmpeg@v3
+        shell: pwsh
+        run: |
+          $ffUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-15-13-02/ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip"
+          $ffSha = "0e7829b6e1ba867e37bbad17153de258bd3bffaa3b745626a6424df0ea113970"
+          curl.exe -fsSL -o "$env:RUNNER_TEMP\ffmpeg.zip" $ffUrl
+          $actual = (Get-FileHash "$env:RUNNER_TEMP\ffmpeg.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $ffSha) { Write-Error "SHA-256 不一致: $actual"; exit 1 }
+          Expand-Archive "$env:RUNNER_TEMP\ffmpeg.zip" -DestinationPath "$env:RUNNER_TEMP\ffdist"
+          $bin = (Get-ChildItem "$env:RUNNER_TEMP\ffdist" -Directory | Select-Object -First 1).FullName + "\bin"
+          Add-Content $env:GITHUB_PATH $bin
       - name: FFmpeg と日本語フォントを導入 (Linux)
-        # apt の ffmpeg は 6.x で FFmpeg 8 の -/filter_complex 構文を知らず、
-        # setup-ffmpeg の Linux 静的ビルドは drawtext(freetype) 非搭載。
-        # BtbN の日付固定リリース(FFmpeg 8系, GPL, freetype入り)へ SHA-256 検証つきで固定する。
-        # 更新するときは URL と SHA を明示的に PR で書き換えること(監査 issue #17)。
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
-          FF_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-20-14-10/ffmpeg-n8.1.2-29-g703dcc25b9-linux64-gpl-8.1.tar.xz"
-          FF_SHA256="1beb1d21b4485962baeb2fff4f01e8b91faa6d1017567b07b8f26df1a93cbdfe"
+          FF_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-15-13-02/ffmpeg-n8.1.2-44-g7c533d0f86-linux64-gpl-8.1.tar.xz"
+          FF_SHA256="01f4a27f58acbea7c484232a62a7381f716ddf000e8f311b791f8bfc7c8912aa"
           curl -fsSL -o /tmp/ffmpeg.tar.xz "$FF_URL"
           echo "$FF_SHA256  /tmp/ffmpeg.tar.xz" | sha256sum -c -
           mkdir -p /tmp/ffdist && tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ffdist --strip-components=1
