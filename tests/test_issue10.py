@@ -14,7 +14,7 @@ import scriptvedit as sv
 def test_storyboard_extracts_one_frame_from_over_50_inputs(tmp_path, monkeypatch):
     """映像専用出力では50入力超でも音声枝を残さず実フレームを抽出できる"""
     image_module = pytest.importorskip("PIL.Image")
-    import scriptvedit.project as project_module
+    import scriptvedit.preview as preview_module
 
     image_path = tmp_path / "tile.png"
     image_module.new("RGB", (8, 8), (24, 96, 192)).save(image_path)
@@ -38,7 +38,7 @@ def test_storyboard_extracts_one_frame_from_over_50_inputs(tmp_path, monkeypatch
         encoding="utf-8")
 
     monkeypatch.setattr(
-        project_module, "_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+        preview_module, "_ARTIFACT_DIR", str(tmp_path / "artifacts"))
     project = sv.Project()
     project.configure(width=32, height=18, fps=5, background_color="black")
     project.normalize_audio(-14)

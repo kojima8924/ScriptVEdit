@@ -237,7 +237,7 @@ def test_web_prune_keeps_layer_slice_boundaries(tmp_path):
 def test_storyboard_extracts_all_project_frames_in_one_ffmpeg(
         tmp_path, monkeypatch):
     image_module = pytest.importorskip("PIL.Image")
-    import scriptvedit.project as project_module
+    import scriptvedit.preview as preview_module
 
     image_path = tmp_path / "still.png"
     image_module.new("RGB", (32, 18), (10, 80, 160)).save(image_path)
@@ -250,13 +250,13 @@ def test_storyboard_extracts_all_project_frames_in_one_ffmpeg(
     project.layer(str(layer_path))
 
     calls = []
-    real_run = project_module._run_ffmpeg
+    real_run = preview_module._run_ffmpeg
 
     def spy(command, **kwargs):
         calls.append(command)
         return real_run(command, **kwargs)
 
-    monkeypatch.setattr(project_module, "_run_ffmpeg", spy)
+    monkeypatch.setattr(preview_module, "_run_ffmpeg", spy)
     output = tmp_path / "board.png"
 
     project.storyboard(str(output), cols=2, interval=0.5)
@@ -270,7 +270,7 @@ def test_storyboard_extracts_all_project_frames_in_one_ffmpeg(
 
 def test_thumbnail_can_seek_existing_render_without_rebuilding_project(
         tmp_path, monkeypatch):
-    import scriptvedit.project as project_module
+    import scriptvedit.preview as preview_module
 
     source = tmp_path / "rendered.mp4"
     source.write_bytes(b"placeholder")
@@ -290,7 +290,7 @@ def test_thumbnail_can_seek_existing_render_without_rebuilding_project(
         with open(command[-1], "wb") as frame:
             frame.write(b"new-frame")
 
-    monkeypatch.setattr(project_module, "_run_ffmpeg", fake_run)
+    monkeypatch.setattr(preview_module, "_run_ffmpeg", fake_run)
 
     project.thumbnail(7.5, str(output), source=str(source))
 
@@ -315,7 +315,7 @@ def test_thumbnail_can_seek_existing_render_without_rebuilding_project(
 )
 def test_source_thumbnail_rejects_audio_only_and_video_out_of_range_early(
         tmp_path, monkeypatch, info, at, message):
-    import scriptvedit.project as project_module
+    import scriptvedit.preview as preview_module
 
     source = tmp_path / "source.mp4"
     source.write_bytes(b"placeholder")
@@ -323,7 +323,7 @@ def test_source_thumbnail_rejects_audio_only_and_video_out_of_range_early(
     monkeypatch.setattr(project, "_probe_media", lambda path: info)
     calls = []
     monkeypatch.setattr(
-        project_module, "_run_ffmpeg",
+        preview_module, "_run_ffmpeg",
         lambda command, **kwargs: calls.append(command))
 
     with pytest.raises(ValueError, match=message):
@@ -335,7 +335,7 @@ def test_source_thumbnail_rejects_audio_only_and_video_out_of_range_early(
 
 def test_source_thumbnail_keeps_existing_output_when_extraction_is_empty(
         tmp_path, monkeypatch):
-    import scriptvedit.project as project_module
+    import scriptvedit.preview as preview_module
 
     source = tmp_path / "source.mp4"
     source.write_bytes(b"placeholder")
@@ -349,7 +349,7 @@ def test_source_thumbnail_keeps_existing_output_when_extraction_is_empty(
             "video_duration": 10.0,
         })
     monkeypatch.setattr(
-        project_module, "_run_ffmpeg", lambda command, **kwargs: None)
+        preview_module, "_run_ffmpeg", lambda command, **kwargs: None)
 
     with pytest.raises(RuntimeError, match="抽出結果"):
         project.thumbnail(1.0, str(output), source=str(source))
@@ -392,7 +392,7 @@ def test_source_thumbnail_uses_format_duration_for_real_vp9_webm(tmp_path):
 def test_storyboard_reuses_duplicate_frames_and_clamps_tail_in_one_ffmpeg(
         tmp_path, monkeypatch):
     image_module = pytest.importorskip("PIL.Image")
-    import scriptvedit.project as project_module
+    import scriptvedit.preview as preview_module
 
     image_path = tmp_path / "still.png"
     image_module.new("RGB", (32, 18), (30, 120, 210)).save(image_path)
@@ -405,13 +405,13 @@ def test_storyboard_reuses_duplicate_frames_and_clamps_tail_in_one_ffmpeg(
     project.layer(str(layer_path))
 
     calls = []
-    real_run = project_module._run_ffmpeg
+    real_run = preview_module._run_ffmpeg
 
     def spy(command, **kwargs):
         calls.append(command)
         return real_run(command, **kwargs)
 
-    monkeypatch.setattr(project_module, "_run_ffmpeg", spy)
+    monkeypatch.setattr(preview_module, "_run_ffmpeg", spy)
     output = tmp_path / "dense-board.png"
 
     project.storyboard(str(output), cols=3, interval=0.05)

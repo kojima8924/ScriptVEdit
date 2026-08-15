@@ -33,12 +33,14 @@ pip install -e .[all]       # morph / web / beat / tts(edge-tts) / tools の全�
 
 ## ディレクトリ構成
 
-本体は `src/scriptvedit/` の37モジュール（合計約18,700行）のパッケージ。
+本体は `src/scriptvedit/` の41モジュール（合計約18,700行）のパッケージ。
 
 ```
 ScriptVEdit/
-├── src/scriptvedit/     パッケージ本体（37モジュール）
+├── src/scriptvedit/     パッケージ本体（41モジュール）
 │   ├── project.py       Project / render / チェックポイント
+│   ├── parallel.py preview.py  時間分割並列レンダ / thumbnail・storyboard
+│   ├── chapters.py params.py   マーカー・チャプター出力 / テンプレート変数
 │   ├── objects.py       Object / Transform / Effect
 │   ├── timeline.py      anchor / pause / scene / group
 │   ├── effects/         basic / visual / composite / paths / time / terminal

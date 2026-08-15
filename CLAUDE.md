@@ -16,7 +16,7 @@ Python の DSL で動画を構成し、ffmpeg でレンダリングするライ�
   （タイムライン時間・非進行）/ `a >> b` 直後連結（pause.time() を挟める）。
 - レイヤー .py の中で作った `Object` は exec 中に `Project` へ**自動登録**される。
   `p.objects.append()` の手動追加はしない（render 時のレイヤー再実行で消える）。
-- パッケージ本体は `src/scriptvedit/`（37モジュール）。`pip install -e .` で
+- パッケージ本体は `src/scriptvedit/`（41モジュール）。`pip install -e .` で
   どのディレクトリからでも `from scriptvedit import *`。
 
 ## 2. 最初に読むもの（最重要）

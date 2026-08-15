@@ -70,7 +70,9 @@ def _mock_run(monkeypatch):
         with open(out, "wb"):
             pass
 
+    # 逐次経路は project、並列経路（チャンク/音声レグ/mux）は parallel が参照する
     monkeypatch.setattr("scriptvedit.project._run_ffmpeg", fake_run)
+    monkeypatch.setattr("scriptvedit.parallel._run_ffmpeg", fake_run)
     return calls
 
 
