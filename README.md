@@ -7,7 +7,7 @@
 （本プロジェクトの解説動画自体も ScriptVEdit で制作している）。
 
 - **演算子で書く DSL** — `<=` で適用、`|` / `&` で連結。`obj[2:5]`（素材の切り出し）/ `obj @ 12`（タイムラインへ絶対配置）/
-  `a >> b`（直後に連結）/ `clip * 3`（リピート）/ `-clip`（逆再生）といった糖衣を持つ（→「設計思想」「タイムライン演算子」節）
+  `a >> b`（直後に連結）/ `clip * 3`（リピート）/ `-clip`（逆再生）といった糖衣を持つ（→「リファレンス」の「演算子によるDSL」「タイムライン演算子」節）
 - **素材キャッシュ** — 中間結果を**内容ハッシュ**の鍵で自動保存・復元し、変えていない部分は再レンダしない（→「チェックポイントキャッシュ」節）
 - **アンカーによる同期** — 「あの表示が終わってから」をレイヤーをまたいだ名前で参照でき、尺の変更が後続へ自動で波及する（→「anchor / pause / until」節）
 - **時間分割並列レンダ** — 総尺をフレーム境界で N 分割し、別プロセスで並列レンダして無劣化 concat。
@@ -16,6 +16,28 @@
 
 素材は画像・動画・音声のほか、HTML（Playwright 経由）・LaTeX 数式（KaTeX 同梱・オフライン）・TTS 音声も
 同じ Object として扱える。出力は mp4 / gif / webp / 連番PNG / 透過webm。
+
+## 必要なもの
+
+| 必須 | 説明 |
+|---|---|
+| Python 3.10 以上 | 本体の実行 |
+| **FFmpeg 8 以上** | 映像の生成。`ffmpeg` / `ffprobe` が PATH にあること |
+
+FFmpeg は**バージョンが重要**。長大フィルタの `-/filter_complex` 構文など
+FFmpeg 8 の機能を使うため、初回実行時にメジャーバージョンを検証し、7 以下は
+エラーになる。手元のバージョンは `ffmpeg -version` の1行目で確認できる。
+
+以下は**その機能を使うときだけ**必要になる（`pip install -e .[all]` で一括導入可）:
+
+- Playwright + Chromium（テンプレート / web Object / slide / `formula` 使用時。KaTeX は同梱のためネットワーク不要）
+- numpy + scipy（`beat_sync` 使用時。scipy はビート検出に必須）
+- numpy + PIL（`scriptvedit.testkit` の SSIM検証。scipy は任意で高速化）
+- Pillow（`storyboard` 使用時）
+- TTS（`voice` / `narrate` 使用時。`scriptvedit.tts` 経由。いずれか1つ）
+  - VOICEVOX エンジン（`backend="voicevox"`。オフライン・キャラボイス。別途起動が必要）
+  - edge-tts（`backend="edge"`。`pip install edge-tts` または `pip install scriptvedit[tts]`。導入が楽だがオンライン必須）
+  - Windows 標準音声（`backend="sapi"`。追加導入不要・オフライン。Windows 専用）
 
 ## インストール
 
@@ -29,47 +51,134 @@ pip install -e .[all]       # morph / web / beat / tts(edge-tts) / tools の全�
 
 動画を作る側(人・コーディングAI)向けの実践ノウハウは
 **[docs/production_guide.md](docs/production_guide.md)**(制作ワークフロー・品質規則・
-レンダ運用)にまとまっている。以下はライブラリ自体のリファレンス。
+レンダ運用)にまとまっている。この README はライブラリ自体の入門とリファレンス。
 
-## ディレクトリ構成
+## クイックスタート — はじめての動画
 
-本体は `src/scriptvedit/` の41モジュール（合計約18,600行）のパッケージ。
+### 1. 雛形を生成してレンダする
 
 ```
-ScriptVEdit/
-├── src/scriptvedit/     パッケージ本体（41モジュール）
-│   ├── project.py       Project / render / チェックポイント
-│   ├── parallel.py preview.py  時間分割並列レンダ / thumbnail・storyboard
-│   ├── chapters.py params.py   マーカー・チャプター出力 / テンプレート変数
-│   ├── objects.py       Object / Transform / Effect
-│   ├── timeline.py      anchor / pause / scene / group
-│   ├── effects/         basic / visual / composite / paths / time / terminal
-│   ├── filters/         video / audio フィルタ生成
-│   ├── expr.py easing.py  Expr式ビルダー・イージング
-│   ├── cache.py ffmpeg.py media.py  キャッシュ鍵・ffmpeg実行・probe
-│   ├── formula.py       数式レンダ（formula / formula_lines、KaTeX同梱）
-│   ├── text.py audio.py web.py      テキスト / オーディオ / web Object・テンプレート
-│   ├── morph.py         モーフィング・パーティクル生成（morph_to / explode_to）
-│   ├── tts.py           音声合成（voice / narrate。VOICEVOX / edge-tts / SAPI）
-│   ├── beat.py          ビート検出（beat_sync）
-│   ├── viz.py           タイムライン検査・可視化（Project.inspect）
-│   ├── testkit.py       SSIM によるレンダ結果の視覚検証
-│   ├── plugins.py       プラグイン機構（@effect_plugin）
-│   ├── manifest.py cli.py  describe（機械可読マニフェスト）/ CLI
-│   ├── scaffold.py      プロジェクト雛形生成（scriptvedit new）
-│   ├── assets.py        素材パス解決（asset / here / layer、共有ライブラリ取り込み）
-│   └── templates/       テンプレートHTML + vendor/katex（同梱、CDN参照なし）
-├── assets/              素材（images/ video/ audio/）
-├── tests/               pytest（スナップショット/エラーケース/実レンダ等）
-│   ├── layers/          レイヤー定義（testNN_*.py）とフィクスチャ
-│   └── snapshots/       ffmpegコマンドのスナップショット
-├── examples/basic/      最小サンプル
-├── examples/showcase/   ショーケース動画
-├── plugins/             サンプルプラグイン（cwd/plugins は自動読込）
-└── scripts/             開発用スクリプト
+scriptvedit new myvideo
+cd myvideo
+python main.py           # → output/myvideo.mp4 ができる
 ```
+
+これだけで動画が1本できる。雛形の構造:
+
+```
+myvideo/
+├── main.py            構成定義（configure / layer / render）
+├── layers/intro.py    サンプルレイヤー（1ファイル = 1レイヤー）
+├── assets/            素材置き場（images/ audio/）
+├── plugins/           カスタムエフェクト置き場（@effect_plugin、自動読込）
+├── output/            出力
+├── README.md          レンダ方法・素材の置き方
+└── .gitignore         output/ __cache__/ assets/_imported/ を除外
+```
+
+- `scriptvedit new myvideo --template explainer` … 解説動画向けの雛形（数式・字幕・BGM 入り）
+- `scriptvedit new myvideo --force` … 生成先が空でなくても生成する
+
+### 2. 何が書いてあるのか
+
+**main.py** は「動画の設定と、レイヤーをどの順で重ねるか」だけを書く:
+
+```python
+from scriptvedit import *
+
+p = Project()
+p.configure(width=1280, height=720, fps=30, background_color="black")
+
+p.layer("bg.py", priority=0)      # 数字が小さいほど下に重なる
+p.layer("badge.py", priority=1)   # こちらが上
+
+p.render("output.mp4")
+```
+
+**レイヤーファイル**（例: bg.py）には「素材をどう表示するか」を書く:
+
+```python
+from scriptvedit import *
+
+bg = Object("bg_pattern_tiles.jpg")   # 素材（画像・動画・音声など）を1つ包む
+bg <= resize(sx=1, sy=1)              # <= は「左の素材に右の効果を適用」
+bg.time(6) <= move(x=0.5, y=0.5, anchor="center") \
+              & scale(lambda u: lerp(1.5, 1, u)) \
+              & fade(lambda u: u)
+```
+
+初めて見る記号の意味:
+
+- `Object(...)` … 素材1つ。レイヤー内で作るだけで自動的に登録される（リストに追加する操作は不要）
+- `bg.time(6)` … この素材を**6秒間**表示し、タイムラインを6秒進める
+- `<=` … 適用。`&` … 複数の Effect をひとまとめにする
+- `lambda u: ...` … アニメーション。`u` は表示開始で 0、表示終了で 1 になる**進行度**。
+  `fade(lambda u: u)` なら「透明→不透明」、`scale(lambda u: lerp(1.5, 1, u))` なら「1.5倍→等倍」
+- `move(x=0.5, y=0.5)` … 位置は画面比率（0〜1）。(0.5, 0.5) は画面中央
+
+レイヤーを重ねる順序・素材の時間割りは main.py、見た目の演出はレイヤー、と役割が
+分かれているので、動画が大きくなってもファイルは短いまま保てる。
+
+### 3. 次の一歩
+
+```python
+p.inspect("timeline.html")            # 配置をガントチャートで確認（レンダ前に見る）
+p.render("out.mp4", dry_run=True)     # ffmpeg を実行せずコマンドだけ確認
+p.audit()                             # 品質チェック（文字が小さい等の警告）
+```
+
+```
+python -m scriptvedit describe --format md   # 全機能のカタログ（40 Effect / 98 Expr）
+python -m scriptvedit watch main.py          # ファイル変更を監視して自動再レンダ
+```
+
+リポジトリの `examples/basic/` にも最小サンプルがある（どのディレクトリからでも
+`python examples/basic/main.py` で実行できる）。
+
+動画・音声素材は `time()` の引数を省略すると素材の長さがそのまま表示尺になる:
+
+```python
+clip.time() <= trim(3)                # duration=3（加工後の長さ）
+bgm.time() <= atrim(2) & again(0.6)   # duration=2
+img.time()                            # TypeError（画像は「素材の長さ」を持たない）
+```
+
+## 基本概念（用語）
+
+| 用語 | 意味 |
+|---|---|
+| **Project** | 動画1本。解像度・fps を `configure()` し、レイヤーを重ねて `render()` する |
+| **レイヤー** | 1つの `.py` ファイル。`priority` で重ね順を持つ。中で作った Object は自動登録される |
+| **Object** | 素材1つ（画像・動画・音声・テキスト・HTML・数式）。開始時刻と表示尺を持つ |
+| **Transform** | 1回だけ適用される静的な変形（resize / crop / rotate …）。`\|` で連結 |
+| **Effect** | 時間変化できる効果（move / fade / scale …）。`&` で連結し、`lambda u:` でアニメーション |
+| **u** | Effect の進行度。表示開始 0 → 表示終了 1 |
+| **アンカー** | 「この表示が終わる時刻」に名前を付け、**別のレイヤーから**参照する仕組み。尺の変更が自動で波及する |
+| **キャッシュ** | 中間結果を `__cache__/` に自動保存。変えていない部分は再レンダしない。鍵は内容ハッシュ |
+
+適用順は記述順ではなく**「全 Transform → 全 Effect」のカテゴリ順**で固定
+（Effect の後に Transform を書くとエラー）。詳細は「リファレンス」の各節へ。
+
+## 演算子早見表
+
+| 書き方 | 意味 | 詳しい節 |
+|---|---|---|
+| `obj <= 効果` | 適用する | 演算子によるDSL |
+| `t1 \| t2` | Transform を連結 | 〃 |
+| `e1 & e2` | Effect を連結 | 〃 |
+| `~効果` | 品質ヒント（軽い代替処理があれば使う。無ければ通常と同一） | チェックポイントキャッシュ |
+| `+効果` | キャッシュを強制再生成 | 〃 |
+| `-効果` | キャッシュ対象から除外 | 〃 |
+| `obj[2:5]` | 素材の 2〜5 秒を切り出し（**素材時間**） | タイムライン演算子 |
+| `obj @ 12` | タイムライン 12 秒の位置に配置（**タイムライン時間**・非進行） | 〃 |
+| `a >> b` | b を a の終了直後に開始 | 〃 |
+| `obj * 3` | 3回連続再生 | 〃 |
+| `-obj` | 逆再生 | 〃 |
+| `50%P` | 0.5（パーセント記法） | パーセント記法 |
 
 ## 素材パスの解決（asset / here）
+
+**まずはこれだけ**: プロジェクトの `assets/` フォルダに素材を置き、`asset("images/bg.jpg")` のように読む。以下はその解決規則の詳細。
 
 レイヤーファイルは cwd に依存せず素材を参照できる。
 
@@ -114,32 +223,10 @@ export SCRIPTVEDIT_ASSETS=/srv/media/video-assets:/mnt/stock
 想定運用は「自分の動画プロジェクトのフォルダで ScriptVEdit をライブラリとして使い、そのフォルダ固有の `assets/` を持つ」こと。
 そのため 1・2 が 3 より先に来る（逆順にすると利用者の `assets/` が永久に無視される）。探索結果はキャッシュしないため、cwd 変更・レイヤー切替に追随する。
 
-## プロジェクトの新規作成（scriptvedit new）
+## リファレンス
 
-```
-scriptvedit new myvideo                      # 最小構成（そのまま python main.py でレンダできる）
-scriptvedit new myvideo --template explainer # 解説動画向け（数式・字幕・BGM の雛形入り）
-scriptvedit new myvideo --force              # 生成先が空でなくても生成する
-```
-
-生成される構造:
-
-```
-myvideo/
-├── main.py            構成定義（configure / layer / render）
-├── layers/intro.py    サンプルレイヤー（1ファイル = 1レイヤー）
-├── assets/            images/ audio/（共有ライブラリからの取り込みは assets/_imported/）
-├── plugins/           カスタムエフェクト置き場（@effect_plugin、自動読込）
-├── output/            出力
-├── README.md          レンダ方法・素材の置き方・共有ライブラリ（SCRIPTVEDIT_ASSETS）
-└── .gitignore         output/ __cache__/ assets/_imported/ を除外
-```
-
-```
-cd myvideo && python main.py     # output/myvideo.mp4
-```
-
-## 設計思想
+ここから下は設計の考え方と全機能の一覧。**上から順に読む必要はなく**、必要な節だけ
+引けばよい。機械可読版は `python -m scriptvedit describe`（→「ケイパビリティ・マニフェスト」節）。
 
 ### 1ファイル = 1レイヤー
 
@@ -1288,51 +1375,7 @@ d = testkit.frame_diff("a.png", "b.png", out_png="diff.png")     # mean_abs/max_
 
 プロパティ: `has_video`, `has_audio`, `source`, `duration`, `start_time`, `priority`
 
-## 使い方
-
-### main.py（構成定義）
-
-```python
-from scriptvedit import *
-
-p = Project()
-p.configure(width=1280, height=720, fps=30, background_color="black")
-
-p.layer("bg.py", priority=0)
-p.layer("badge.py", priority=1)
-
-p.render("output.mp4")
-```
-
-### レイヤーファイル（例: bg.py）
-
-```python
-from scriptvedit import *
-
-bg = Object("bg_pattern_tiles.jpg")
-bg <= resize(sx=1, sy=1)
-bg.time(6) <= move(x=0.5, y=0.5, anchor="center") \
-              & scale(lambda u: lerp(1.5, 1, u)) \
-              & fade(lambda u: u)
-```
-
-### time() の省略（auto duration）
-
-動画/音声では `time()` の引数を省略すると、加工後の長さ `length()` で duration を自動決定する。
-ただし呼び出し時に即 `length()` はせず、layer exec 後に確定されるため、
-同じ行で `trim` 等を付けても正しく反映される。
-
-```python
-clip.time() <= trim(3)                     # duration=3（加工後長）
-bgm.time() <= atrim(2) & again(0.6)       # duration=2
-img.time()                                 # TypeError（画像は length を持たない）
-```
-
-### 実行
-
-```
-python examples/basic/main.py      # どのディレクトリからでも実行できる
-```
+## render の詳細
 
 ### render
 
@@ -1371,6 +1414,48 @@ result = p.render("output.mp4", dry_run=True)
 コマンドが変わり得る。実レンダ後は `python -m scriptvedit cache --clear` で
 キャッシュを消してからスナップショットを実行する。
 
+## 開発者向け情報
+
+ライブラリを「使う」だけなら読まなくてよい。リポジトリ自体を触る人向け。
+
+### ディレクトリ構成
+
+本体は `src/scriptvedit/` の41モジュール（合計約18,600行）のパッケージ。
+
+```
+ScriptVEdit/
+├── src/scriptvedit/     パッケージ本体（41モジュール）
+│   ├── project.py       Project / render / チェックポイント
+│   ├── parallel.py preview.py  時間分割並列レンダ / thumbnail・storyboard
+│   ├── chapters.py params.py   マーカー・チャプター出力 / テンプレート変数
+│   ├── objects.py       Object / Transform / Effect
+│   ├── timeline.py      anchor / pause / scene / group
+│   ├── effects/         basic / visual / composite / paths / time / terminal
+│   ├── filters/         video / audio フィルタ生成
+│   ├── expr.py easing.py  Expr式ビルダー・イージング
+│   ├── cache.py ffmpeg.py media.py  キャッシュ鍵・ffmpeg実行・probe
+│   ├── formula.py       数式レンダ（formula / formula_lines、KaTeX同梱）
+│   ├── text.py audio.py web.py      テキスト / オーディオ / web Object・テンプレート
+│   ├── morph.py         モーフィング・パーティクル生成（morph_to / explode_to）
+│   ├── tts.py           音声合成（voice / narrate。VOICEVOX / edge-tts / SAPI）
+│   ├── beat.py          ビート検出（beat_sync）
+│   ├── viz.py           タイムライン検査・可視化（Project.inspect）
+│   ├── testkit.py       SSIM によるレンダ結果の視覚検証
+│   ├── plugins.py       プラグイン機構（@effect_plugin）
+│   ├── manifest.py cli.py  describe（機械可読マニフェスト）/ CLI
+│   ├── scaffold.py      プロジェクト雛形生成（scriptvedit new）
+│   ├── assets.py        素材パス解決（asset / here / layer、共有ライブラリ取り込み）
+│   └── templates/       テンプレートHTML + vendor/katex（同梱、CDN参照なし）
+├── assets/              素材（images/ video/ audio/）
+├── tests/               pytest（スナップショット/エラーケース/実レンダ等）
+│   ├── layers/          レイヤー定義（testNN_*.py）とフィクスチャ
+│   └── snapshots/       ffmpegコマンドのスナップショット
+├── examples/basic/      最小サンプル
+├── examples/showcase/   ショーケース動画
+├── plugins/             サンプルプラグイン（cwd/plugins は自動読込）
+└── scripts/             開発用スクリプト
+```
+
 ### テスト
 
 pytest で実行する（どのディレクトリからでも可。`cd tests` は不要）。
@@ -1408,21 +1493,6 @@ LF/CRLFだけの違いをCRLFへ正規化してハッシュするため、改行
 ```
 python scripts/tools_baseline.py verify baseline_snapshots.json
 ```
-
-## 依存
-
-- Python 3.10+
-- **FFmpeg 8 以上**（PATH に `ffmpeg`/`ffprobe`。長大フィルタの
-  `-/filter_complex` 構文など FFmpeg 8 の機能を使うため、初回実行時に
-  メジャーバージョンを検証し、7 以下はエラーになる）
-- Playwright + Chromium（テンプレート/web Object/slide/`formula` 使用時。KaTeX は同梱のためネットワーク不要）
-- numpy + scipy（`beat_sync` 使用時。scipy はビート検出に必須）
-- numpy + PIL（`scriptvedit.testkit` の SSIM検証。scipy は任意で高速化）
-- Pillow（`storyboard` 使用時）
-- TTS（`voice` / `narrate` 使用時。`scriptvedit.tts` 経由。いずれか1つ）
-  - VOICEVOX エンジン（`backend="voicevox"`。オフライン・キャラボイス。別途起動が必要）
-  - edge-tts（`backend="edge"`。`pip install edge-tts` または `pip install scriptvedit[tts]`。導入が楽だがオンライン必須）
-  - Windows 標準音声（`backend="sapi"`。追加導入不要・オフライン。Windows 専用）
 
 ## ライセンス
 
