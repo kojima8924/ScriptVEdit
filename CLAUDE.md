@@ -109,12 +109,12 @@ pytest tests/
 `pad` や `format=rgba` **単体では防げない**。固定サイズ・中央配置の `pad` の直後に
 **`copy` フィルタ**を挟んでバッファを分離するのが唯一の回避策。
 
-- `filters/video.py` の `_build_effect_filters` … pad サイズを scale 式の
+- `filters/video.py` の `_fx_scale` … pad サイズを scale 式の
   固定格子サンプリングで決定する（通常101点。振動系関数 sin/cos/tan/mod/random を
   含む式は格子とエイリアスして点間ピークを取りこぼすため、`_expr_has_oscillatory`
   判定で4999点の密格子に切り替える）。
   `pad=max_w:max_h:(ow-iw)/2:(oh-ih)/2:color=0x00000000:eval=frame` → **`copy`**。
-- 同じバリアが `ken_burns` 分岐にも必要。
+- 同じバリアが `_fx_ken_burns` にも必要。
 
 ### 4.2 overlay は全て `eof_action=pass`、start>0 の映像入力に `tpad`
 
@@ -137,8 +137,8 @@ x / y / alpha のアニメーションは安全。文字サイズを変えたい
 
 framesync のタイムベース評価が壊れるため、メイン入力と同じタイムベースへ正規化する:
 `movie=filename=...,loop=loop=-1:size=1,fps={fps},setpts=N/({fps}*TB)`
-（`filters/video.py` の `mask_wipe` 分岐）。無限ループは各レンダ経路の `-t` で打ち切られる。
-※ T 非依存の素の `mask` 分岐は正規化不要。
+（`filters/video.py` の `_fx_mask_wipe`）。無限ループは各レンダ経路の `-t` で打ち切られる。
+※ T 非依存の素の `_fx_mask` は正規化不要。
 
 ### 4.5 ネイティブ VP9 デコーダは alpha 非対応
 
@@ -224,7 +224,8 @@ overlay の中央配置は `(W-pad_size[0])/2` で計算される
 ### その他
 
 - **u 正規化**: エフェクト進行度は `clip((T-start)/dur, 0, 1)` で 0..1 に正規化する
-  （`filters/video.py` の `_build_effect_filters`）。
+  （`filters/video.py` の `_u_expr`。コア Effect もプラグインの `ctx["u"]` も
+  この1関数から式を得るので、定義が乖離しない）。
 - **`_resolve_obj_duration`**（`project.py`）は `obj.length()` ベース。
   trim / atempo を反映した加工後の尺を返す（チェックポイントのベイクと同一基準）。
   0 は返さない（`clip((t-start)/0,…)` のゼロ除算で ffmpeg が EINVAL になるため、
@@ -276,6 +277,10 @@ overlay の中央配置は `(W-pad_size[0])/2` で計算される
    `obj` / `project` / `parse_color` / `escape_path` / `pad_size` / `expand_pad` /
    `set_pad` が入る。ビルダーは ffmpeg フィルタ文字列の `list` を返す。
 3. **汎用的な機能 → `src/scriptvedit/effects/` 等のコアへ。**
+   映像 Effect の実処理は `filters/video.py` に `_fx_<名前>(e, eff_idx, ctx)` を
+   足し、`_FX_BUILDERS` に登録する（`ctx` は `_FxCtx`: `filters` へ append し、
+   キャンバスを広げるなら `ctx.pad_size` を更新する。プラグインと同じ契約）。
+   フィルタ生成以外の段で処理する Effect は `_FX_SKIP` へ入れる。
    必ず `tests/` にスナップショット + エラーケースを追加する
    （`tests/layers/testNN_*.py` にレイヤーを置き、`test_snapshot.py` / `test_errors.py` に登録）。
 4. **マニフェストへの掲載は自動。** 網羅性テストが載せ忘れを検出するので、
