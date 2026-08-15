@@ -22,7 +22,7 @@ import shutil as _shutil
 import concurrent.futures as _futures
 
 from scriptvedit.chapters import _chapters_metadata_path, _write_chapters_metadata
-from scriptvedit.ffmpeg import _run_ffmpeg, _unique_tmp_path
+from scriptvedit.ffmpeg import _atomic_write_text, _run_ffmpeg, _unique_tmp_path
 
 
 def _parallel_chunk_count(project, parallel, output_path):
@@ -137,10 +137,9 @@ def _render_parallel(project, output_path, n, timeout):
 
         # concatリスト（クォート内の ' はエスケープ。区切りは/でOS差を吸収）
         list_path = os.path.join(work_dir, "concat.txt")
-        with open(list_path, "w", encoding="utf-8") as f:
-            for p in chunk_paths:
-                quoted = p.replace("\\", "/").replace("'", "'\\''")
-                f.write(f"file '{quoted}'\n")
+        _atomic_write_text(list_path, "".join(
+            "file '{}'\n".format(p.replace("\\", "/").replace("'", "'\\''"))
+            for p in chunk_paths))
         meta_path = None
         if project._markers:
             meta_path = _chapters_metadata_path(project)
@@ -220,19 +219,16 @@ def _build_chunk_ffmpeg_cmd(project, chunk_path, k0, k1, threads):
         filter_parts.append(f"{video_map}setpts=PTS-{t0!r}/TB[chout]")
         video_map = "[chout]"
     if getattr(project, "_draft", False):
-        # ドラフト縮小は従来経路（_build_ffmpeg_cmd）と同一の式
-        filter_parts.append(
-            f"{video_map}scale=trunc(iw/4)*2:trunc(ih/4)*2[chdraft]")
+        # ドラフト縮小は従来経路（_build_ffmpeg_cmd）と同一の式（定数で強制）
+        filter_parts.append(f"{video_map}{_DRAFT_SCALE_FILTER}[chdraft]")
         video_map = "[chdraft]"
 
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     cmd.extend(inputs)
     if filter_parts:
         cmd.extend(["-filter_complex", ";".join(filter_parts)])
-        vm_inner = video_map[1:-1]
-        if video_map.startswith("[") and vm_inner.endswith(":v") \
-                and vm_inner[:-2].isdigit():
-            video_map = vm_inner  # 生入力参照はブラケットを外す（従来と同じ作法）
+        # 生入力参照はブラケットを外す（逐次レンダと共通ヘルパ）
+        video_map = _unwrap_raw_stream_ref(video_map, "v")
         cmd.extend(["-map", video_map])
     else:
         cmd.extend(["-map", "0:v"])
@@ -296,3 +292,4 @@ def _build_concat_mux_cmd(list_path, audio_path, meta_path, out_path):
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
 from scriptvedit.filters.video import _build_input_args, _build_video_overlay_parts
 from scriptvedit.objects import Object
+from scriptvedit.project import _DRAFT_SCALE_FILTER, _unwrap_raw_stream_ref

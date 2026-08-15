@@ -13,7 +13,7 @@ import builtins as _builtins
 
 from scriptvedit.chapters import _fmt_timestamp
 from scriptvedit.ffmpeg import _run_ffmpeg, _unique_tmp_path
-from scriptvedit.state import _ACTIVE_QUALITY, _ARTIFACT_DIR
+from scriptvedit.state import _ARTIFACT_DIR
 from scriptvedit.validate import _require_number
 # project.py と同じシャドウを再現する: 素の max/min は Expr 対応版
 # （builtins へ変えると挙動が変わるため、この import を外さないこと）
@@ -105,33 +105,14 @@ def _extract_source_frame(source, at, out, *, timeout=600):
 
 def _prepare_thumbnail_graph(project):
     """thumbnail/storyboard 共通: プラン解決+レイヤーexec+checkpoint確保を
-    一度だけ行い、-ss 単フレーム抽出可能な確定済みグラフを構築する。"""
-    project._reset_runtime_state()
-    project._dry_run = False
-    project._draft = False
-    project._alpha = False
-    project._render_quality = "final"
-    _ACTIVE_QUALITY[0] = ""
-    project._pending_compute_cmds = {}
-    project._render_window = None
-    project._plan_resolve()
-    # render()と同じく、キャッシュ鍵が総尺を含むため先に総尺を確定する
-    if project.duration is None:
-        project.duration = project._calc_total_duration()
-    project._validate_cache_specs()
-    project.objects = []
-    project._layers = []
-    project._mode = "render"
-    used_cache_files = set()
-    for spec in project._layer_specs:
-        if project._should_use_cache(spec):
-            used_cache_files.add(spec["filename"])
-            project._load_cached_layer(spec)
-        else:
-            project._exec_layer(spec["filename"], spec["priority"])
-    project._resolve_anchors()
-    # Plan/Render の構造一致検証（非決定的レイヤーの黙った尺ずれ防止）
-    project._verify_plan_structure(used_cache_files)
+    一度だけ行い、-ss 単フレーム抽出可能な確定済みグラフを構築する。
+
+    準備シーケンス本体は render() と同一の共通ヘルパ
+    （_begin_render_pass → _resolve_plan_duration → _execute_render_pass）を
+    通し、逐語重複による手動同期を排除する。"""
+    project._begin_render_pass()
+    project._resolve_plan_duration()
+    project._execute_render_pass()
     # render() と同じく数式PNG/Webクリップを先に実体化する
     # （formula の PNG が無いと ffmpeg が "No such file or directory" で落ちる）
     project._ensure_formula_objects()

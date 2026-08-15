@@ -10,7 +10,7 @@ import os
 import json
 import hashlib
 
-from scriptvedit.ffmpeg import _unique_tmp_path
+from scriptvedit.ffmpeg import _atomic_write_text
 from scriptvedit.state import _ARTIFACT_DIR, _ENGINE_VER
 from scriptvedit.validate import _require_number
 
@@ -55,19 +55,8 @@ def export_chapters(project, path):
         lines.append("0:00 イントロ")
     for t, label in markers:
         lines.append(f"{_fmt_timestamp(t)} {label}")
-    parent_dir = os.path.dirname(path)
-    if parent_dir:
-        os.makedirs(parent_dir, exist_ok=True)
-    tmp_path = _unique_tmp_path(path)
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+    # tmp→os.replace の原子的書き込みは ffmpeg.py の共通ヘルパに集約
+    _atomic_write_text(path, "\n".join(lines) + "\n")
     return path
 
 
@@ -104,43 +93,31 @@ def export_metadata(project, path=None, *, title=None, description=None,
     if path is None:
         path = "metadata.json"
     ext = os.path.splitext(path)[1].lower()
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    tmp_path = _unique_tmp_path(path)
-    try:
-        if ext == ".txt":
-            lines = []
-            if title:
-                lines.append(title)
-                lines.append("")
-            if description:
-                lines.append(description)
-                lines.append("")
-            if chapter_lines:
-                lines.extend(chapter_lines)
-                lines.append("")
-            if tag_list:
-                lines.append(" ".join(f"#{t}" for t in tag_list))
-            content = "\n".join(lines).rstrip("\n") + "\n"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(content)
-        else:
-            data = {
-                "title": title,
-                "description": description,
-                "tags": tag_list,
-                "chapters": chapters,
-                "chapters_text": "\n".join(chapter_lines),
-            }
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+    if ext == ".txt":
+        lines = []
+        if title:
+            lines.append(title)
+            lines.append("")
+        if description:
+            lines.append(description)
+            lines.append("")
+        if chapter_lines:
+            lines.extend(chapter_lines)
+            lines.append("")
+        if tag_list:
+            lines.append(" ".join(f"#{t}" for t in tag_list))
+        content = "\n".join(lines).rstrip("\n") + "\n"
+    else:
+        data = {
+            "title": title,
+            "description": description,
+            "tags": tag_list,
+            "chapters": chapters,
+            "chapters_text": "\n".join(chapter_lines),
+        }
+        content = json.dumps(data, ensure_ascii=False, indent=2)
+    # tmp→os.replace の原子的書き込みは ffmpeg.py の共通ヘルパに集約
+    _atomic_write_text(path, content)
     return path
 
 

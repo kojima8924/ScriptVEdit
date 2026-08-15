@@ -20,6 +20,26 @@ def _morph_frame_count(fps, dur):
     return _builtins.max(1, int(_math.ceil(float(fps) * float(dur))))
 
 
+# draft レンダの縮小フィルタ（解像度を半分に。幾何は保持、偶数寸法に丸め）。
+# 逐次レンダ（_build_ffmpeg_cmd）と並列チャンク（parallel.py）で同一の式を使う。
+_DRAFT_SCALE_FILTER = "scale=trunc(iw/4)*2:trunc(ih/4)*2"
+
+
+def _unwrap_raw_stream_ref(label, kind):
+    """生入力参照（[N:v] / [N:a]）ならブラケットを外したストリーム指定を返す。
+
+    フィルタなしの生入力参照はフィルタグラフの出力ラベルではないため、
+    -map にブラケット付きで渡すと "Output with label ... does not exist" で
+    落ちる。ストリーム指定（N:v / N:a）へ外す。
+    project.py の映像・音声と parallel.py のチャンク側で共通利用する。
+    """
+    inner = label[1:-1]
+    if label.startswith("[") and inner.endswith(f":{kind}") \
+            and inner[:-2].isdigit():
+        return inner
+    return label
+
+
 class Project:
     _current = None
     # レイヤー実行中のProjectスタック（from_projectでの親特定用。
@@ -318,6 +338,58 @@ class Project:
         self._layer_audio_sources = {}
         self._layer_unknown_audio_sources = {}
         self._layer_params = {}
+
+    def _begin_render_pass(self, *, dry_run=False, draft=False, alpha=False):
+        """render/thumbnail 共通のレンダ状態初期化（preview.py と共有）。
+
+        実行時状態のリセット・各種フラグ・保留computeコマンド・部分レンダ窓を
+        既定へ設定する。draft時はチェックポイント/morph鍵を本番と分離する
+        （_ACTIVE_QUALITY）。
+        """
+        self._reset_runtime_state()
+        self._dry_run = dry_run
+        self._draft = bool(draft)
+        self._alpha = bool(alpha)
+        self._render_quality = "draft" if self._draft else "final"
+        _ACTIVE_QUALITY[0] = "draft" if self._draft else ""
+        self._pending_compute_cmds = {}
+        self._render_window = None
+
+    def _resolve_plan_duration(self):
+        """Plan pass（アンカー解決。cache模擬、objects破棄）→総尺確定。
+
+        総尺はplan pass（常にライブ実行）の結果から確定する。
+        レイヤーキャッシュ鍵が総尺を含むため、キャッシュ判定・検証より
+        前に確定していなければならない（issue #13 P1-4）。
+        """
+        self._plan_resolve()
+        if self.duration is None:
+            self.duration = self._calc_total_duration()
+
+    def _execute_render_pass(self):
+        """Render pass: 本実行（anchors確定済み）→構造一致検証。
+
+        cache="use" の事前検証（鍵に総尺を含むため総尺確定後に行う）→
+        レイヤー実行（キャッシュ再生 or exec）→アンカー解決→
+        Plan/Render の構造一致検証（非決定的レイヤーの黙った尺ずれ防止）。
+        preview.py の thumbnail/storyboard 準備と共有する。
+
+        戻り値: キャッシュ再生に使ったレイヤーファイル名の集合。
+        """
+        self._validate_cache_specs()
+        self.objects = []
+        self._layers = []
+        self._mode = "render"
+        used_cache_files = set()
+        for spec in self._layer_specs:
+            if self._should_use_cache(spec):
+                used_cache_files.add(spec["filename"])
+                self._load_cached_layer(spec)
+            else:
+                self._exec_layer(spec["filename"], spec["priority"])
+        self._resolve_anchors()
+        self._verify_plan_structure(used_cache_files)
+        return used_cache_files
 
     def _probe_media(self, path):
         """ffprobeでメディア情報を取得（キャッシュあり）"""
@@ -750,11 +822,7 @@ class Project:
             raise ValueError(
                 f"render: parallel は1以上の整数で指定してください: {parallel!r}")
         output_path = os.fsdecode(output_path)
-        self._reset_runtime_state()
-        self._dry_run = dry_run
-        self._draft = bool(draft)
-        self._alpha = bool(alpha)
-        self._render_quality = "draft" if draft else "final"
+        self._begin_render_pass(dry_run=dry_run, draft=draft, alpha=alpha)
         # 奇数解像度の事前拒否: yuv420p系（h264/webm）はクロマサブサンプリングの
         # 制約で偶数寸法が必須。受理するとチェックポイント等の重い処理の後に
         # libx264 が "width not divisible by 2" で失敗するため、レンダ開始前に
@@ -768,11 +836,8 @@ class Project:
                 f"configure() で幅・高さを偶数にするか、"
                 f"pngシーケンス（.png）や .gif など奇数解像度を扱える形式で"
                 f"出力してください。")
-        # draft時はチェックポイント/morph鍵を本番と分離
-        _ACTIVE_QUALITY[0] = "draft" if draft else ""
         _GEN_COUNTER[0] = 0
         _t0 = _time.perf_counter()
-        self._pending_compute_cmds = {}
         # 部分レンダの時間窓を検証・保持（式のt基準は保ちつつ窓外を出力しない）
         if start is not None or end is not None:
             if start is not None:
@@ -784,15 +849,8 @@ class Project:
             if e is not None and e <= s:
                 raise ValueError(f"render: end({end}) は start({start}) より後が必要です")
             self._render_window = (s, e)
-        else:
-            self._render_window = None
-        # Plan pass: アンカー解決（cache模擬、objects破棄）
-        self._plan_resolve()
-        # 総尺はplan pass（常にライブ実行）の結果から確定する。
-        # レイヤーキャッシュ鍵が総尺を含むため、キャッシュ判定・検証より
-        # 前に確定していなければならない（issue #13 P1-4）
-        if self.duration is None:
-            self.duration = self._calc_total_duration()
+        # Plan pass: アンカー解決 + 総尺確定
+        self._resolve_plan_duration()
         # 部分レンダ窓の実効出力長を検証する。start が総尺以上だと -ss/-t 0 の
         # 空MP4が成功扱いで確定してしまう（監査 issue #14 P1）。
         # end > 総尺は従来どおり総尺へ clamp する。
@@ -806,22 +864,8 @@ class Project:
                     f"end={w_end if w_end is not None else '総尺'}, "
                     f"総尺={self.duration}s）。start は総尺より小さい値を"
                     f"指定してください。")
-        # cache="use" の事前検証（鍵に総尺を含むため総尺確定後に行う）
-        self._validate_cache_specs()
-        # Render pass: 本実行（anchors確定済み）
-        self.objects = []
-        self._layers = []
-        self._mode = "render"
-        used_cache_files = set()
-        for spec in self._layer_specs:
-            if self._should_use_cache(spec):
-                used_cache_files.add(spec["filename"])
-                self._load_cached_layer(spec)
-            else:
-                self._exec_layer(spec["filename"], spec["priority"])
-        self._resolve_anchors()
-        # Plan/Render の構造一致検証（非決定的レイヤーの黙った尺ずれ防止）
-        self._verify_plan_structure(used_cache_files)
+        # Render pass: 本実行（cache検証→レイヤー実行→anchors→構造検証）
+        self._execute_render_pass()
 
         # strict: p.audit() の warning が1件でもあればレンダ前に停止する
         # （品質lintの厳格モード。dry_run にも適用してCI等で早期検出できるように）
@@ -1278,7 +1322,7 @@ class Project:
                 cache_cmds[webm_path] = cmd
         return cache_cmds
 
-    def _build_checkpoint_image_cmd(self, source, transforms, cache_path, quality="final"):
+    def _build_checkpoint_image_cmd(self, source, transforms, cache_path):
         """画像チェックポイント: Transform適用→透過PNG"""
         # 一時Object経由で _build_transform_filters を再利用
         temp = Object.__new__(Object)
@@ -1293,7 +1337,7 @@ class Project:
         return cmd
 
     def _build_checkpoint_video_cmd(self, source, media_type, transforms, effects,
-                                     cache_path, dur, fps, quality="final"):
+                                     cache_path, dur, fps):
         """動画チェックポイント: Transform+Effect適用→透明VP9"""
         cmd = ["ffmpeg", "-y"]
         cmd.extend(_decoder_input_args(source, media_type, fps))
@@ -1324,7 +1368,7 @@ class Project:
         ])
         return cmd
 
-    def _build_morph_webm_cmd(self, frame_pattern, cache_path, duration, fps, quality="final"):
+    def _build_morph_webm_cmd(self, frame_pattern, cache_path, duration, fps):
         """PNG連番 → alpha映像 のffmpegコマンドを構築
 
         末尾に1フレーム複製して出力する（tpad=stop_mode=clone）。
@@ -1391,230 +1435,304 @@ class Project:
             dur = obj.length()
         return dur
 
-    def _process_checkpoints(self, obj):
-        """1つのObjectのチェックポイント処理（実レンダ）"""
+    def _plan_object_checkpoints(self, obj):
+        """1つのObjectのチェックポイント計画を構築する（純粋計画・実行しない）。
+
+        実レンダ(_process_checkpoints)と dry_run(_collect_checkpoint_cmds)の
+        両方がこの計画を通ることで、キャッシュパス・コマンド列・Object最終状態の
+        規則を一本化する（片方だけ直して両経路のパスがずれる事故の根絶）。
+
+        戻り値: 対象外（text/bakeable無し/全off/保存点無し）なら None。
+        それ以外は dict:
+          steps: 実行順の計画ステップ列。各ステップは dict で
+            kind: "checkpoint"|"pre_bake"|"frame_extract"|"morph"|"particle"
+            sp_idx: 属する保存点の bakeable_ops インデックス（resumeスキップ用）
+            path: 生成先キャッシュパス
+            build_cmd: () -> ffmpegコマンド列。実レンダは直前ステップの実体化後に
+                呼ぶ（動画チェックポイントは入力の実寸を probe するため、
+                生成順に遅延評価しないと中間物の寸法が反映されない）。
+                morph/particle はプレースホルダのフレームパターン版
+                （実レンダは _execute_frames_step が一時dirで組み直す）。
+            label: 進捗表示の見出し
+            policy: 保存点opのpolicy（pre_bake/frame_extractは存在チェックのみ
+                なので持たない＝従来挙動）
+            morph/particle 追加キー: op / src（フレーム生成の入力画像）/ dur / fps
+          final: _apply_checkpoint_final_state でObjectへ適用する最終状態
+          resume_args: _find_resume_point へそのまま渡す引数タプル
+        """
+        if obj.media_type == "text":
+            return None  # テキスト系は実体ファイルを持たずベイク対象外
         ops = _build_unified_ops(obj)
         bakeable_ops, live_ops = _split_ops(ops)
-        # bakeable ops があるか確認
         if not bakeable_ops:
-            return
+            return None
         # 全opがpolicy="off"ならスキップ
         if all(getattr(op, 'policy', 'auto') == "off" for _, op in bakeable_ops):
-            return
+            return None
 
         _validate_morph_position(bakeable_ops)
 
         save_points = _compute_save_points(bakeable_ops)
         if not save_points:
-            return
+            return None
 
         original_source = obj.source
-        original_media_type = obj.media_type
         dur = self._checkpoint_bake_duration(obj, original_source)
         fps = self.fps
         self._require_morph_duration(bakeable_ops, dur, original_source)
 
-        # 復元点チェック（bakeable_opsベース）
-        resume_idx, resume_path = self._find_resume_point(original_source, bakeable_ops, dur, fps, save_points)
-        if resume_idx is not None:
-            current_source = resume_path
-            current_media_type = _detect_media_type(resume_path)
-            remaining_ops = bakeable_ops[resume_idx + 1:]
-        else:
-            current_source = original_source
-            current_media_type = original_media_type
-            remaining_ops = list(bakeable_ops)
+        is_video = _detect_media_type(original_source) in ("video",)
+        current_source = original_source
+        current_media_type = obj.media_type
+        steps = []
 
-        # 前方実行: 保存点でのみチェックポイント生成
-        executed = bakeable_ops[:len(bakeable_ops) - len(remaining_ops)]
-        pos = 0
-        while pos < len(remaining_ops):
-            global_idx = len(executed) + pos
-            if global_idx in save_points:
-                typ, op = remaining_ops[pos]
-                segment_ops = executed + remaining_ops[:pos + 1]
-                has_effects = any(t == "effect" for t, _ in segment_ops)
-                is_video = _detect_media_type(original_source) in ("video",)
-                cp_dur = dur if (has_effects or is_video) else None
-                cp_fps = fps if cp_dur is not None else None
-                quality = getattr(op, 'quality', 'final')
+        def _cp_builder(src, mt, transforms, effects, path, cp_dur):
+            """チェックポイントコマンドの遅延ビルダー（現在値をクロージャへ固定）"""
+            if cp_dur is None:
+                return lambda: self._build_checkpoint_image_cmd(
+                    src, transforms, path)
+            return lambda: self._build_checkpoint_video_cmd(
+                src, mt, transforms, effects, path, cp_dur, fps)
 
-                # morph_to 分岐
-                if typ == "effect" and op.name == "morph_to" and hasattr(op, '_morph_target'):
-                    # morph直前の未ベイクopsを先に中間チェックポイントへベイク
-                    # （破棄するとmorph前のresize等が黙って消えるため）
-                    if pos > 0:
-                        pre_ops = remaining_ops[:pos]
-                        pre_segment = executed + pre_ops
-                        pre_has_effects = any(t == "effect" for t, _ in pre_segment)
-                        pre_dur = dur if (pre_has_effects or is_video) else None
-                        pre_fps = fps if pre_dur is not None else None
-                        pre_quality = getattr(pre_ops[-1][1], 'quality', 'final')
-                        pre_path = _checkpoint_cache_path(
-                            original_source, pre_segment, pre_dur, pre_fps, pre_quality)
-                        if not os.path.exists(pre_path):
-                            pre_transforms = [o for t, o in pre_ops if t == "transform"]
-                            pre_effects = [o for t, o in pre_ops if t == "effect"]
-                            os.makedirs(os.path.dirname(pre_path), exist_ok=True)
-                            if pre_dur is None:
-                                pre_cmd = self._build_checkpoint_image_cmd(
-                                    current_source, pre_transforms, pre_path, pre_quality)
-                            else:
-                                pre_cmd = self._build_checkpoint_video_cmd(
-                                    current_source, current_media_type,
-                                    pre_transforms, pre_effects,
-                                    pre_path, pre_dur, fps, pre_quality)
-                            print(f"チェックポイント保存 (morph前処理): {pre_path}")
-                            _run_ffmpeg_to_cache(pre_cmd, pre_path, timeout=600)
-                        current_source = pre_path
-                        current_media_type = _detect_media_type(pre_path)
-                    # morph（PIL）は画像のみ対応: 直前ソースが動画（前ベイクの.mkv等）
-                    # なら最終フレームをRGBA PNGに抽出してmorphの入力にする
-                    if _detect_media_type(current_source) == "video":
-                        frame_path = _morph_input_frame_path(current_source)
-                        if not os.path.exists(frame_path):
-                            frame_cmd = _build_morph_frame_extract_cmd(
-                                current_source, frame_path)
-                            os.makedirs(os.path.dirname(frame_path), exist_ok=True)
-                            print(f"モーフ入力フレーム抽出: {frame_path}")
-                            _run_ffmpeg_to_cache(frame_cmd, frame_path, timeout=600)
-                        current_source = frame_path
-                        current_media_type = "image"
-                    morph_path = _morph_cache_path(current_source, op, dur, fps, quality)
-                    policy = getattr(op, 'policy', 'auto')
-                    need_render = (policy == "force") or not os.path.exists(morph_path)
-                    if need_render:
-                        import tempfile
-                        from scriptvedit.morph import generate_rgba_frames
-                        with tempfile.TemporaryDirectory() as tmpdir:
-                            n_frames = _morph_frame_count(fps, dur)
-                            # blend Exprを数値関数に変換
-                            blend_expr = op.params.get("blend")
-                            if blend_expr is not None and isinstance(blend_expr, Expr):
-                                blend_fn = lambda t, _e=blend_expr: _e.eval_at(t)
-                            else:
-                                blend_fn = None
-                            morph_kw = {k: v for k, v in op.params.items() if k != "blend"}
-                            generate_rgba_frames(
-                                current_source, op._morph_target.source,
-                                tmpdir, n_frames, blend_fn=blend_fn, **morph_kw)
-                            frame_pattern = os.path.join(tmpdir, "frame_%05d.png")
-                            os.makedirs(os.path.dirname(morph_path), exist_ok=True)
-                            cmd = self._build_morph_webm_cmd(
-                                frame_pattern, morph_path, dur, fps, quality)
-                            print(f"モーフキャッシュ保存: {morph_path}")
-                            _run_ffmpeg_to_cache(cmd, morph_path, timeout=600)
-                    current_source = morph_path
-                    current_media_type = "video"
-                elif typ == "effect" and op.name in ("explode_to", "assemble_from"):
-                    from scriptvedit.morph import (generate_explode_frames,
-                                       generate_assemble_frames)
-                    if op.name == "explode_to":
-                        # explode: 直前の未ベイクopsを先にベイク（morphと同じ経路）
-                        if pos > 0:
-                            pre_ops = remaining_ops[:pos]
-                            pre_segment = executed + pre_ops
-                            pre_has_effects = any(t == "effect" for t, _ in pre_segment)
-                            pre_dur = dur if (pre_has_effects or is_video) else None
-                            pre_fps = fps if pre_dur is not None else None
-                            pre_quality = getattr(pre_ops[-1][1], 'quality', 'final')
-                            pre_path = _checkpoint_cache_path(
-                                original_source, pre_segment, pre_dur, pre_fps, pre_quality)
-                            if not os.path.exists(pre_path):
-                                pre_transforms = [o for t, o in pre_ops if t == "transform"]
-                                pre_effects = [o for t, o in pre_ops if t == "effect"]
-                                os.makedirs(os.path.dirname(pre_path), exist_ok=True)
-                                if pre_dur is None:
-                                    pre_cmd = self._build_checkpoint_image_cmd(
-                                        current_source, pre_transforms, pre_path, pre_quality)
-                                else:
-                                    pre_cmd = self._build_checkpoint_video_cmd(
-                                        current_source, current_media_type,
-                                        pre_transforms, pre_effects,
-                                        pre_path, pre_dur, fps, pre_quality)
-                                print(f"チェックポイント保存 (explode前処理): {pre_path}")
-                                _run_ffmpeg_to_cache(pre_cmd, pre_path, timeout=600)
-                            current_source = pre_path
-                            current_media_type = _detect_media_type(pre_path)
-                        img_path = current_source
-                        gen = generate_explode_frames
-                    else:  # assemble_from: 集合元画像を入力にする
-                        img_path = op._assemble_source.source
-                        gen = generate_assemble_frames
-                    # 粒子生成（PIL）は画像のみ: 動画ソースは最終フレームを抽出
-                    if _detect_media_type(img_path) == "video":
-                        frame_path = _morph_input_frame_path(img_path)
-                        if not os.path.exists(frame_path):
-                            frame_cmd = _build_morph_frame_extract_cmd(img_path, frame_path)
-                            os.makedirs(os.path.dirname(frame_path), exist_ok=True)
-                            print(f"粒子入力フレーム抽出: {frame_path}")
-                            _run_ffmpeg_to_cache(frame_cmd, frame_path, timeout=600)
-                        img_path = frame_path
-                    part_path = _particle_cache_path(img_path, op, dur, fps, quality)
-                    policy = getattr(op, 'policy', 'auto')
-                    need_render = (policy == "force") or not os.path.exists(part_path)
-                    if need_render:
-                        import tempfile
-                        with tempfile.TemporaryDirectory() as tmpdir:
-                            n_frames = _morph_frame_count(fps, dur)
-                            blend_expr = op.params.get("blend")
-                            if blend_expr is not None and isinstance(blend_expr, Expr):
-                                blend_fn = lambda t, _e=blend_expr: _e.eval_at(t)
-                            else:
-                                blend_fn = None
-                            part_kw = {k: v for k, v in op.params.items() if k != "blend"}
-                            gen(img_path, tmpdir, n_frames, blend_fn=blend_fn, **part_kw)
-                            frame_pattern = os.path.join(tmpdir, "frame_%05d.png")
-                            os.makedirs(os.path.dirname(part_path), exist_ok=True)
-                            cmd = self._build_morph_webm_cmd(
-                                frame_pattern, part_path, dur, fps, quality)
-                            print(f"粒子キャッシュ保存: {part_path}")
-                            _run_ffmpeg_to_cache(cmd, part_path, timeout=600)
-                    current_source = part_path
-                    current_media_type = "video"
-                else:
-                    cache_path = _checkpoint_cache_path(
-                        original_source, segment_ops, cp_dur, cp_fps, quality)
+        def _plan_pre_bake(pre_ops, pre_segment, sp_idx, label):
+            """morph/explode直前の未ベイクopsを中間チェックポイントへ計画する
+            （破棄するとmorph前のresize等が黙って消えるため先にベイクする）"""
+            nonlocal current_source, current_media_type
+            pre_has_effects = any(t == "effect" for t, _ in pre_segment)
+            pre_dur = dur if (pre_has_effects or is_video) else None
+            pre_fps = fps if pre_dur is not None else None
+            pre_quality = getattr(pre_ops[-1][1], 'quality', 'final')
+            pre_path = _checkpoint_cache_path(
+                original_source, pre_segment, pre_dur, pre_fps, pre_quality)
+            steps.append({
+                "kind": "pre_bake", "sp_idx": sp_idx, "path": pre_path,
+                "label": label,
+                "build_cmd": _cp_builder(
+                    current_source, current_media_type,
+                    [o for t, o in pre_ops if t == "transform"],
+                    [o for t, o in pre_ops if t == "effect"],
+                    pre_path, pre_dur),
+            })
+            current_source = pre_path
+            current_media_type = _detect_media_type(pre_path)
 
-                    policy = getattr(op, 'policy', 'auto')
-                    need_render = (policy == "force") or not os.path.exists(cache_path)
-                    if need_render:
-                        local_ops = remaining_ops[:pos + 1]
-                        local_transforms = [op for t, op in local_ops if t == "transform"]
-                        local_effects = [op for t, op in local_ops if t == "effect"]
+        def _plan_frame_extract(src, sp_idx, label):
+            """morph/粒子生成（PIL）は画像のみ対応: 動画ソース（前ベイクの
+            .mkv等）は最終フレームをRGBA PNGへ抽出してから入力にする"""
+            frame_path = _morph_input_frame_path(src)
+            steps.append({
+                "kind": "frame_extract", "sp_idx": sp_idx, "path": frame_path,
+                "label": label,
+                "build_cmd": (lambda s=src, fp=frame_path:
+                              _build_morph_frame_extract_cmd(s, fp)),
+            })
+            return frame_path
 
-                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                        if cp_dur is None:
-                            cmd = self._build_checkpoint_image_cmd(
-                                current_source, local_transforms, cache_path, quality)
-                        else:
-                            cmd = self._build_checkpoint_video_cmd(
-                                current_source, current_media_type,
-                                local_transforms, local_effects,
-                                cache_path, cp_dur, fps, quality)
-                        print(f"チェックポイント保存: {cache_path}")
-                        _run_ffmpeg_to_cache(cmd, cache_path, timeout=600)
-                    current_source = cache_path
-                    current_media_type = _detect_media_type(cache_path)
+        sorted_sps = sorted(save_points)
+        prev_sp_idx = None
+        for sp_idx in sorted_sps:
+            segment_ops = bakeable_ops[:sp_idx + 1]
+            has_effects = any(t == "effect" for t, _ in segment_ops)
+            cp_dur = dur if (has_effects or is_video) else None
+            cp_fps = fps if cp_dur is not None else None
+            sp_typ, sp_op = bakeable_ops[sp_idx]
+            quality = getattr(sp_op, 'quality', 'final')
+            policy = getattr(sp_op, 'policy', 'auto')
+            seg_start = 0 if prev_sp_idx is None else prev_sp_idx + 1
 
-                executed = executed + remaining_ops[:pos + 1]
-                remaining_ops = remaining_ops[pos + 1:]
-                pos = 0
-                continue
-            pos += 1
+            # morph_to 分岐
+            if (sp_typ == "effect" and sp_op.name == "morph_to"
+                    and hasattr(sp_op, '_morph_target')):
+                pre_ops = bakeable_ops[seg_start:sp_idx]
+                if pre_ops:
+                    _plan_pre_bake(pre_ops, bakeable_ops[:sp_idx], sp_idx,
+                                   "チェックポイント保存 (morph前処理)")
+                if _detect_media_type(current_source) == "video":
+                    current_source = _plan_frame_extract(
+                        current_source, sp_idx, "モーフ入力フレーム抽出")
+                    current_media_type = "image"
+                morph_path = _morph_cache_path(
+                    current_source, sp_op, dur, fps, quality)
+                steps.append({
+                    "kind": "morph", "sp_idx": sp_idx, "path": morph_path,
+                    "label": "モーフキャッシュ保存", "policy": policy,
+                    "op": sp_op, "src": current_source, "dur": dur, "fps": fps,
+                    "build_cmd": (lambda mp=morph_path:
+                                  self._build_morph_webm_cmd(
+                                      os.path.join("__morph_frames__",
+                                                   "frame_%05d.png"),
+                                      mp, dur, fps)),
+                })
+                current_source = morph_path
+                current_media_type = "video"
+            # 粒子Effect分岐
+            elif sp_typ == "effect" and sp_op.name in ("explode_to",
+                                                       "assemble_from"):
+                if sp_op.name == "explode_to":
+                    # explode: 直前の未ベイクopsを先にベイク（morphと同じ経路）
+                    pre_ops = bakeable_ops[seg_start:sp_idx]
+                    if pre_ops:
+                        _plan_pre_bake(pre_ops, bakeable_ops[:sp_idx], sp_idx,
+                                       "チェックポイント保存 (explode前処理)")
+                    img_path = current_source
+                else:  # assemble_from: 集合元画像を入力にする
+                    img_path = sp_op._assemble_source.source
+                if _detect_media_type(img_path) == "video":
+                    img_path = _plan_frame_extract(
+                        img_path, sp_idx, "粒子入力フレーム抽出")
+                part_path = _particle_cache_path(
+                    img_path, sp_op, dur, fps, quality)
+                steps.append({
+                    "kind": "particle", "sp_idx": sp_idx, "path": part_path,
+                    "label": "粒子キャッシュ保存", "policy": policy,
+                    "op": sp_op, "src": img_path, "dur": dur, "fps": fps,
+                    "build_cmd": (lambda pp=part_path:
+                                  self._build_morph_webm_cmd(
+                                      os.path.join("__particle_frames__",
+                                                   "frame_%05d.png"),
+                                      pp, dur, fps)),
+                })
+                current_source = part_path
+                current_media_type = "video"
+            else:
+                cache_path = _checkpoint_cache_path(
+                    original_source, segment_ops, cp_dur, cp_fps, quality)
+                local_ops = bakeable_ops[seg_start:sp_idx + 1]
+                steps.append({
+                    "kind": "checkpoint", "sp_idx": sp_idx, "path": cache_path,
+                    "label": "チェックポイント保存", "policy": policy,
+                    "build_cmd": _cp_builder(
+                        current_source, current_media_type,
+                        [o for t, o in local_ops if t == "transform"],
+                        [o for t, o in local_ops if t == "effect"],
+                        cache_path, cp_dur),
+                })
+                current_source = cache_path
+                current_media_type = _detect_media_type(cache_path)
+            prev_sp_idx = sp_idx
 
-        # Objectを更新: source差し替え、残余bakeable ops + live opsを再設定
-        # 差し替え前に解決した実長を保持（差し替え後のprobe依存を排除し、
-        # dry_runと実レンダで式を一致させる）。
-        # live 時間系Effect（speed/freeze_frame）が残る場合は表示尺に換算する
-        if dur:
+        remaining = bakeable_ops[sorted_sps[-1] + 1:]
+        final = {
+            "source": current_source,
+            "media_type": current_media_type,
+            "transforms": [op for t, op in remaining if t == "transform"],
+            "effects": ([op for t, op in remaining if t == "effect"]
+                        + [op for t, op in live_ops if t == "effect"]),
+            "dur": dur,
+            "live_effects": [op for t, op in live_ops if t == "effect"],
+        }
+        return {
+            "steps": steps,
+            "final": final,
+            "resume_args": (original_source, bakeable_ops, dur, fps,
+                            save_points),
+        }
+
+    @staticmethod
+    def _apply_checkpoint_final_state(obj, final):
+        """計画の最終状態をObjectへ適用する（source差し替え・残余ops再設定）。
+
+        差し替え前に解決した実長を保持（差し替え後・未生成予定パスへの
+        probe依存を排除し、dry_runと実レンダで式を一致させる）。
+        live 時間系Effect（speed/freeze_frame）が残る場合は表示尺に換算する。
+        """
+        if final["dur"]:
             obj._resolved_length = _apply_time_effects_to_duration(
-                dur, [op for t, op in live_ops if t == "effect"])
-        obj.source = current_source
-        obj.media_type = current_media_type
-        obj.transforms = [op for t, op in remaining_ops if t == "transform"]
-        obj.effects = ([op for t, op in remaining_ops if t == "effect"]
-                       + [op for t, op in live_ops if t == "effect"])
+                final["dur"], final["live_effects"])
+        obj.source = final["source"]
+        obj.media_type = final["media_type"]
+        obj.transforms = list(final["transforms"])
+        obj.effects = list(final["effects"])
+
+    def _process_checkpoints(self, obj):
+        """1つのObjectのチェックポイント処理（実レンダ）。
+
+        計画(_plan_object_checkpoints)を立て、復元点より後のステップだけを
+        実行してからObjectへ最終状態を適用する。dry_run側
+        (_collect_checkpoint_cmds)と同一の計画を通るため、キャッシュパスが
+        経路間でずれることはない。
+        """
+        plan = self._plan_object_checkpoints(obj)
+        if plan is None:
+            return
+        # 復元点チェック（bakeable_opsベース）: 復元点以前のステップは既存
+        # キャッシュを使うため実行しない（後続が参照する入力パスは計画が
+        # 同一規則で解決済みなので、実行の有無でコマンドは変わらない）
+        resume_idx, _resume_path = self._find_resume_point(*plan["resume_args"])
+        for step in plan["steps"]:
+            if resume_idx is not None and step["sp_idx"] <= resume_idx:
+                continue
+            self._execute_checkpoint_step(step)
+        self._apply_checkpoint_final_state(obj, plan["final"])
+
+    def _execute_checkpoint_step(self, step):
+        """計画ステップ1件を実行する（実レンダ専用）。
+
+        pre_bake/frame_extract は存在チェックのみで再利用、
+        checkpoint/morph/particle は policy="force" なら再生成する（従来判定）。
+        """
+        path = step["path"]
+        kind = step["kind"]
+        if kind == "particle":
+            # 従来と同じく、キャッシュ有無に関わらず粒子分岐へ到達した時点で
+            # モジュールを解決する（依存欠如の検出タイミングを変えない）
+            from scriptvedit.morph import (generate_explode_frames,  # noqa: F401
+                               generate_assemble_frames)  # noqa: F401
+        if kind in ("pre_bake", "frame_extract"):
+            if os.path.exists(path):
+                return
+            cmd = step["build_cmd"]()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            print(f"{step['label']}: {path}")
+            _run_ffmpeg_to_cache(cmd, path, timeout=600)
+            return
+        need_render = (step["policy"] == "force") or not os.path.exists(path)
+        if not need_render:
+            return
+        if kind in ("morph", "particle"):
+            self._execute_frames_step(step)
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        cmd = step["build_cmd"]()
+        print(f"{step['label']}: {path}")
+        _run_ffmpeg_to_cache(cmd, path, timeout=600)
+
+    def _execute_frames_step(self, step):
+        """morph/particle 共通: 一時dirへPNG連番を生成しffv1中間へエンコードする。
+
+        フレーム生成（PIL）は実レンダでのみ行う（dry_runはプレースホルダの
+        フレームパターンを持つコマンドだけを収集する）。
+        """
+        import tempfile
+        op = step["op"]
+        dur = step["dur"]
+        fps = step["fps"]
+        path = step["path"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            n_frames = _morph_frame_count(fps, dur)
+            # blend Exprを数値関数に変換
+            blend_expr = op.params.get("blend")
+            if blend_expr is not None and isinstance(blend_expr, Expr):
+                blend_fn = lambda t, _e=blend_expr: _e.eval_at(t)
+            else:
+                blend_fn = None
+            gen_kw = {k: v for k, v in op.params.items() if k != "blend"}
+            if step["kind"] == "morph":
+                from scriptvedit.morph import generate_rgba_frames
+                generate_rgba_frames(
+                    step["src"], op._morph_target.source,
+                    tmpdir, n_frames, blend_fn=blend_fn, **gen_kw)
+            else:
+                from scriptvedit.morph import (generate_explode_frames,
+                                   generate_assemble_frames)
+                gen = (generate_explode_frames if op.name == "explode_to"
+                       else generate_assemble_frames)
+                gen(step["src"], tmpdir, n_frames, blend_fn=blend_fn, **gen_kw)
+            frame_pattern = os.path.join(tmpdir, "frame_%05d.png")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            cmd = self._build_morph_webm_cmd(frame_pattern, path, dur, fps)
+            print(f"{step['label']}: {path}")
+            _run_ffmpeg_to_cache(cmd, path, timeout=600)
 
     def _find_resume_point(self, original_source, ops, duration, fps, save_points):
         """force地点より左のauto保存点のみresume候補"""
@@ -1646,216 +1764,28 @@ class Project:
         return None, None
 
     def _ensure_checkpoints(self):
-        """bakeable opsを持つ全Objectのチェックポイント処理"""
+        """bakeable opsを持つ全Objectのチェックポイント処理（対象判定は計画側）"""
         for obj in self.objects:
-            if not isinstance(obj, Object):
-                continue
-            if obj.media_type == "text":
-                continue  # テキスト系は実体ファイルを持たずベイク対象外
-            bakeable_ops, _ = _split_ops(_build_unified_ops(obj))
-            if not bakeable_ops:
-                continue
-            # 全opがpolicy="off"ならスキップ
-            if all(getattr(op, 'policy', 'auto') == "off" for _, op in bakeable_ops):
-                continue
-            self._process_checkpoints(obj)
+            if isinstance(obj, Object):
+                self._process_checkpoints(obj)
 
     def _collect_checkpoint_cmds(self):
-        """dry_run用: 全チェックポイントコマンドを収集"""
+        """dry_run用: 全チェックポイントコマンドを収集（計画は実レンダと共通）。
+
+        morph/particle はフレーム生成を伴わないため、フレームパターンが
+        プレースホルダのコマンドを収集する。収集後は実レンダと同じ最終状態を
+        Objectへ適用する（sourceの予定パス差し替え・実長保持等）。
+        """
         cmds = {}
         for obj in self.objects:
             if not isinstance(obj, Object):
                 continue
-            if obj.media_type == "text":
-                continue  # テキスト系は実体ファイルを持たずベイク対象外
-            ops = _build_unified_ops(obj)
-            bakeable_ops, live_ops = _split_ops(ops)
-            if not bakeable_ops:
+            plan = self._plan_object_checkpoints(obj)
+            if plan is None:
                 continue
-            if all(getattr(op, 'policy', 'auto') == "off" for _, op in bakeable_ops):
-                continue
-
-            _validate_morph_position(bakeable_ops)
-
-            save_points = _compute_save_points(bakeable_ops)
-            if not save_points:
-                continue
-
-            original_source = obj.source
-            dur = self._checkpoint_bake_duration(obj, original_source)
-            fps = self.fps
-            self._require_morph_duration(bakeable_ops, dur, original_source)
-            current_source = original_source
-            current_media_type = obj.media_type
-
-            sorted_sps = sorted(save_points)
-            for sp_idx in sorted_sps:
-                segment_ops = bakeable_ops[:sp_idx + 1]
-                has_effects = any(t == "effect" for t, _ in segment_ops)
-                is_video = _detect_media_type(original_source) in ("video",)
-                cp_dur = dur if (has_effects or is_video) else None
-                cp_fps = fps if cp_dur is not None else None
-                sp_typ, sp_op = bakeable_ops[sp_idx]
-                quality = getattr(sp_op, 'quality', 'final')
-
-                # current_sourceの解決（前の保存点からの更新）
-                prev_sps = [j for j in sorted_sps if j < sp_idx]
-                if prev_sps:
-                    prev_sp_idx = prev_sps[-1]
-                    prev_sp_typ, prev_sp_op = bakeable_ops[prev_sp_idx]
-                    # 前の保存点がmorph_toの場合
-                    if prev_sp_typ == "effect" and prev_sp_op.name == "morph_to" and hasattr(prev_sp_op, '_morph_target'):
-                        current_source = _morph_cache_path(
-                            current_source, prev_sp_op, dur, fps,
-                            getattr(prev_sp_op, 'quality', 'final'))
-                    else:
-                        prev_seg = bakeable_ops[:prev_sp_idx + 1]
-                        prev_has_eff = any(t == "effect" for t, _ in prev_seg)
-                        prev_is_video = _detect_media_type(original_source) in ("video",)
-                        current_source = _checkpoint_cache_path(
-                            original_source, prev_seg,
-                            dur if (prev_has_eff or prev_is_video) else None,
-                            fps if (prev_has_eff or prev_is_video) else None,
-                            getattr(prev_sp_op, 'quality', 'final'))
-                    current_media_type = _detect_media_type(current_source)
-
-                # morph_to 分岐
-                if sp_typ == "effect" and sp_op.name == "morph_to" and hasattr(sp_op, '_morph_target'):
-                    # morph直前の未ベイクopsの中間チェックポイントコマンドも収集
-                    # （実レンダの_process_checkpointsと同じ経路）
-                    pre_start = prev_sps[-1] + 1 if prev_sps else 0
-                    pre_ops = bakeable_ops[pre_start:sp_idx]
-                    if pre_ops:
-                        pre_segment = bakeable_ops[:sp_idx]
-                        pre_has_effects = any(t == "effect" for t, _ in pre_segment)
-                        pre_dur = dur if (pre_has_effects or is_video) else None
-                        pre_fps = fps if pre_dur is not None else None
-                        pre_quality = getattr(pre_ops[-1][1], 'quality', 'final')
-                        pre_path = _checkpoint_cache_path(
-                            original_source, pre_segment, pre_dur, pre_fps, pre_quality)
-                        pre_transforms = [o for t, o in pre_ops if t == "transform"]
-                        pre_effects = [o for t, o in pre_ops if t == "effect"]
-                        if pre_dur is None:
-                            pre_cmd = self._build_checkpoint_image_cmd(
-                                current_source, pre_transforms, pre_path, pre_quality)
-                        else:
-                            pre_cmd = self._build_checkpoint_video_cmd(
-                                current_source, current_media_type,
-                                pre_transforms, pre_effects,
-                                pre_path, pre_dur, fps, pre_quality)
-                        cmds[pre_path] = pre_cmd
-                        current_source = pre_path
-                        current_media_type = _detect_media_type(pre_path)
-                    # 動画ソースは最終フレームPNG抽出を挟む（実レンダと同じ経路）
-                    if _detect_media_type(current_source) == "video":
-                        frame_path = _morph_input_frame_path(current_source)
-                        cmds[frame_path] = _build_morph_frame_extract_cmd(
-                            current_source, frame_path)
-                        current_source = frame_path
-                        current_media_type = "image"
-                    morph_path = _morph_cache_path(current_source, sp_op, dur, fps, quality)
-                    frame_pattern = os.path.join("__morph_frames__", "frame_%05d.png")
-                    cmd = self._build_morph_webm_cmd(
-                        frame_pattern, morph_path, dur, fps, quality)
-                    cmds[morph_path] = cmd
-                elif sp_typ == "effect" and sp_op.name in ("explode_to", "assemble_from"):
-                    # 粒子Effect分岐（実レンダの_process_checkpointsと同じ経路）
-                    if sp_op.name == "explode_to":
-                        pre_start = prev_sps[-1] + 1 if prev_sps else 0
-                        pre_ops = bakeable_ops[pre_start:sp_idx]
-                        if pre_ops:
-                            pre_segment = bakeable_ops[:sp_idx]
-                            pre_has_effects = any(t == "effect" for t, _ in pre_segment)
-                            pre_dur = dur if (pre_has_effects or is_video) else None
-                            pre_fps = fps if pre_dur is not None else None
-                            pre_quality = getattr(pre_ops[-1][1], 'quality', 'final')
-                            pre_path = _checkpoint_cache_path(
-                                original_source, pre_segment, pre_dur, pre_fps, pre_quality)
-                            pre_transforms = [o for t, o in pre_ops if t == "transform"]
-                            pre_effects = [o for t, o in pre_ops if t == "effect"]
-                            if pre_dur is None:
-                                pre_cmd = self._build_checkpoint_image_cmd(
-                                    current_source, pre_transforms, pre_path, pre_quality)
-                            else:
-                                pre_cmd = self._build_checkpoint_video_cmd(
-                                    current_source, current_media_type,
-                                    pre_transforms, pre_effects,
-                                    pre_path, pre_dur, fps, pre_quality)
-                            cmds[pre_path] = pre_cmd
-                            current_source = pre_path
-                            current_media_type = _detect_media_type(pre_path)
-                        img_path = current_source
-                    else:  # assemble_from
-                        img_path = sp_op._assemble_source.source
-                    if _detect_media_type(img_path) == "video":
-                        frame_path = _morph_input_frame_path(img_path)
-                        cmds[frame_path] = _build_morph_frame_extract_cmd(
-                            img_path, frame_path)
-                        img_path = frame_path
-                    part_path = _particle_cache_path(img_path, sp_op, dur, fps, quality)
-                    frame_pattern = os.path.join("__particle_frames__", "frame_%05d.png")
-                    cmds[part_path] = self._build_morph_webm_cmd(
-                        frame_pattern, part_path, dur, fps, quality)
-                else:
-                    cache_path = _checkpoint_cache_path(
-                        original_source, segment_ops, cp_dur, cp_fps, quality)
-
-                    local_ops_start = 0
-                    if prev_sps:
-                        local_ops_start = prev_sps[-1] + 1
-
-                    local_ops = bakeable_ops[local_ops_start:sp_idx + 1]
-                    local_transforms = [op for t, op in local_ops if t == "transform"]
-                    local_effects = [op for t, op in local_ops if t == "effect"]
-
-                    if cp_dur is None:
-                        cmd = self._build_checkpoint_image_cmd(
-                            current_source, local_transforms, cache_path, quality)
-                    else:
-                        cmd = self._build_checkpoint_video_cmd(
-                            current_source, current_media_type,
-                            local_transforms, local_effects,
-                            cache_path, cp_dur, fps, quality)
-                    cmds[cache_path] = cmd
-
-            # Object source差し替え（最後の保存点）
-            last_sp = sorted_sps[-1]
-            last_typ, last_op = bakeable_ops[last_sp]
-            if last_typ == "effect" and last_op.name == "morph_to" and hasattr(last_op, '_morph_target'):
-                last_path = _morph_cache_path(
-                    current_source, last_op, dur, fps,
-                    getattr(last_op, 'quality', 'final'))
-            elif last_typ == "effect" and last_op.name in ("explode_to", "assemble_from"):
-                if last_op.name == "assemble_from":
-                    img_path = last_op._assemble_source.source
-                else:
-                    img_path = current_source
-                if _detect_media_type(img_path) == "video":
-                    img_path = _morph_input_frame_path(img_path)
-                last_path = _particle_cache_path(
-                    img_path, last_op, dur, fps,
-                    getattr(last_op, 'quality', 'final'))
-            else:
-                last_seg = bakeable_ops[:last_sp + 1]
-                last_has_eff = any(t == "effect" for t, _ in last_seg)
-                last_is_video = _detect_media_type(original_source) in ("video",)
-                last_path = _checkpoint_cache_path(
-                    original_source, last_seg,
-                    dur if (last_has_eff or last_is_video) else None,
-                    fps if (last_has_eff or last_is_video) else None,
-                    getattr(last_op, 'quality', 'final'))
-            # 差し替え前に解決した実長を保持（未生成予定パスへのprobe fallback防止）。
-            # live 時間系Effect（speed/freeze_frame）が残る場合は表示尺に換算する
-            if dur:
-                obj._resolved_length = _apply_time_effects_to_duration(
-                    dur, [op for t, op in live_ops if t == "effect"])
-            obj.source = last_path
-            obj.media_type = _detect_media_type(last_path)
-            remaining = bakeable_ops[last_sp + 1:]
-            obj.transforms = [op for t, op in remaining if t == "transform"]
-            obj.effects = ([op for t, op in remaining if t == "effect"]
-                           + [op for t, op in live_ops if t == "effect"])
-
+            for step in plan["steps"]:
+                cmds[step["path"]] = step["build_cmd"]()
+            self._apply_checkpoint_final_state(obj, plan["final"])
         return cmds
 
     def _collect_web_cmds(self):
@@ -2075,18 +2005,10 @@ class Project:
             "unknown_audio_sources": self._layer_unknown_audio_sources.get(
                 spec["filename"], []),
         }
-        # アトミック書き込み（webmと同様、中断による壊れたメタの残留を防ぐ）。
-        # 一時パスは pid + 乱数でユニーク化（並列レイヤー生成での衝突防止）
-        tmp_json = _unique_tmp_path(json_path)
-        try:
-            with open(tmp_json, "w", encoding="utf-8") as f:
-                json.dump(cache_meta, f, indent=2, ensure_ascii=False)
-            os.replace(tmp_json, json_path)
-        finally:
-            try:
-                os.remove(tmp_json)  # 失敗時の残骸掃除（成功時は replace 済みで存在しない）
-            except OSError:
-                pass
+        # アトミック書き込み（webmと同様、中断による壊れたメタの残留を防ぐ。
+        # tmp→os.replace の作法は ffmpeg.py の共通ヘルパに集約）
+        _atomic_write_text(json_path,
+                           json.dumps(cache_meta, indent=2, ensure_ascii=False))
         print(f"  アンカー保存: {json_path}")
 
     def _loop_trim_duration(self, obj, loop_effect):
@@ -2315,13 +2237,8 @@ class Project:
                 audio_labels[ai] = f"[duck{ai}]"
 
             if len(audio_labels) == 1:
-                audio_out = audio_labels[0]
-                # フィルタなしの生入力参照（[N:a]）はフィルタグラフのラベルではないため、
-                # -map にはブラケットを外したストリーム指定（N:a）で渡す
-                inner = audio_out[1:-1]
-                if audio_out.startswith("[") and inner.endswith(":a") \
-                        and inner[:-2].isdigit():
-                    audio_out = inner
+                # フィルタなしの生入力参照は -map 用にブラケットを外す
+                audio_out = _unwrap_raw_stream_ref(audio_labels[0], "a")
             else:
                 amix_in = "".join(audio_labels)
                 audio_out = "[aout]"
@@ -2379,9 +2296,8 @@ class Project:
         # 出力前の映像後処理（draft縮小・GIFパレット生成）
         video_map = current_base
         if getattr(self, "_draft", False):
-            # ドラフト: 解像度を半分に（幾何は保持、偶数寸法に丸め）
-            filter_parts.append(
-                f"{video_map}scale=trunc(iw/4)*2:trunc(ih/4)*2[vdraft]")
+            # ドラフト: 解像度を半分に（式は _DRAFT_SCALE_FILTER に一元化）
+            filter_parts.append(f"{video_map}{_DRAFT_SCALE_FILTER}[vdraft]")
             video_map = "[vdraft]"
         if fmt["kind"] == "gif":
             # 高品質パレット: split→palettegen→paletteuse を1グラフで実行
@@ -2417,14 +2333,8 @@ class Project:
         if filter_parts:
             cmd.extend(["-filter_complex", ";".join(filter_parts)])
             # 映像Objectが無い（音声のみ＋音声フィルタ）場合、video_mapは
-            # 生入力参照（[0:v]）のまま。filter_complex併用時の -map に
-            # ブラケット付きで渡すとグラフ出力ラベル扱いになり
-            # "Output with label '0:v' does not exist" で落ちるため、
-            # 音声側と同様にストリーム指定（0:v）へ外す
-            vm_inner = video_map[1:-1]
-            if video_map.startswith("[") and vm_inner.endswith(":v") \
-                    and vm_inner[:-2].isdigit():
-                video_map = vm_inner
+            # 生入力参照（[0:v]）のまま。音声側と同様にストリーム指定へ外す
+            video_map = _unwrap_raw_stream_ref(video_map, "v")
             if not audio_only:
                 cmd.extend(["-map", video_map])
             if use_audio:
@@ -2435,12 +2345,9 @@ class Project:
 
         # --- 出力形式ごとのエンコード指定 ---
         if audio_only:
-            # 音声レグ: 逐次レンダのh264音声設定（aac 160k + 任意-ar）と同一にする
-            cmd.extend(["-vn", "-c:a", "aac", "-b:a", "160k"])
-            opts = self._loudnorm_options \
-                if self._loudnorm_target is not None else None
-            if opts and opts["sample_rate"] is not None:
-                cmd.extend(["-ar", str(opts["sample_rate"])])
+            # 音声レグ: 逐次レンダのh264音声設定と同一（_aac_audio_argsで強制）
+            cmd.append("-vn")
+            cmd.extend(self._aac_audio_args())
         else:
             cmd.extend(self._encode_args(fmt, use_audio))
 
@@ -2513,15 +2420,23 @@ class Project:
             args.extend(self._encoder_args)
         args.extend(["-pix_fmt", "yuv420p"])
         if use_audio:
-            # FFmpegの低ビットレート既定AACは鋭いSEで数dBのピーク再上昇を
-            # 起こし得る。160kを明示し、normalize_audioのcodec headroomが
-            # 有効に働く品質へ固定する。
-            args.extend(["-c:a", "aac", "-b:a", "160k"])
-            opts = self._loudnorm_options if self._loudnorm_target is not None else None
-            if opts and opts["sample_rate"] is not None:
-                args.extend(["-ar", str(opts["sample_rate"])])
+            args.extend(self._aac_audio_args())
         else:
             args.append("-an")
+        return args
+
+    def _aac_audio_args(self):
+        """h264系出力のAAC音声引数（音声レグと逐次レンダの同一性をコードで強制）。
+
+        FFmpegの低ビットレート既定AACは鋭いSEで数dBのピーク再上昇を
+        起こし得る。160kを明示し、normalize_audioのcodec headroomが
+        有効に働く品質へ固定する。sample_rate指定時は -ar も付ける。
+        """
+        args = ["-c:a", "aac", "-b:a", "160k"]
+        opts = self._loudnorm_options \
+            if self._loudnorm_target is not None else None
+        if opts and opts["sample_rate"] is not None:
+            args.extend(["-ar", str(opts["sample_rate"])])
         return args
 
 
@@ -2529,7 +2444,7 @@ class Project:
 from scriptvedit.audio import _probe_audio_length
 from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _file_fingerprint, _is_bakeable, _is_pending_cache_path, _layer_cache_encode_args, _layer_cache_paths, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _resolve_layer_cache_quality, _split_ops, _validate_morph_position, _web_cache_path
 from scriptvedit.expr import Expr, max, min
-from scriptvedit.ffmpeg import _decoder_input_args, _ffmpeg_available_encoders, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
+from scriptvedit.ffmpeg import _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.audio import _build_audio_effect_filters, _build_audio_pre_filters
 from scriptvedit.filters.video import _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _build_video_pre_filters, _get_base_dimensions, _optimize_filter_chain
 from scriptvedit.objects import Object, _web_frames_dir
