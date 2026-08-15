@@ -59,6 +59,11 @@ jobs:
         # formula() / web Object の実ブラウザ生成テストを実行するため
         if: runner.os == 'Linux'
         run: python -m playwright install --with-deps chromium
+      - name: 未使用 import の検出
+        # 単一ファイルから分割した経緯でstdlib importの残骸が溜まりやすい。
+        # 再発すると読み手が依存関係を誤読するため、CIで止める
+        # (__init__.py の再エクスポートと # noqa 付きは除外)
+        run: python scripts/check_unused_imports.py
       - name: テスト実行(カバレッジ付き)
         run: python -m pytest tests/ -q -rs --cov=scriptvedit --cov-report=term --cov-fail-under=60 2>&1 | tee pytest.log
         shell: bash

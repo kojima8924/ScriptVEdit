@@ -58,7 +58,11 @@ Effect / Transform / AudioEffect の `respects_fast_hint` は、その op が `~
 pip install -e .[all]      # コアは標準ライブラリのみ。extras: morph/web/beat/tools
 pytest tests/              # 全テスト（約1分）
 python tests/render_all.py # 実レンダリング（重い。出力は tests/output/）
+python scripts/check_unused_imports.py   # 未使用importの検出（CIでも実行）
 ```
+
+未使用 import は CI で失敗にする。存在確認のためだけの import は `# noqa` を
+付けて意図を示す（`__init__.py` の再エクスポートは対象外）。
 
 ### スナップショットテスト
 
