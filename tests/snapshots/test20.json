@@ -21,7 +21,7 @@
     "-i",
     "__cache__/artifacts/checkpoint/ac32771b/03b1f2c05ec904fb.mkv",
     "-filter_complex",
-    "[0:v][1:v]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,8)'[v1];[v1][2:v]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,2.5)'[v2];[3:v]tpad=start_duration=2.5:start_mode=clone[obj3];[v2][obj3]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,2.5/,4.5)'[v3];[4:v]tpad=start_duration=4.5:start_mode=clone[obj4];[v3][obj4]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,4.5/,7.0)'[v4];[v4][5:v]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,1.0)'[v5]",
+    "[1:v]trim=end=8.066666666666666[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,8)'[v1];[2:v]trim=end=2.566666666666667[obj2];[v1][obj2]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,2.5)'[v2];[3:v]tpad=start_duration=2.5:start_mode=clone,trim=start=2.433333333333333:end=4.566666666666666[obj3];[v2][obj3]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,2.5/,4.5)'[v3];[4:v]tpad=start_duration=4.5:start_mode=clone,trim=start=4.433333333333334:end=7.066666666666666[obj4];[v3][obj4]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,4.5/,7.0)'[v4];[5:v]trim=end=1.0666666666666667[obj5];[v4][obj5]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,1.0)'[v5]",
     "-map",
     "[v5]",
     "-c:v",

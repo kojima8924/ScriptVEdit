@@ -11,7 +11,7 @@
     "-i",
     "__cache__/artifacts/web/test19_scene/dc84e02dd85c72a3.webm",
     "-filter_complex",
-    "[0:v][1:v]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,2.0)'[v1]",
+    "[1:v]trim=end=2.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,2.0)'[v1]",
     "-map",
     "[v1]",
     "-c:v",

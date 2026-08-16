@@ -10,6 +10,14 @@ from types import SimpleNamespace
 import pytest
 
 import scriptvedit as sv
+# 内部ヘルパーは実体モジュールから直接 import する
+# （package root からの private 再エクスポートは廃止済み）
+from scriptvedit.cache import (
+    _checkpoint_cache_path, _layer_cache_paths, _morph_cache_path,
+    _op_fingerprint_str, _particle_cache_path,
+)
+from scriptvedit.filters.video import _build_effect_filters
+from scriptvedit.text import _escape_ffpath
 
 
 @pytest.fixture(autouse=True)
@@ -76,13 +84,13 @@ def test_ignored_quality_hint_does_not_split_cache_keys(tmp_path):
     ops_hinted = [("effect", hinted)]
 
     assert normal.quality == "final" and hinted.quality == "fast"
-    assert sv._op_fingerprint_str(normal) == sv._op_fingerprint_str(hinted)
-    assert sv._checkpoint_cache_path(str(source), ops_normal, 2, 30) == \
-        sv._checkpoint_cache_path(str(source), ops_hinted, 2, 30)
-    assert sv._morph_cache_path(str(source), normal, 2, 30) == \
-        sv._morph_cache_path(str(source), hinted, 2, 30)
-    assert sv._particle_cache_path(str(source), normal, 2, 30) == \
-        sv._particle_cache_path(str(source), hinted, 2, 30)
+    assert _op_fingerprint_str(normal) == _op_fingerprint_str(hinted)
+    assert _checkpoint_cache_path(str(source), ops_normal, 2, 30) == \
+        _checkpoint_cache_path(str(source), ops_hinted, 2, 30)
+    assert _morph_cache_path(str(source), normal, 2, 30) == \
+        _morph_cache_path(str(source), hinted, 2, 30)
+    assert _particle_cache_path(str(source), normal, 2, 30) == \
+        _particle_cache_path(str(source), hinted, 2, 30)
 
     obj_normal = sv.Object(str(source))
     obj_hinted = sv.Object(str(source))
@@ -310,11 +318,11 @@ def test_quoted_filter_paths_are_escaped_for_lut(tmp_path):
     """アポストロフィを含むLUTパスをfiltergraph内で安全に引用する"""
     lut_path = tmp_path / "director's-look.cube"
     lut_path.write_text("LUT_3D_SIZE 2\n", encoding="ascii")
-    escaped = sv._escape_ffpath(str(lut_path))
+    escaped = _escape_ffpath(str(lut_path))
     assert r"'\\\''" in escaped
 
     effect = sv.lut(str(lut_path))
-    filters, _ = sv._build_effect_filters(
+    filters, _ = _build_effect_filters(
         SimpleNamespace(effects=[effect]), 0, 1)
     assert filters == [f"lut3d=file={escaped}"]
 
@@ -364,7 +372,7 @@ def test_cached_layer_replay_warns_when_audio_will_be_lost(tmp_path, monkeypatch
 
     monkeypatch.setattr(project_module, "_run_ffmpeg_to_cache", fake_cache_run)
     persisted._render_layer_to_cache(0)
-    _, persisted_meta = sv._layer_cache_paths(str(persisted_layer), persisted)
+    _, persisted_meta = _layer_cache_paths(str(persisted_layer), persisted)
     with open(persisted_meta, encoding="utf-8") as f:
         assert json.load(f)["audio_sources"] == ["voice.wav"]
 
@@ -377,7 +385,7 @@ def test_cached_layer_replay_warns_when_audio_will_be_lost(tmp_path, monkeypatch
     legacy = sv.Project()
     legacy.layer(str(layer), cache="use")
     legacy_spec = legacy._layer_specs[0]
-    webm_path, meta_path = sv._layer_cache_paths(str(layer), legacy)
+    webm_path, meta_path = _layer_cache_paths(str(layer), legacy)
     os.makedirs(os.path.dirname(meta_path), exist_ok=True)
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump({

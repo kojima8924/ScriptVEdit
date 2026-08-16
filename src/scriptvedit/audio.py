@@ -261,8 +261,8 @@ def voice(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0, volume=1.0,
         _tts_mod = _import_module("scriptvedit.tts")
     except ImportError as e:
         raise ImportError(
-            "voice() には scriptvedit.tts が必要です。"
-            "scriptvedit.py と同じディレクトリに配置してください。") from e
+            "voice() に必要な scriptvedit.tts が読み込めません。"
+            "`pip install -e .[all]` で再インストールしてください。") from e
     wav = _tts_mod.tts(text, backend=backend, speaker=speaker, speed=speed,
                      pitch=pitch, **tts_kwargs)
     dur = _tts_mod.tts_duration(wav)
@@ -507,8 +507,8 @@ def narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
         _tts_mod = _import_module("scriptvedit.tts")
     except ImportError as e:
         raise ImportError(
-            "narrate() には scriptvedit.tts が必要です。"
-            "scriptvedit.py と同じディレクトリに配置してください。") from e
+            "narrate() に必要な scriptvedit.tts が読み込めません。"
+            "`pip install -e .[all]` で再インストールしてください。") from e
     wav = _tts_mod.tts(text_content, backend=backend, speaker=speaker, speed=speed,
                      pitch=pitch, **tts_kwargs)
     dur = _tts_mod.tts_duration(wav)

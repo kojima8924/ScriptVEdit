@@ -146,17 +146,42 @@ def _build_input_args(obj, fps):
     return _decoder_input_args(obj.source, obj.media_type, fps)
 
 
-def _build_video_overlay_parts(obj, input_idx, current_base, dur, head_trim=None):
+def _visible_window(obj, fps):
+    """オブジェクトの可視区間 (t_from, t_to) をタイムライン絶対秒で返す。
+
+    区間は overlay の enable=between(t, start, start+duration) と**同一**にし、
+    フレーム境界の判定誤差を吸収する2フレームぶんの余白を前後へ付ける
+    （overlayのframesyncは「主入力pts以下の最新フレーム」を選ぶので、
+      余分に残した先行/後続フレームは正しさに影響しない）。
+
+    duration が未確定（None）のオブジェクトには enable が付かない＝
+    タイムライン全体へ合成されうる（progress_bar 等。start_time が総尺でも
+    tpad のクローンフレームが先頭を埋めるので t=0 から見えている）。
+    この場合は (0.0, None) を返して**区間を絞らない**。区間を enable より
+    狭めると、その分だけ絵が消える。
+    """
+    if obj.duration is None:
+        return 0.0, None
+    margin = 2.0 / fps
+    return (_builtins.max(0.0, obj.start_time - margin),
+            obj.start_time + obj.duration + margin)
+
+
+def _build_video_overlay_parts(obj, input_idx, current_base, dur, visible_window=None):
     """1オブジェクト分の映像フィルタチェーン + overlay行を構築
     （本レンダとレイヤーキャッシュで共通利用し、両経路の乖離を防ぐ）
 
-    head_trim: 時間分割並列レンダ（Project.render(parallel=N)）のチャンク側でのみ
-        指定される「この絶対時刻より前のフレームを早期破棄する」秒数。
-        tpadでタイムライン時刻へ整列した直後に trim=start=... を挿むことで、
-        チャンク開始前のフレームが後段の重いフィルタ（drawtext/geq/scale等）へ
-        流れるのを防ぐ。trimはPTSを振り直さないため、後段のt依存式
+    visible_window: (t_from, t_to) — このオブジェクトを実際に合成する
+        タイムライン絶対秒の区間。tpadでタイムライン時刻へ整列した直後
+        （tpadの無い画像入力ではチェーン先頭）に trim=start/end を挿み、
+        可視区間外のフレームが後段の重いフィルタ（drawtext/geq/scale等）へ
+        流れるのを防ぐ。開始時刻がバラけたN個のオブジェクトを並べたとき、
+        これが無いと総フレーム処理量が O(N^2) になる。
+        trimはPTSを振り直さないため、後段のt依存式
         （enable/u正規化/drawtext）は全編レンダと同一文字列のまま成立する。
-        None（既定）なら従来どおり＝挿入しない。
+        通常は `_visible_window(obj, fps)` の戻り値を渡す。時間分割並列レンダ
+        （Project.render(parallel=N)）はそれとチャンク区間の積集合を渡す。
+        None（既定）なら挿入しない。t_to が None なら終端を打ち切らない。
 
     Returns: (filter_parts, out_label)
     """
@@ -168,9 +193,16 @@ def _build_video_overlay_parts(obj, input_idx, current_base, dur, head_trim=None
     # trim/setpts の後に挿入し、trim がクローンフレーム込みで尺を切らないようにする
     if obj.media_type != "image" and start > 0:
         obj_filters.append(f"tpad=start_duration={start}:start_mode=clone")
-    # 時間分割並列レンダ: チャンク開始前のフレームを破棄（PTSは絶対時刻のまま維持）
-    if head_trim is not None and head_trim > 0:
-        obj_filters.append(f"trim=start={head_trim}")
+    # 可視区間の外のフレームを早期破棄（PTSは絶対時刻のまま維持）
+    if visible_window is not None:
+        t_from, t_to = visible_window
+        trim_params = []
+        if t_from is not None and t_from > 0:
+            trim_params.append(f"start={t_from}")
+        if t_to is not None:
+            trim_params.append(f"end={t_to}")
+        if trim_params:
+            obj_filters.append("trim=" + ":".join(trim_params))
     # テキスト系: tpad後（タイムライン時刻に整列した後）にdrawtext/subtitlesを重畳
     if obj.media_type == "text":
         obj_filters.extend(_build_text_filters(obj, start, dur))

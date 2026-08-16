@@ -11,7 +11,7 @@
     "-i",
     "__cache__/artifacts/checkpoint/b00c4c21/c7b771b40a1507f4.mkv",
     "-filter_complex",
-    "[0:v][1:v]overlay=trunc(0.3*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,2)'[v1];[2:v]tpad=start_duration=2:start_mode=clone[obj2];[v1][obj2]overlay=trunc(0.7*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,2/,4)'[v2]",
+    "[1:v]trim=end=2.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.3*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,2)'[v1];[2:v]tpad=start_duration=2:start_mode=clone,trim=start=1.9333333333333333:end=4.066666666666666[obj2];[v1][obj2]overlay=trunc(0.7*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,2/,4)'[v2]",
     "-map",
     "[v2]",
     "-c:v",

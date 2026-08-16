@@ -15,7 +15,7 @@
     "-i",
     "__cache__/artifacts/web/slide_test87_slide_divs_p1/926a22048063800b.webm",
     "-filter_complex",
-    "[0:v][1:v]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,1.0)'[v1];[2:v]tpad=start_duration=1.0:start_mode=clone[obj2];[v1][obj2]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,1.0/,2.0)'[v2]",
+    "[1:v]trim=end=1.0666666666666667[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,1.0)'[v1];[2:v]tpad=start_duration=1.0:start_mode=clone,trim=start=0.9333333333333333:end=2.066666666666667[obj2];[v1][obj2]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,1.0/,2.0)'[v2]",
     "-map",
     "[v2]",
     "-c:v",

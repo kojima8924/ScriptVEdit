@@ -11,7 +11,7 @@
     "-i",
     "assets/audio/bgm_loop.mp3",
     "-filter_complex",
-    "[0:v][1:v]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,3)'[v1];[1:a]atrim=duration=3,asetpts=PTS-STARTPTS[a0];[2:a]atrim=duration=4,asetpts=PTS-STARTPTS,volume=volume='0.6':eval=frame,volume=volume='clip((t)/4/,0/,1)':eval=frame[a1];[a0][a1]amix=inputs=2:normalize=0[aout]",
+    "[1:v]trim=end=3.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,3)'[v1];[1:a]atrim=duration=3,asetpts=PTS-STARTPTS[a0];[2:a]atrim=duration=4,asetpts=PTS-STARTPTS,volume=volume='0.6':eval=frame,volume=volume='clip((t)/4/,0/,1)':eval=frame[a1];[a0][a1]amix=inputs=2:normalize=0[aout]",
     "-map",
     "[v1]",
     "-map",

@@ -13,7 +13,7 @@
     "-i",
     "assets/images/shape_badge.png",
     "-filter_complex",
-    "[0:v][1:v]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,3)'[v1];[v1]scale=trunc(iw/4)*2:trunc(ih/4)*2[vdraft]",
+    "[1:v]trim=end=3.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,3)'[v1];[v1]scale=trunc(iw/4)*2:trunc(ih/4)*2[vdraft]",
     "-map",
     "[vdraft]",
     "-c:v",

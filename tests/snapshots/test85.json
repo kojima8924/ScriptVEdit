@@ -15,7 +15,7 @@
     "-i",
     "assets/audio/bgm_loop.mp3",
     "-filter_complex",
-    "[1:v]drawtext=fontfile='<FONT>':textfile='__cache__/artifacts/text/93b4a40efbb52fdb.txt':fontsize=40:fontcolor=white:x='(0.5)*W-text_w/2':y='(0.9)*H-text_h/2':box=1:boxcolor=black@0.6:boxborderw=10[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,2.5)'[v1];[2:a]atrim=duration=2.5,asetpts=PTS-STARTPTS[a0];[3:a]atrim=duration=2.5,asetpts=PTS-STARTPTS,adelay=2500:all=1[a1];[a0][a1]amix=inputs=2:normalize=0[aout]",
+    "[1:v]trim=end=2.566666666666667,drawtext=fontfile='<FONT>':textfile='__cache__/artifacts/text/93b4a40efbb52fdb.txt':fontsize=40:fontcolor=white:x='(0.5)*W-text_w/2':y='(0.9)*H-text_h/2':box=1:boxcolor=black@0.6:boxborderw=10[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,2.5)'[v1];[2:a]atrim=duration=2.5,asetpts=PTS-STARTPTS[a0];[3:a]atrim=duration=2.5,asetpts=PTS-STARTPTS,adelay=2500:all=1[a1];[a0][a1]amix=inputs=2:normalize=0[aout]",
     "-map",
     "[v1]",
     "-map",

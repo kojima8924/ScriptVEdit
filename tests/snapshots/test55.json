@@ -11,7 +11,7 @@
     "-i",
     "color=c=black@0.0:s=1280x720:d=3:r=30,format=rgba",
     "-filter_complex",
-    "[1:v]subtitles=filename='tests/layers/test55_subs.srt':force_style='FontName=Meiryo,FontSize=28,PrimaryColour=&H00FFFFFF'[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,3)'[v1]",
+    "[1:v]trim=end=3.066666666666667,subtitles=filename='tests/layers/test55_subs.srt':force_style='FontName=Meiryo,FontSize=28,PrimaryColour=&H00FFFFFF'[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,3)'[v1]",
     "-map",
     "[v1]",
     "-c:v",

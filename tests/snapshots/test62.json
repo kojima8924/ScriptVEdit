@@ -17,7 +17,7 @@
     "-i",
     "__cache__/artifacts/checkpoint/b00c4c21/0c95bb536d3db37c.mkv",
     "-filter_complex",
-    "[0:v][1:v]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,3)'[v1];[2:v]tpad=start_duration=3:start_mode=clone[obj2];[v1][obj2]overlay=trunc(0.3*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,3/,6)'[v2];[3:v]tpad=start_duration=6:start_mode=clone[obj3];[v2][obj3]overlay=trunc(0.7*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,6/,9)'[v3]",
+    "[1:v]trim=end=3.066666666666667[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,3)'[v1];[2:v]tpad=start_duration=3:start_mode=clone,trim=start=2.933333333333333:end=6.066666666666666[obj2];[v1][obj2]overlay=trunc(0.3*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,3/,6)'[v2];[3:v]tpad=start_duration=6:start_mode=clone,trim=start=5.933333333333334:end=9.066666666666666[obj3];[v2][obj3]overlay=trunc(0.7*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,6/,9)'[v3]",
     "-map",
     "[v3]",
     "-c:v",

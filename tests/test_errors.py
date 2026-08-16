@@ -19,7 +19,7 @@ import scriptvedit as sv
 from scriptvedit import (
     asset,
     describe, describe_markdown,
-    _resolve_param, Project, P, Object, VideoView, AudioView,
+    Project, P, Object, VideoView, AudioView,
     avolume, move, fade, resize, rotate, rotate_to, morph_to, AudioEffect, AudioEffectChain,
     explode_to, assemble_from, move_along, path_bezier, throw, inertia, look_at, perlin,
     group, tile, scene, keyframes,
@@ -29,17 +29,32 @@ from scriptvedit import (
     perspective_warp, lens, ken_burns, drop_shadow, outline,
     slideshow, transition,
     Transform, TransformChain, Effect, EffectChain,
-    _checkpoint_cache_path, _file_fingerprint, _web_cache_path,
     anchor, pause,
     text, typewriter, counter, subtitles,
     duck_under, loop, audio_sequence, sfx, audio_viz,
     mask, mask_wipe, opacity, blend_mode, rounded, pip,
     blur_background_fill, progress_bar,
     speed, reverse, freeze_frame, video_sequence,
-    _atempo_chain_rates, trim, adelete,
+    trim, adelete,
     narrate, Narration, karaoke, beat_sync, slide,
     formula, formula_lines,
-    _build_video_pre_filters, _build_effect_filters, _ARTIFACT_DIR,
+)
+# 内部ヘルパーは実体モジュールから直接 import する
+# （package root からの private 再エクスポートは廃止済み）
+from scriptvedit.cache import (
+    _checkpoint_cache_path, _file_fingerprint, _web_cache_path,
+)
+from scriptvedit.expr import _resolve_param
+from scriptvedit.filters.audio import _atempo_chain_rates
+from scriptvedit.filters.video import _build_effect_filters, _build_video_pre_filters
+from scriptvedit.cache import _is_bakeable, _is_cache_artifact_path, _op_fingerprint_str
+from scriptvedit.effects.composite import _BLEND_MODES
+from scriptvedit.manifest import _MANIFEST_ENTRY_SECTIONS
+from scriptvedit.media import _XFADE_TRANSITIONS
+from scriptvedit.plugins import _EFFECT_PLUGINS, _LOADED_PLUGIN_FILES
+from scriptvedit.state import (
+    _ARTIFACT_DIR, _BAKEABLE_EFFECTS, _ENCODER_MAP, _PRESETS,
+    _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS,
 )
 
 
@@ -3278,7 +3293,7 @@ def check_beat_sync_detects_and_caches():
     """beat_sync: 実音声でビート検出し、2回目はJSONキャッシュから即返す"""
     _require_beat_env()
     audio = asset("audio/bgm_loop.mp3")
-    from scriptvedit import _ARTIFACT_DIR
+    from scriptvedit.state import _ARTIFACT_DIR
     import shutil as _sh
     beats_dir = os.path.join(_ARTIFACT_DIR, "beats")
     if os.path.isdir(beats_dir):
@@ -3683,7 +3698,7 @@ def check_ffp_no_disk_cache():
     コピー（cp -p / rsync -t / unzip -o 等）で同サイズの別内容へ差し替えたときに
     古いハッシュを返し、内容ハッシュ化の目的そのものが破れる。
     """
-    from scriptvedit import _ARTIFACT_DIR
+    from scriptvedit.state import _ARTIFACT_DIR
     from scriptvedit.cache import _FFP_MEMO
     cache_root = os.path.dirname(_ARTIFACT_DIR)
     ffp_json = os.path.join(cache_root, "ffp.json")
@@ -3716,10 +3731,10 @@ def check_plugin_bakeable_checkpoint():
     _sv.unregister_plugin("t_bake")
     _def_plugin("t_bake", bakeable=True)
     try:
-        if "t_bake" not in _sv._BAKEABLE_EFFECTS:
+        if "t_bake" not in _BAKEABLE_EFFECTS:
             return False, "_BAKEABLE_EFFECTS に登録されていません"
         e = getattr(_sv, "t_bake")(radius=7)
-        if not _sv._is_bakeable("effect", e):
+        if not _is_bakeable("effect", e):
             return False, "_is_bakeable が False"
         obj = Object.__new__(Object)
         obj.source = asset("images/shape_badge.png")
@@ -3737,7 +3752,7 @@ def check_plugin_live_not_bakeable():
     """プラグイン: bakeable=False は _BAKEABLE_EFFECTS に入らない"""
     _sv.unregister_plugin("t_live")
     _def_plugin("t_live", bakeable=False)
-    ok = "t_live" not in _sv._BAKEABLE_EFFECTS
+    ok = "t_live" not in _BAKEABLE_EFFECTS
     _sv.unregister_plugin("t_live")
     return (ok, "live扱い") if ok else (False, "bakeable集合に混入")
 
@@ -3758,18 +3773,18 @@ def check_plugin_fingerprint_includes_source():
         with open(path, "w", encoding="utf-8") as f:
             f.write(src % 1)
         _sv.unregister_plugin("t_fp")
-        _sv._LOADED_PLUGIN_FILES.discard(os.path.abspath(path).replace("\\", "/"))
+        _LOADED_PLUGIN_FILES.discard(os.path.abspath(path).replace("\\", "/"))
         _sv.load_plugin(path)
         e1 = getattr(_sv, "t_fp")(k=1)
-        fp1 = _sv._op_fingerprint_str(e1)
+        fp1 = _op_fingerprint_str(e1)
         # プラグインのソースを書き換える → 同じパラメータでも指紋が変わる
         with open(path, "w", encoding="utf-8") as f:
             f.write((src % 1).replace("eq=gamma=", "eq=contrast="))
         _sv.unregister_plugin("t_fp")
-        _sv._LOADED_PLUGIN_FILES.discard(os.path.abspath(path).replace("\\", "/"))
+        _LOADED_PLUGIN_FILES.discard(os.path.abspath(path).replace("\\", "/"))
         _sv.load_plugin(path)
         e2 = getattr(_sv, "t_fp")(k=1)
-        fp2 = _sv._op_fingerprint_str(e2)
+        fp2 = _op_fingerprint_str(e2)
         if "plugin_ffp=" not in fp1:
             return False, f"指紋にplugin_ffpなし: {fp1}"
         if fp1 == fp2:
@@ -3801,7 +3816,7 @@ def check_plugin_load_failure_skips_only_bad():
             _w.simplefilter("always")
             loaded = _sv.load_plugins(d)
         warned = any("プラグインをスキップ" in str(x.message) for x in rec)
-        ok = warned and len(loaded) == 1 and "t_good" in _sv._EFFECT_PLUGINS
+        ok = warned and len(loaded) == 1 and "t_good" in _EFFECT_PLUGINS
         # load_plugin 単体は PluginError を送出
         raised = False
         try:
@@ -3974,7 +3989,7 @@ def check_formula_object_is_image():
     names = [e.name for e in obj.effects]
     if "fade" not in names or "move" not in names:
         return False, f"Effectが適用できていません: {names}"
-    if _sv._is_cache_artifact_path(obj.source) is not True:
+    if _is_cache_artifact_path(obj.source) is not True:
         return False, f"sourceがキャッシュ配下ではありません: {obj.source}"
     return True, f"画像Object / effects={names}"
 
@@ -4187,11 +4202,11 @@ def _ground_truth_ops():
     for m in re.finditer(r"\b(AudioEffect|Effect|Transform)\(\s*[\"']([a-z_0-9]+)[\"']", src):
         ground[kinds[m.group(1)]].add(m.group(2))
     # レジストリ側（ディスパッチを持たない bakeable/時間操作も取りこぼさない）
-    ground["effect"] |= set(sv._BAKEABLE_EFFECTS)
-    ground["effect"] |= set(sv._TIME_LIVE_EFFECTS)
-    ground["effect"] |= set(sv._TERMINAL_FRAME_EFFECTS)
+    ground["effect"] |= set(_BAKEABLE_EFFECTS)
+    ground["effect"] |= set(_TIME_LIVE_EFFECTS)
+    ground["effect"] |= set(_TERMINAL_FRAME_EFFECTS)
     # プラグインは plugins セクションで扱う（組込Effectの網羅性からは除外）
-    ground["effect"] -= set(sv._EFFECT_PLUGINS)
+    ground["effect"] -= set(_EFFECT_PLUGINS)
     return ground
 
 
@@ -4254,7 +4269,7 @@ def check_describe_public_api_exhaustive():
     """網羅性: __all__ の公開callableが必ずどこかのセクションに載る"""
     m = describe()
     listed = set()
-    for section in sv._MANIFEST_ENTRY_SECTIONS:
+    for section in _MANIFEST_ENTRY_SECTIONS:
         for e in m.get(section, []):
             listed.add(e["name"])
             listed.add(e["name"].split(".")[-1])
@@ -4278,7 +4293,7 @@ def check_describe_bakeable_matches_registry():
         inames = e.get("effect_names") or []
         if not inames:
             continue
-        expect = all(n in sv._BAKEABLE_EFFECTS for n in inames)
+        expect = all(n in _BAKEABLE_EFFECTS for n in inames)
         if e.get("bakeable") != expect:
             bad.append(f"{e['name']}: manifest={e.get('bakeable')} 実体={expect}")
     if bad:
@@ -4371,13 +4386,13 @@ def check_describe_enums():
     """enums が実装側の集合と一致する"""
     m = describe()
     en = m["enums"]
-    if set(en["blend_mode"]) != set(sv._BLEND_MODES):
+    if set(en["blend_mode"]) != set(_BLEND_MODES):
         return False, "blend_mode の集合が実装と不一致"
-    if set(en["xfade_transition"]) != set(sv._XFADE_TRANSITIONS):
+    if set(en["xfade_transition"]) != set(_XFADE_TRANSITIONS):
         return False, "xfade_transition の集合が実装と不一致"
-    if set(en["preset"]) != set(sv._PRESETS):
+    if set(en["preset"]) != set(_PRESETS):
         return False, "preset の集合が実装と不一致"
-    if set(en["encoder"]) != set(sv._ENCODER_MAP):
+    if set(en["encoder"]) != set(_ENCODER_MAP):
         return False, "encoder の集合が実装と不一致"
     # blend_mode の choices がエントリにも展開される
     bm = next(e for e in m["effects"] if e["name"] == "blend_mode")

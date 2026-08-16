@@ -197,20 +197,23 @@ def _build_chunk_ffmpeg_cmd(project, chunk_path, k0, k1, threads):
         inputs.extend(_build_input_args(obj, fps))
 
     current_base = "[0:v]"
-    head_trim = None
     if k0 > 0:
         # 背景PTSを絶対時刻へシフト → 全t依存式が全編レンダと同一になる
         filter_parts.append(f"[0:v]setpts=PTS+{t0!r}/TB[chbase]")
         current_base = "[chbase]"
-        # 頭破棄はフレーム境界の判定誤差を避けるため2フレームぶん手前から残す
-        # （overlayのframesyncは「主入力pts以下の最新フレーム」を選ぶので、
-        #   余分に残った先行フレームは正しさに影響しない）
-        head_trim = _builtins.max(0.0, t0 - 2.0 / fps)
+    # チャンク区間（フレーム境界の判定誤差を避けるため前後2フレームぶん広く取る）
+    margin = 2.0 / fps
+    chunk_from = _builtins.max(0.0, t0 - margin)
+    chunk_to = w_end + margin
     for obj in chunk_objs:
         input_idx = input_map[id(obj)]
         dur_o = project._resolve_obj_duration(obj)
+        # 可視区間 ∩ チャンク区間だけを後段の重いフィルタへ通す
+        obj_from, obj_to = _visible_window(obj, fps)
+        win_from = _builtins.max(obj_from, chunk_from)
+        win_to = chunk_to if obj_to is None else _builtins.min(obj_to, chunk_to)
         parts, out_label = _build_video_overlay_parts(
-            obj, input_idx, current_base, dur_o, head_trim=head_trim)
+            obj, input_idx, current_base, dur_o, visible_window=(win_from, win_to))
         filter_parts.extend(parts)
         current_base = out_label
     video_map = current_base
@@ -290,6 +293,6 @@ def _build_concat_mux_cmd(list_path, audio_path, meta_path, out_path):
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.filters.video import _build_input_args, _build_video_overlay_parts
+from scriptvedit.filters.video import _build_input_args, _build_video_overlay_parts, _visible_window
 from scriptvedit.objects import Object
 from scriptvedit.project import _DRAFT_SCALE_FILTER, _unwrap_raw_stream_ref

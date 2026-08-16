@@ -273,7 +273,7 @@ def setup_test14():
 
 def setup_test15():
     """cache='use' テスト: ダミーキャッシュからの読み込み"""
-    from scriptvedit import _layer_cache_paths
+    from scriptvedit.cache import _layer_cache_paths
     # キャッシュ鍵は解決済み総尺を含むため、まず同構成のプロジェクトを
     # dry_runして総尺を解決してからキャッシュパスを計算する
     probe = Project()

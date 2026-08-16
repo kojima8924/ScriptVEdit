@@ -1085,8 +1085,8 @@ class Project:
             _svi = _import_module("scriptvedit.viz")
         except ImportError as e:
             raise ImportError(
-                "inspect() には scriptvedit.viz が必要です。"
-                "scriptvedit.py と同じディレクトリに配置してください。") from e
+                "inspect() に必要な scriptvedit.viz が読み込めません。"
+                "`pip install -e .[all]` で再インストールしてください。") from e
         if out_html is not None:
             return _svi.render_timeline(self, out_html, title=title)
         return _svi.report_text(self)
@@ -2068,7 +2068,8 @@ class Project:
             # （レイヤー全体尺fallbackだとcache有無でアニメ速度が変わる）
             obj_dur = self._resolve_obj_duration(obj)
             parts, out_label = _build_video_overlay_parts(
-                obj, input_idx, current_base, obj_dur)
+                obj, input_idx, current_base, obj_dur,
+                visible_window=_visible_window(obj, self.fps))
             filter_parts.extend(parts)
             current_base = out_label
 
@@ -2256,7 +2257,8 @@ class Project:
             input_idx = input_map[id(obj)]
             dur = self._resolve_obj_duration(obj)
             parts, out_label = _build_video_overlay_parts(
-                obj, input_idx, current_base, dur)
+                obj, input_idx, current_base, dur,
+                visible_window=_visible_window(obj, self.fps))
             filter_parts.extend(parts)
             current_base = out_label
 
@@ -2557,7 +2559,7 @@ from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_fram
 from scriptvedit.expr import Expr, max, min
 from scriptvedit.ffmpeg import _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.audio import _build_audio_effect_filters, _build_audio_pre_filters
-from scriptvedit.filters.video import _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _build_video_pre_filters, _get_base_dimensions, _optimize_filter_chain
+from scriptvedit.filters.video import _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _build_video_pre_filters, _get_base_dimensions, _optimize_filter_chain, _visible_window
 from scriptvedit.objects import Object, _web_frames_dir
 from scriptvedit.assets import resolve_layer_path
 from scriptvedit.plugins import _EFFECT_PLUGINS, _autoload_plugins

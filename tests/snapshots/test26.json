@@ -9,7 +9,7 @@
     "-i",
     "__cache__/artifacts/morph/ac9b64e5/8118e81c38c6c56a.mkv",
     "-filter_complex",
-    "[0:v][1:v]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,3)'[v1]",
+    "[1:v]trim=end=3.066666666666667[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,3)'[v1]",
     "-map",
     "[v1]",
     "-c:v",

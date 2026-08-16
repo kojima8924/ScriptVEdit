@@ -13,7 +13,7 @@
     "-i",
     "assets/images/shape_badge.png",
     "-filter_complex",
-    "[0:v][1:v]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,3)'[v1];[v1]split[gsrc][gpg];[gpg]palettegen=stats_mode=diff[gpal];[gsrc][gpal]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle[vgif]",
+    "[1:v]trim=end=3.1333333333333333[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,3)'[v1];[v1]split[gsrc][gpg];[gpg]palettegen=stats_mode=diff[gpal];[gsrc][gpal]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle[vgif]",
     "-map",
     "[vgif]",
     "-an",

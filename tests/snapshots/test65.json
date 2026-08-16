@@ -17,7 +17,7 @@
     "-i",
     "__cache__/artifacts/chapters/d731cf3e38e8f295.txt",
     "-filter_complex",
-    "[0:v][1:v]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,6)'[v1]",
+    "[1:v]trim=end=6.066666666666666[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,6)'[v1]",
     "-map",
     "[v1]",
     "-map_metadata",

@@ -11,7 +11,7 @@
     "-i",
     "color=c=black@0.0:s=1280x720:d=5:r=30,format=rgba",
     "-filter_complex",
-    "[1:v]subtitles=filename='__cache__/artifacts/karaoke/4c7c79bc273ae23b.ass'[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,5)'[v1]",
+    "[1:v]trim=end=5.066666666666666,subtitles=filename='__cache__/artifacts/karaoke/4c7c79bc273ae23b.ass'[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,5)'[v1]",
     "-map",
     "[v1]",
     "-c:v",

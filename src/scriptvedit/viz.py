@@ -12,27 +12,29 @@
 
 どちらも render 前（レイヤー未実行）の Project ではレイヤー登録情報のみを、
 render / dry_run 実行後は全オブジェクト情報を表示する。
-scriptvedit 内部属性はすべて getattr でフォールバックし、属性が無くても壊れない。
-（scriptvedit 本体の内部ヘルパーは遅延 import で利用可能な場合のみ使う）
+Project の属性は getattr でフォールバックする（未実行 Project でも壊れないため）が、
+scriptvedit 本体の内部ヘルパーは**実体モジュールから直接 import する**。
+getattr で握り潰すと、ヘルパーを改名したときにキャッシュ予測欄が静かに空になる。
 """
 
 import os
 import html as _htmllib
 import numbers
 import unicodedata
+import warnings
+
+from scriptvedit.cache import (
+    _build_unified_ops, _checkpoint_cache_path, _compute_save_points,
+    _is_cache_artifact_path, _layer_cache_paths, _split_ops,
+)
+from scriptvedit.state import _detect_media_type
 
 __all__ = ["render_timeline", "report_text"]
 
-
-# --- scriptvedit 本体への遅延アクセス ---
-
-def _get_sv():
-    """scriptvedit モジュールを遅延 import（循環 import・未配置に耐える）"""
-    try:
-        import scriptvedit as _sv
-        return _sv
-    except Exception:
-        return None
+# 検査は「壊れかけの Project でも表示できる」ことを優先するため、
+# データ収集で想定内の失敗（素材が無い・属性が別型・パラメータが特殊）は
+# 警告して部分表示に落とす。想定外の例外はそのまま送出して退行を隠さない。
+_COLLECT_ERRORS = (OSError, ValueError, TypeError, KeyError, AttributeError)
 
 
 # --- 書式ヘルパー ---
@@ -85,52 +87,45 @@ _MEDIA_LABELS = {
 
 # --- データ収集 ---
 
-def _save_point_info(sv, project, obj):
+def _save_point_info(project, obj):
     """Object のチェックポイント保存点と予想キャッシュパスを取得
 
     戻り値: (save_ops, predictions)
       save_ops:    [(op_index, op_name), ...]
       predictions: [(op_name, cache_path, exists), ...]（計算不可なら空）
-    scriptvedit 内部ヘルパーが利用できない場合は ([], []) を返す。
     """
-    if sv is None:
-        return [], []
     try:
-        build_ops = getattr(sv, "_build_unified_ops", None)
-        split_ops = getattr(sv, "_split_ops", None)
-        compute_sp = getattr(sv, "_compute_save_points", None)
-        if not (build_ops and split_ops and compute_sp):
-            return [], []
-        bakeable, _live = split_ops(build_ops(obj))
+        bakeable, _live = _split_ops(_build_unified_ops(obj))
         if not bakeable:
             return [], []
         # 全op policy="off" は本体側と同様にスキップ
         if all(getattr(op, "policy", "auto") == "off" for _, op in bakeable):
             return [], []
-        sps = sorted(compute_sp(bakeable))
+        sps = sorted(_compute_save_points(bakeable))
         save_ops = [(i, getattr(bakeable[i][1], "name", "?")) for i in sps]
-    except Exception:
+    except _COLLECT_ERRORS as e:
+        warnings.warn(f"チェックポイント保存点を計算できませんでした"
+                      f"（{getattr(obj, 'source', '?')}）: {type(e).__name__}: {e}")
         return [], []
     # 予想キャッシュパス（_process_checkpoints と同じ規則を再現。失敗しても保存点情報は返す）
     predictions = []
     try:
-        cp_path = getattr(sv, "_checkpoint_cache_path", None)
-        detect = getattr(sv, "_detect_media_type", None)
-        if cp_path and detect:
-            source = getattr(obj, "source", None)
-            dur = getattr(obj, "duration", None)
-            fps = getattr(project, "fps", 30)
-            is_video = detect(source) == "video"
-            for i in sps:
-                segment = bakeable[: i + 1]
-                has_effects = any(t == "effect" for t, _ in segment)
-                cp_dur = dur if (has_effects or is_video) else None
-                cp_fps = fps if cp_dur is not None else None
-                quality = getattr(segment[-1][1], "quality", "final")
-                path = cp_path(source, segment, cp_dur, cp_fps, quality)
-                predictions.append(
-                    (getattr(segment[-1][1], "name", "?"), path, os.path.exists(path)))
-    except Exception:
+        source = getattr(obj, "source", None)
+        dur = getattr(obj, "duration", None)
+        fps = getattr(project, "fps", 30)
+        is_video = _detect_media_type(source) == "video"
+        for i in sps:
+            segment = bakeable[: i + 1]
+            has_effects = any(t == "effect" for t, _ in segment)
+            cp_dur = dur if (has_effects or is_video) else None
+            cp_fps = fps if cp_dur is not None else None
+            quality = getattr(segment[-1][1], "quality", "final")
+            path = _checkpoint_cache_path(source, segment, cp_dur, cp_fps, quality)
+            predictions.append(
+                (getattr(segment[-1][1], "name", "?"), path, os.path.exists(path)))
+    except _COLLECT_ERRORS as e:
+        warnings.warn(f"チェックポイントの予想キャッシュパスを計算できませんでした"
+                      f"（{getattr(obj, 'source', '?')}）: {type(e).__name__}: {e}")
         predictions = []
     return save_ops, predictions
 
@@ -147,7 +142,7 @@ def _classify_item(item):
     return "pause"
 
 
-def _item_row(item, sv, project):
+def _item_row(item, project):
     """1アイテムを表示用 dict に変換（anchor は None を返し、レイヤー側で収集）"""
     kind = _classify_item(item)
     if kind == "anchor":
@@ -173,15 +168,13 @@ def _item_row(item, sv, project):
             "web_name": None,
         }
     src = getattr(item, "source", "?")
-    from_cache = False
-    if sv is not None:
-        try:
-            from_cache = sv._is_cache_artifact_path(src)
-        except Exception:
-            from_cache = False
+    try:
+        from_cache = _is_cache_artifact_path(src)
+    except (OSError, TypeError, ValueError):
+        from_cache = False  # source が実パスでない合成ソース等
     if not from_cache:
         from_cache = "__cache__" in str(src).replace("\\", "/")
-    save_ops, cp_preds = _save_point_info(sv, project, item)
+    save_ops, cp_preds = _save_point_info(project, item)
     return {
         "kind": "object",
         "label": os.path.basename(str(src)) or str(src),
@@ -205,23 +198,24 @@ def _item_row(item, sv, project):
     }
 
 
-def _layer_cache_info(sv, project, spec):
+def _layer_cache_info(project, spec):
     """レイヤーキャッシュの予定パスと存在有無を取得（取得不可なら None）"""
-    if sv is None or spec.get("cache", "off") == "off":
+    if spec.get("cache", "off") == "off":
         return None
     try:
-        webm_path, json_path = sv._layer_cache_paths(spec["filename"], project)
-        return {
-            "webm": webm_path, "webm_exists": os.path.exists(webm_path),
-            "json": json_path, "json_exists": os.path.exists(json_path),
-        }
-    except Exception:
+        webm_path, json_path = _layer_cache_paths(spec["filename"], project)
+    except _COLLECT_ERRORS as e:
+        warnings.warn(f"レイヤーキャッシュの予定パスを計算できませんでした"
+                      f"（{spec.get('filename', '?')}）: {type(e).__name__}: {e}")
         return None
+    return {
+        "webm": webm_path, "webm_exists": os.path.exists(webm_path),
+        "json": json_path, "json_exists": os.path.exists(json_path),
+    }
 
 
 def _collect(project):
-    """Project から表示用データを収集（すべて getattr フォールバック）"""
-    sv = _get_sv()
+    """Project から表示用データを収集（Project 属性は getattr フォールバック）"""
     meta = {
         "width": getattr(project, "width", None),
         "height": getattr(project, "height", None),
@@ -257,7 +251,7 @@ def _collect(project):
                 if _classify_item(item) == "anchor":
                     layer_anchors.append(getattr(item, "name", "?"))
                     continue
-                row = _item_row(item, sv, project)
+                row = _item_row(item, project)
                 if row is not None:
                     rows.append(row)
             layers.append({
@@ -267,7 +261,7 @@ def _collect(project):
                 "executed": True,
                 "rows": rows,
                 "anchors": layer_anchors,
-                "cache_info": _layer_cache_info(sv, project, spec) if spec else None,
+                "cache_info": _layer_cache_info(project, spec) if spec else None,
                 "sources": list(layer_sources.get(fname) or []),
             })
     else:
@@ -280,7 +274,7 @@ def _collect(project):
                 "executed": False,
                 "rows": [],
                 "anchors": [],
-                "cache_info": _layer_cache_info(sv, project, spec),
+                "cache_info": _layer_cache_info(project, spec),
                 "sources": list(layer_sources.get(spec.get("filename")) or []),
             })
 
@@ -292,7 +286,7 @@ def _collect(project):
         if _classify_item(item) == "anchor":
             leftover_anchors.append(getattr(item, "name", "?"))
             continue
-        row = _item_row(item, sv, project)
+        row = _item_row(item, project)
         if row is not None:
             leftover_rows.append(row)
     if leftover_rows or leftover_anchors:

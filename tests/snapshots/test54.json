@@ -11,7 +11,7 @@
     "-i",
     "color=c=black@0.0:s=1280x720:d=4:r=30,format=rgba",
     "-filter_complex",
-    "[1:v]drawtext=fontfile='<FONT>':text='スコア/: %{eif/:((100*clip((t-0)/4/,0/,1))+0.5)/:d/:3}点':fontsize=56:fontcolor=white:x='(0.5)*W-text_w/2':y='(0.4)*H-text_h/2'[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,4)'[v1]",
+    "[1:v]trim=end=4.066666666666666,drawtext=fontfile='<FONT>':text='スコア/: %{eif/:((100*clip((t-0)/4/,0/,1))+0.5)/:d/:3}点':fontsize=56:fontcolor=white:x='(0.5)*W-text_w/2':y='(0.4)*H-text_h/2'[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,4)'[v1]",
     "-map",
     "[v1]",
     "-c:v",

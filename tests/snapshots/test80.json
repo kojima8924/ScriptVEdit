@@ -9,7 +9,7 @@
     "-i",
     "assets/video/clip_with_audio.mp4",
     "-filter_complex",
-    "[1:v]format=rgba,split[fx1e0a][fx1e0b];[fx1e0b]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,gblur=sigma=24[fx1e0bg];[fx1e0a]scale=720:1280:force_original_aspect_ratio=decrease[fx1e0fg];[fx1e0bg][fx1e0fg]overlay=(W-w)/2:(H-h)/2:eof_action=pass[obj1];[0:v][obj1]overlay=(W-720)/2:(H-1280)/2:eof_action=pass:enable='between(t/,0/,3)'[v1];[1:a]atrim=duration=3,asetpts=PTS-STARTPTS[a0]",
+    "[1:v]trim=end=3.066666666666667,format=rgba,split[fx1e0a][fx1e0b];[fx1e0b]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,gblur=sigma=24[fx1e0bg];[fx1e0a]scale=720:1280:force_original_aspect_ratio=decrease[fx1e0fg];[fx1e0bg][fx1e0fg]overlay=(W-w)/2:(H-h)/2:eof_action=pass[obj1];[0:v][obj1]overlay=(W-720)/2:(H-1280)/2:eof_action=pass:enable='between(t/,0/,3)'[v1];[1:a]atrim=duration=3,asetpts=PTS-STARTPTS[a0]",
     "-map",
     "[v1]",
     "-map",

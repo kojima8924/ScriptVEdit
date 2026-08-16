@@ -23,7 +23,7 @@
     "-i",
     "color=c=black@0.0:s=1280x720:d=4:r=30,format=rgba",
     "-filter_complex",
-    "[0:v][1:v]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,2)'[v1];[v1][2:v]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,2/,4)'[v2];[3:v]tpad=start_duration=4:start_mode=clone,format=rgba,geq=r='if(lte(X/,W*clip(T/4/,0/,1))/,255/,255)':g='if(lte(X/,W*clip(T/4/,0/,1))/,165/,255)':b='if(lte(X/,W*clip(T/4/,0/,1))/,0/,255)':a='(gte(Y/,(1.0*(H-8)))*lt(Y/,(1.0*(H-8))+8))*if(lte(X/,W*clip(T/4/,0/,1))/,255/,38)'[obj3];[v2][obj3]overlay=(W-w)/2:(H-h)/2:eof_action=pass[v3]",
+    "[1:v]trim=end=2.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,2)'[v1];[2:v]trim=start=1.9333333333333333:end=4.066666666666666[obj2];[v1][obj2]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,2/,4)'[v2];[3:v]tpad=start_duration=4:start_mode=clone,format=rgba,geq=r='if(lte(X/,W*clip(T/4/,0/,1))/,255/,255)':g='if(lte(X/,W*clip(T/4/,0/,1))/,165/,255)':b='if(lte(X/,W*clip(T/4/,0/,1))/,0/,255)':a='(gte(Y/,(1.0*(H-8)))*lt(Y/,(1.0*(H-8))+8))*if(lte(X/,W*clip(T/4/,0/,1))/,255/,38)'[obj3];[v2][obj3]overlay=(W-w)/2:(H-h)/2:eof_action=pass[v3]",
     "-map",
     "[v3]",
     "-c:v",
