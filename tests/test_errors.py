@@ -1927,6 +1927,7 @@ def check_duck_under_non_object():
 
 def check_duck_under_other_not_in_project():
     """duck_under: other が再生対象外 → ValueError（レンダ時）"""
+    _require_asset("audio/効果音.mp3")
     layer_code = (
         "from scriptvedit import *\n"
         "narr = Object(asset(\"audio/効果音.mp3\"))\n"
@@ -1987,7 +1988,7 @@ def check_sfx_empty_at():
     """sfx: at空リスト → ValueError"""
     _mk_project()
     try:
-        sfx(asset("audio/効果音.mp3"), at=[])
+        sfx(_require_asset("audio/効果音.mp3"), at=[])
         return False, "例外が発生しませんでした"
     except ValueError as e:
         msg = str(e)

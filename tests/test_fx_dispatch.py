@@ -32,6 +32,21 @@ _CUBE = os.path.join(TESTS_DIR, "layers", "test43_identity.cube")
 # 既定引数だけでは構築できない Effect の引数フィクスチャ。
 # ここに足すのは「必須引数がある」ものだけ。フィクスチャ不要の Effect を
 # 惰性でここへ足すとメタテストが実装から離れていくので入れないこと。
+# repeat は「素材時間のある入力」が要る。gitignore 対象の大容量素材が無い
+# 環境（fresh clone / CI）では同梱の動画で代替する（検証内容は同じ）。
+def _pick_video_asset():
+    for rel in ("video/guitar_noaudio.mp4", "video/clip_with_audio.mp4"):
+        try:
+            asset(rel)
+            return rel
+        except FileNotFoundError:
+            continue
+    return "video/clip_with_audio.mp4"
+
+
+_REPEAT_SRC = _pick_video_asset()
+
+
 _FIXTURES = {
     "assemble_from": lambda: assemble_from(Object(asset("images/shape_dots.png"))),
     "blend_mode": lambda: blend_mode("screen"),
@@ -50,7 +65,7 @@ _FIXTURES = {
         (0, 0), (0.3, 0.2), (0.6, 0.8), (1, 1)),
     "perspective_warp": lambda: perspective_warp(0, 0, 100, 0, 0, 100, 100, 100),
     # repeat は公開ファクトリを持たない DSL 糖衣（obj * n）でのみ生成される
-    "repeat": lambda: Object(asset("video/guitar_noaudio.mp4"))[0:1] * 3,
+    "repeat": lambda: Object(asset(_REPEAT_SRC))[0:1] * 3,
     "rotate_to": lambda: rotate_to(deg=30),
     "rounded": lambda: rounded(8),
     "speed": lambda: speed(2.0),

@@ -102,7 +102,11 @@ def _parts_for(obj, window):
 
 def test_trim_inserted_after_tpad():
     """tpad（タイムライン整列）の直後に trim が入ること"""
-    o = Object(asset("video/flowerbg_noaudio.mp4"))
+    try:
+        src = asset("video/flowerbg_noaudio.mp4")
+    except FileNotFoundError:
+        pytest.skip("素材 assets/video/flowerbg_noaudio.mp4 が無い環境")
+    o = Object(src)
     o.start_time = 5.0
     o.duration = 2.0
     graph = _parts_for(o, _visible_window(o, 30))
