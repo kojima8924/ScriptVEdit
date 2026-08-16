@@ -310,7 +310,10 @@ move(x=50%P, y=75%P)  # x=0.5, y=0.75
   - `eq(brightness, contrast, saturation, gamma)` ... 色調補正
 
 - **Effect** (`&` で連結、`<=` で適用): float で定数、lambda(u) でアニメーション
-  - `move(x, y, anchor)` ... 配置位置（固定 or from/toアニメーション）
+  - `move(x, y, anchor)` ... 配置位置（固定 or from/toアニメーション）。
+    `anchor` は素材のどこを (x, y) に合わせるかの基準点で、
+    `center`（既定）/ `topleft` / `left` / `right` / `top` / `bottom`。
+    未知の値・綴り誤りは ValueError（黙って topleft にずらさない）
   - `scale(0.5)` ... 定数0.5倍
   - `scale(lambda u: lerp(0.5, 1, u))` ... 0.5倍 → 等倍にアニメーション
   - `fade(0.5)` ... 定数 半透明
@@ -1419,16 +1422,17 @@ result = p.render("output.mp4", dry_run=True)
 
 ### ディレクトリ構成
 
-本体は `src/scriptvedit/` の41モジュール（合計約18,600行）のパッケージ。
+本体は `src/scriptvedit/` の42モジュール（合計約20,500行）のパッケージ。
 
 ```
 ScriptVEdit/
-├── src/scriptvedit/     パッケージ本体（41モジュール）
+├── src/scriptvedit/     パッケージ本体（42モジュール）
 │   ├── project.py       Project / render / チェックポイント
 │   ├── parallel.py preview.py  時間分割並列レンダ / thumbnail・storyboard
 │   ├── chapters.py params.py   マーカー・チャプター出力 / テンプレート変数
 │   ├── objects.py       Object / Transform / Effect
 │   ├── timeline.py      anchor / pause / scene / group
+│   ├── context.py      レンダ中の Project の参照（依存ゼロの葉。循環 import を防ぐ）
 │   ├── effects/         basic / visual / composite / paths / time / terminal
 │   ├── filters/         video / audio フィルタ生成
 │   ├── expr.py easing.py  Expr式ビルダー・イージング
