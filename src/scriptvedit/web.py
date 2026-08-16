@@ -5,6 +5,13 @@ import re
 import json
 import hashlib
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.objects import Object, _SLIDE_PAGE_KEY
+from scriptvedit.validate import _require_number
+
 
 # --- テンプレートラッパー ---
 
@@ -28,10 +35,10 @@ def _data_hash(data):
 
 
 def _resolve_size(size):
-    """size省略時はProject._currentのwidth/heightを使う"""
+    """size省略時はcurrent_project()のwidth/heightを使う"""
     if size is not None:
         return size
-    proj = Project._current
+    proj = current_project()
     if proj is None:
         raise RuntimeError(
             "size省略時はアクティブなProjectが必要です。"
@@ -268,7 +275,7 @@ def slide(html_file, page=None, *, duration=5.0, width=None, height=None,
     if os.path.splitext(html_file)[1].lower() not in (".html", ".htm"):
         raise ValueError(f"slide: .html/.htm ファイルを指定してください: {html_file}")
     _require_number("slide", "duration", duration, 0.01, None)
-    proj = Project._current
+    proj = current_project()
     if width is None or height is None:
         if proj is None:
             raise RuntimeError(
@@ -318,9 +325,3 @@ def label(x, y, text, **kw):
 def spotlight(x, y, r, **kw):
     """スポットライト（暗幕くり抜き）オブジェクト定義を返す"""
     return {"type": "spotlight", "x": x, "y": y, "r": r, **kw}
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.objects import Object, _SLIDE_PAGE_KEY
-from scriptvedit.project import Project
-from scriptvedit.validate import _require_number

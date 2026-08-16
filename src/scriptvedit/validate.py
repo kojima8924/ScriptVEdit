@@ -3,6 +3,10 @@
 import math as _math
 import difflib as _difflib
 
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.expr import Expr
+from scriptvedit.state import _PLACEMENT_ANCHORS, _suggest_hint
+
 
 # --- Effect用バリデーションヘルパー ---
 
@@ -160,8 +164,3 @@ def _require_time(func_name, param_name, value, *, lo=None, lo_exclusive=False):
         raise ValueError(
             f"{func_name}: {param_name} は {lo} より大きい値が必要です: {value!r}")
     return value
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.expr import Expr
-from scriptvedit.state import _PLACEMENT_ANCHORS, _suggest_hint

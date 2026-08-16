@@ -2,6 +2,16 @@
 
 import os
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.cache import _sig_key, _src_signature
+from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache
+from scriptvedit.objects import Object
+from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIX_FMT, _BAKE_PIXFMT_VER, _ENGINE_VER, _detect_media_type, _suggest_hint
+from scriptvedit.validate import _require_number
+
 
 # --- トランジション/スライドショー（xfade） ---
 
@@ -45,7 +55,7 @@ def _xfade_scale_chain(w, h):
 
 def _finalize_generated_object(cache_path, cmd, origin_sources, total_dur):
     """xfade生成物のObject化共通処理（plan/dry_run/実生成の分岐、compute()と同機構）"""
-    proj = Project._current
+    proj = current_project()
     # レイヤー依存として元素材を記録（キャッシュ鮮度検証から漏れるのを防ぐ）
     if proj is not None and proj._current_layer_file:
         proj._extra_layer_deps.setdefault(
@@ -88,7 +98,7 @@ def slideshow(images, each=3.0, transition="fade", t_dur=0.5, size=None):
     if t_dur >= each:
         raise ValueError(
             f"slideshow: t_dur ({t_dur}) は each ({each}) より短くしてください")
-    proj = Project._current
+    proj = current_project()
     if size is None:
         w = proj.width if proj else 1280
         h = proj.height if proj else 720
@@ -149,7 +159,7 @@ def transition(obj_a, obj_b, kind="fade", duration=1.0):
             raise ValueError(f"transition: {nm} は画像/動画のみ対応: {o.media_type}")
     _validate_xfade_kind("transition", kind)
     _require_number("transition", "duration", duration, 0.01, None)
-    proj = Project._current
+    proj = current_project()
     w = proj.width if proj else 1280
     h = proj.height if proj else 720
     fps = proj.fps if proj else 30
@@ -225,7 +235,7 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
         raise ValueError("video_sequence: 2つ以上の動画を指定してください")
     _validate_xfade_kind("video_sequence", transition)
     _require_number("video_sequence", "t_dur", t_dur, 0.01, None)
-    proj = Project._current
+    proj = current_project()
     sources = []
     consumed = []  # 全検証を通過してからまとめて消費する（途中失敗で Project を壊さない）
     for o in objs:
@@ -347,12 +357,3 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
     # dry_run では未生成キャッシュのprobeができないため音声有無を明示確定する
     obj._has_audio = all_audio
     return obj
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.cache import _sig_key, _src_signature
-from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache
-from scriptvedit.objects import Object
-from scriptvedit.project import Project
-from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIX_FMT, _BAKE_PIXFMT_VER, _ENGINE_VER, _detect_media_type, _suggest_hint
-from scriptvedit.validate import _require_number

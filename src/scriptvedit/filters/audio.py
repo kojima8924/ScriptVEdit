@@ -2,6 +2,12 @@
 
 import builtins as _builtins
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.expr import Const
+
 
 def _atempo_chain_rates(rate):
     """atempoの有効範囲(0.5〜100)を超えるレートを複数段に分解する。
@@ -48,7 +54,7 @@ def _build_audio_pre_filters(obj):
             n = e.params["count"]
             segment = e.params["segment"]
             sr = None
-            proj = Project._current
+            proj = current_project()
             if proj is not None:
                 info = proj._probe_media(obj.source)
                 sr = (info or {}).get("sample_rate")
@@ -73,8 +79,3 @@ def _build_audio_effect_filters(obj, dur):
             ffmpeg_str = value_expr.to_ffmpeg(u_expr)
             filters.append(f"volume=volume='{ffmpeg_str}':eval=frame")
     return filters
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.expr import Const
-from scriptvedit.project import Project

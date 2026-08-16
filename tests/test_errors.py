@@ -16,6 +16,7 @@ def _tmp_file(name):
     return os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         f"{base}_{_TMP_TOKEN}{ext}")
 import scriptvedit as sv
+from scriptvedit.context import activate, current_project
 from scriptvedit import (
     asset,
     describe, describe_markdown,
@@ -385,8 +386,8 @@ def check_web_frames_dir_guard():
 
 def check_subtitle_no_project():
     """subtitle() でProject未設定 + size省略 → RuntimeError"""
-    old = Project._current
-    Project._current = None
+    old = current_project()
+    activate(None)
     try:
         subtitle("テスト")
         return False, "例外が発生しませんでした"
@@ -396,13 +397,13 @@ def check_subtitle_no_project():
             return True, msg
         return False, f"メッセージが不適切: {msg}"
     finally:
-        Project._current = old
+        activate(old)
 
 
 def check_diagram_no_project():
     """diagram() でProject未設定 + size省略 → RuntimeError"""
-    old = Project._current
-    Project._current = None
+    old = current_project()
+    activate(None)
     try:
         diagram([circle(0.5, 0.5, 0.1)])
         return False, "例外が発生しませんでした"
@@ -412,20 +413,20 @@ def check_diagram_no_project():
             return True, msg
         return False, f"メッセージが不適切: {msg}"
     finally:
-        Project._current = old
+        activate(old)
 
 
 def check_subtitle_with_explicit_size():
     """subtitle() にsize明示 → Project不要で成功"""
-    old = Project._current
-    Project._current = None
+    old = current_project()
+    activate(None)
     try:
         obj = subtitle("テスト", size=(640, 360))
         if obj.media_type == "web" and obj._web_size == (640, 360):
             return True, f"size=(640,360) で正常生成"
         return False, f"属性が不正: type={obj.media_type}, size={obj._web_size}"
     finally:
-        Project._current = old
+        activate(old)
 
 
 def check_neg_transform():
@@ -562,7 +563,7 @@ def check_checkpoint_signature_uses_ffp():
 
 def check_web_deps_accepted():
     """web Objectにdeps引数が渡せることを確認"""
-    old = Project._current
+    old = current_project()
     try:
         p = Project()
         p.configure(width=320, height=240, fps=1, background_color="black")
@@ -571,7 +572,7 @@ def check_web_deps_accepted():
             return True, f"deps={obj._web_deps}"
         return False, f"deps={obj._web_deps}"
     finally:
-        Project._current = old
+        activate(old)
 
 
 def check_video_no_time_checkpoint_has_duration():
@@ -785,16 +786,16 @@ def check_image_time_no_args():
 
 def check_probe_failure_has_audio_false():
     """probe不可時 has_audio=False"""
-    old = Project._current
+    old = current_project()
     try:
-        Project._current = None
+        activate(None)
         obj = Object("nonexistent_media.mp4")
         result = obj.has_audio
         if result is False:
             return True, f"has_audio={result} (probe不可→False)"
         return False, f"has_audio={result} (期待: False)"
     finally:
-        Project._current = old
+        activate(old)
 
 
 def check_crop_no_size():
@@ -1083,7 +1084,7 @@ def check_web_deps_invalidation():
     with tempfile.NamedTemporaryFile(suffix=".css", delete=False, mode="w") as f:
         f.write("body{}")
         dep_path = f.name
-    old = Project._current
+    old = current_project()
     try:
         p = Project()
         p.configure(width=640, height=360, fps=30, background_color="black")
@@ -1093,20 +1094,20 @@ def check_web_deps_invalidation():
         os.utime(dep_path, None)
         obj_t = subtitle_box("test", deps=[dep_path])
         if _web_cache_path(obj_t, p) != path1:
-            Project._current = old
+            activate(old)
             return False, "touchでcache pathが変わった（内容ハッシュでない）"
         # 内容を変更すると鍵が変わること
         with open(dep_path, "w") as f:
             f.write("body{color:red}")
         obj2 = subtitle_box("test", deps=[dep_path])
         path2 = _web_cache_path(obj2, p)
-        Project._current = old
+        activate(old)
         if path1 != path2:
             return True, "cache path changed on dep content change"
         return False, f"cache path unchanged: {path1}"
     finally:
         os.unlink(dep_path)
-        Project._current = old
+        activate(old)
 
 
 def check_until_offset_positive():
@@ -3342,7 +3343,7 @@ def check_slide_bad_extension():
 
 def check_slide_size_without_project():
     """slide: width/height省略時にアクティブProjectが無ければRuntimeError"""
-    Project._current = None
+    activate(None)
     html = os.path.join(os.path.dirname(__file__), "layers", "test19_scene.html")
     try:
         slide(html, page=0)

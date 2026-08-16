@@ -4,6 +4,11 @@ import math as _math
 
 from scriptvedit.expr import Expr
 
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.expr import Const, Var, _to_expr, clip, exp, if_, lerp, lt, sin
+from scriptvedit.objects import Effect
+from scriptvedit.validate import _validate_ffmpeg_color
+
 
 # --- パス・物理・ノイズ（move系Effect / Expr） ---
 
@@ -237,9 +242,3 @@ def perlin(u, *, octaves=2, seed=0, frequency=1.0, amplitude=1.0):
         wave = sin(u * Const(2 * _math.pi * freq) + Const(phase)) * Const(amp)
         total = wave if total is None else total + wave
     return total * Const(amplitude / norm)
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.expr import Const, Var, _to_expr, clip, exp, if_, lerp, lt, sin
-from scriptvedit.objects import Effect
-from scriptvedit.validate import _validate_ffmpeg_color

@@ -7,6 +7,12 @@ import json
 import math as _math
 import time as _time
 
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.cache import cache_clear, cache_gc, cache_stats
+from scriptvedit.manifest import _MANIFEST_KIND_SECTIONS, describe, describe_markdown
+from scriptvedit.scaffold import TEMPLATES as _SCAFFOLD_TEMPLATES, new_project
+from scriptvedit.state import _CACHE_DIR
+
 
 _WATCH_EXTENSIONS = {
     ".py", ".html", ".htm", ".css", ".js", ".srt", ".ass", ".vtt",
@@ -207,10 +213,3 @@ def _main(argv=None):
 # --- プラグイン自動読込（import 時: カレントディレクトリの plugins/） ---
 # 環境変数 SCRIPTVEDIT_NO_PLUGINS を設定すると自動読込を無効化できる。
 #
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.cache import cache_clear, cache_gc, cache_stats
-from scriptvedit.manifest import _MANIFEST_KIND_SECTIONS, describe, describe_markdown
-from scriptvedit.scaffold import TEMPLATES as _SCAFFOLD_TEMPLATES, new_project
-from scriptvedit.state import _CACHE_DIR

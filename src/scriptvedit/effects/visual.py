@@ -4,6 +4,11 @@ import os
 import math as _math
 import builtins as _builtins
 
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.expr import Const, Expr, Var, _resolve_param, clip, lerp
+from scriptvedit.objects import Effect
+from scriptvedit.validate import _parse_color_rgb, _require_number, _validate_ffmpeg_color
+
 
 def chroma_key(color="green", similarity=0.1, blend=0.0):
     """クロマキーEffect: 指定色を透明化（chromakeyフィルタ）。
@@ -182,9 +187,3 @@ def outline(width=2, color="white"):
         raise ValueError(f"outline: width は 1〜16 の整数で指定してください: {width!r}")
     _parse_color_rgb(color)  # 構築時に色を検証
     return Effect("outline", width=width, color=color)
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.expr import Const, Expr, Var, _resolve_param, clip, lerp
-from scriptvedit.objects import Effect
-from scriptvedit.validate import _parse_color_rgb, _require_number, _validate_ffmpeg_color

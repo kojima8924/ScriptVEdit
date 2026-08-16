@@ -9,7 +9,12 @@ import shutil as _shutil
 import threading as _threading
 import builtins as _builtins
 
-from scriptvedit.state import _CACHE_DIR
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.expr import Expr, max
+from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIXFMT_VER, _BAKEABLE_EFFECTS, _CACHE_DIR, _ENGINE_VER, _TERMINAL_FRAME_EFFECTS, _detect_media_type
 
 
 # --- ファイル指紋（内容ハッシュ方式）---
@@ -290,7 +295,7 @@ def _checkpoint_cache_path(original_source, ops, duration=None, fps=None, qualit
     # Project解像度も鍵に含める。blur_background_fill 等、Project寸法に依存する
     # フィルタを焼くopがあり、320pと1080pで異なる出力が同一パスへ衝突していた
     # （監査 issue #16 P1）。解像度非依存opでも分かれるが正しさを優先する
-    proj = Project._current
+    proj = current_project()
     if proj is not None:
         sigs.append(f"pctx={proj.width}x{proj.height}@{proj.fps}")
     key = _sig_key(sigs)
@@ -771,9 +776,6 @@ def cache_clear(cache_dir=_CACHE_DIR, *, force=False):
 # watch が監視する拡張子（レイヤー.py + 画像/音声/フォント/字幕/HTML等の素材）
 
 
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.expr import Expr, max
+# --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛。scripts/check_import_cycles.py で計測）---
 from scriptvedit.ffmpeg import _decoder_input_args
 from scriptvedit.plugins import _EFFECT_PLUGINS
-from scriptvedit.project import Project
-from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIXFMT_VER, _BAKEABLE_EFFECTS, _ENGINE_VER, _TERMINAL_FRAME_EFFECTS, _detect_media_type

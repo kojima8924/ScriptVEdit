@@ -13,6 +13,7 @@ import pytest
 
 import scriptvedit as sv
 from scriptvedit import Object, Project, asset, text
+from scriptvedit.context import current_project
 
 
 def _layer(tmp_path, name, body):
@@ -123,9 +124,9 @@ def test_sub_project_in_layer_does_not_steal_registration(tmp_path, image_src):
 def test_project_outside_layer_still_becomes_current():
     """レイヤー外の Project() は従来どおり _current を取る"""
     outer = Project()
-    assert Project._current is outer
+    assert current_project() is outer
     inner = Project()
-    assert Project._current is inner
+    assert current_project() is inner
     obj = Object("dummy.png")
     assert obj in inner.objects
 

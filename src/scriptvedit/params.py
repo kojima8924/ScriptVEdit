@@ -20,6 +20,9 @@ import os
 import sys
 import warnings
 
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.state import _suggest_hint
+
 
 # 上書き値1件。origin は "cli"（--param）か "env"（SCRIPTVEDIT_PARAM_*）。
 # 未消費の扱い（エラー / 警告）を分けるために出自を保持する。
@@ -192,7 +195,3 @@ def _record_layer_param(project, name, value):
     if layer_file:
         project._layer_params.setdefault(layer_file, {})[name] = value
     return value
-
-
-# --- 遅延解決の相互参照（循環importを避けるため末尾で束縛）---
-from scriptvedit.state import _suggest_hint

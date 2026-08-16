@@ -21,21 +21,22 @@ import pytest
 
 import scriptvedit as sv
 from scriptvedit import Object, Project, asset, fade, progress_bar, text
+from scriptvedit.context import _exec_stack, activate, current_project
 from scriptvedit.filters.video import _build_video_overlay_parts, _visible_window
 
 
 @pytest.fixture(autouse=True)
 def _restore_project_globals():
     """各テスト後に Project の暗黙登録先と実行スタックを戻す"""
-    old_current = sv.Project._current
-    old_stack = list(sv.Project._exec_stack)
-    sv.Project._current = None
-    sv.Project._exec_stack[:] = []
+    old_current = current_project()
+    old_stack = list(_exec_stack)
+    activate(None)
+    _exec_stack[:] = []
     try:
         yield
     finally:
-        sv.Project._current = old_current
-        sv.Project._exec_stack[:] = old_stack
+        activate(old_current)
+        _exec_stack[:] = old_stack
 
 
 def _write_layer(tmp_path, name, body):
@@ -90,12 +91,12 @@ def test_visible_window_is_open_when_duration_unknown():
 def _parts_for(obj, window):
     p = Project()
     p.configure(width=320, height=180, fps=30)
-    sv.Project._current = p
+    activate(p)
     try:
         parts, _label = _build_video_overlay_parts(
             obj, 1, "[0:v]", obj.duration or 5, visible_window=window)
     finally:
-        sv.Project._current = None
+        activate(None)
     return ";".join(parts)
 
 

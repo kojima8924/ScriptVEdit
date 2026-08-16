@@ -19,6 +19,7 @@ import types
 import pytest
 
 import scriptvedit as sv
+from scriptvedit.context import _exec_stack, activate, current_project
 
 
 # 1x1 の正しいPNG（ffprobe可能な実素材。PIL非依存でテスト素材を作るため）
@@ -30,15 +31,15 @@ _PNG_1PX = base64.b64decode(
 @pytest.fixture(autouse=True)
 def _restore_project_globals():
     """各テスト後にProjectの暗黙登録先と実行スタックを戻す"""
-    old_current = sv.Project._current
-    old_stack = list(sv.Project._exec_stack)
-    sv.Project._current = None
-    sv.Project._exec_stack[:] = []
+    old_current = current_project()
+    old_stack = list(_exec_stack)
+    activate(None)
+    _exec_stack[:] = []
     try:
         yield
     finally:
-        sv.Project._current = old_current
-        sv.Project._exec_stack[:] = old_stack
+        activate(old_current)
+        _exec_stack[:] = old_stack
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ def test_particle_and_morph_bake_use_ceil_frame_count(
     tgt.write_bytes(_PNG_1PX)
 
     p = sv.Project()
-    sv.Project._current = p
+    activate(p)
 
     # explode_to
     obj = sv.Object(str(src))
@@ -456,7 +457,7 @@ def test_compute_cache_path_separates_by_project_resolution(tmp_path):
     def path_with(width, height, fps=30):
         p = sv.Project()
         p.configure(width=width, height=height, fps=fps)
-        sv.Project._current = p
+        activate(p)
         return sv.Object(str(src))._compute_cache_path()
 
     path_320 = path_with(320, 180)
@@ -470,6 +471,6 @@ def test_compute_cache_path_separates_by_project_resolution(tmp_path):
     assert path_with(320, 180, fps=30) != path_with(320, 180, fps=60)
 
     # Project なしは既定 1280x720@30 と同一視
-    sv.Project._current = None
+    activate(None)
     path_none = sv.Object(str(src))._compute_cache_path()
     assert path_none == path_with(1280, 720)

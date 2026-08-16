@@ -46,6 +46,13 @@ import re as _re
 import shutil as _shutil
 import warnings as _warnings
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.cache import _file_fingerprint, _fmt_size
+from scriptvedit.ffmpeg import _unique_tmp_path
+
 _ENV_VAR = "SCRIPTVEDIT_ASSETS"
 # 共有ライブラリから自動コピーした素材の置き場（assets/ 直下）
 IMPORTED_DIR = "_imported"
@@ -67,8 +74,7 @@ def _search_up(start):
 def _current_layer_dir():
     """実行中のレイヤーファイルのディレクトリ（レイヤー外なら None）"""
     try:
-        from scriptvedit.project import Project
-        proj = Project._current
+        proj = current_project()
         cur = getattr(proj, "_current_layer_file", None) if proj is not None else None
         if cur:
             return os.path.dirname(os.path.abspath(cur))
@@ -167,7 +173,6 @@ def _ensure_under(base, path, relpath):
 
 def _same_content(a, b):
     """2ファイルの内容が同じか（内容ハッシュ。キャッシュ鍵と同じ判定基準）"""
-    from scriptvedit.cache import _file_fingerprint
     try:
         if os.path.getsize(a) != os.path.getsize(b):
             return False
@@ -182,7 +187,6 @@ def _copy_atomic(src, dst):
     一時パスは _unique_tmp_path（pid + 乱数）でユニーク化し、
     同一素材の並列取り込みでも相互に壊さない。
     """
-    from scriptvedit.ffmpeg import _unique_tmp_path
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     tmp = _unique_tmp_path(dst)
     try:
@@ -264,7 +268,6 @@ def asset(relpath, *, must_exist=True):
     lib_hit = _find_in_library(parts)
     if lib_hit:
         _copy_atomic(lib_hit, imported)
-        from scriptvedit.cache import _fmt_size
         try:
             size = _fmt_size(os.path.getsize(imported))
         except OSError:
@@ -288,8 +291,7 @@ def here(relpath=""):
     """
     base = None
     try:
-        from scriptvedit.project import Project
-        proj = Project._current
+        proj = current_project()
         cur = getattr(proj, "_current_layer_file", None) if proj is not None else None
         if cur:
             base = os.path.dirname(os.path.abspath(cur))

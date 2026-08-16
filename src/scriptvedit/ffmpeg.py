@@ -8,6 +8,9 @@ import threading as _threading
 import uuid as _uuid
 from collections import deque as _deque
 
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.state import _AVAILABLE_ENCODERS, _GEN_COUNTER, _GEN_COUNTER_LOCK
+
 
 _FILTER_SCRIPT_THRESHOLD = 4000
 
@@ -436,7 +439,3 @@ def _decoder_input_args(source, media_type, fps):
             return ["-c:v", "libvpx", "-i", source]      # 同上（VP8のalphaもlibvpx）
         return ["-i", source]  # AV1等はネイティブデコーダに任せる
     return ["-i", source]
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.state import _AVAILABLE_ENCODERS, _GEN_COUNTER, _GEN_COUNTER_LOCK

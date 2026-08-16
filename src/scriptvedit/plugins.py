@@ -5,6 +5,14 @@ import sys
 import hashlib
 import warnings
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.expr import Const, _resolve_param
+from scriptvedit.state import _BAKEABLE_EFFECTS, _pkg_all, _pkg_ns, _suggest_hint
+from scriptvedit.validate import _parse_color_rgb, _require_number, _validate_ffmpeg_color
+
 
 # --- プラグイン機構（コア無編集で Effect を追加する） ---
 #
@@ -317,7 +325,7 @@ def unregister_plugin(name):
 
 def _plugin_ctx(obj, e, eff_idx, start, dur, base_dims, label_prefix, pad_state):
     """ビルダーに渡すコンテキストを構築する"""
-    proj = Project._current
+    proj = current_project()
     base_w, base_h = (base_dims if base_dims else (None, None))
 
     def expand_pad(dw, dh):
@@ -524,11 +532,7 @@ def plugin_manifest(as_text=False):
     return "\n".join(lines)
 
 
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.expr import Const, _resolve_param
+# --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛。scripts/check_import_cycles.py で計測）---
 from scriptvedit.filters.video import _u_expr
 from scriptvedit.objects import Effect
-from scriptvedit.project import Project
-from scriptvedit.state import _BAKEABLE_EFFECTS, _pkg_all, _pkg_ns, _suggest_hint
 from scriptvedit.text import _escape_ffpath
-from scriptvedit.validate import _parse_color_rgb, _require_number, _validate_ffmpeg_color

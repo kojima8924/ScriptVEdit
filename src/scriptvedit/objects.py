@@ -5,6 +5,16 @@ import math as _math
 import builtins as _builtins
 import shutil as _shutil
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+# from_project の型判定（is_project）も context 経由にすることで
+# objects → project の辺を落とし、18モジュールの循環を解いている。
+from scriptvedit.context import (
+    activate, current_project, exec_parent, is_project)
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIX_FMT, _BAKE_PIXFMT_VER, _CACHE_DIR, _ENGINE_VER, _GEN_COUNTER, _GEN_COUNTER_LOCK, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
+from scriptvedit.validate import _require_time, _validate_placement_anchor
+
 
 class TransformChain:
     """複数のTransformをまとめたチェーン"""
@@ -368,8 +378,9 @@ class Object:
             self._has_video = True
             self._has_audio = None  # 未判定→ffprobeで解決
         # 現在のProjectに自動登録
-        if Project._current is not None:
-            Project._current.objects.append(self)
+        proj = current_project()
+        if proj is not None:
+            proj.objects.append(self)
 
     @property
     def has_video(self):
@@ -382,7 +393,7 @@ class Object:
         if self._audio_deleted:
             return False
         if self._has_audio is None:
-            proj = Project._current
+            proj = current_project()
             if proj:
                 info = proj._probe_media(self.source)
                 if info:
@@ -392,14 +403,14 @@ class Object:
         return self._has_audio
 
     def _ensure_registered(self):
-        """Project._current に未登録なら現在位置へ再登録する（重複登録はしない）。
+        """現在の Project に未登録なら現在位置へ再登録する（重複登録はしない）。
 
         compute() は自身を「焼いた素材」へ変異させる際に Project.objects から
         除外する。その後 time()/show()/until()/@ で再配置されたら、呼び出し
         時点のタイムライン位置へ戻す（監査 issue #14 P1: README の
         compute()→time() の例が空タイムラインになる問題の修正）。
         """
-        proj = Project._current
+        proj = current_project()
         if proj is None:
             return
         if not any(o is self for o in proj.objects):
@@ -420,7 +431,7 @@ class Object:
         if name is not None:
             # 生成アンカー（X.start / X.end）も明示 anchor() と同じ重複管理に
             # 載せる（別レイヤーでの同名定義は last-write-wins にせずエラー）
-            proj = Project._current
+            proj = current_project()
             if proj is not None:
                 _register_anchor_owner(proj, f"{name}.start")
                 _register_anchor_owner(proj, f"{name}.end")
@@ -705,7 +716,7 @@ class Object:
                 f"Effect ({names}) を焼き込めません。"
                 f"Effect を焼くには duration を指定して動画として compute してください。")
         # Project.objects から除外
-        proj = Project._current
+        proj = current_project()
         if proj is not None and self in proj.objects:
             proj.objects.remove(self)
         # キャッシュパス計算
@@ -748,7 +759,7 @@ class Object:
         素材FFP群から導出する（素材更新で自動再生成）。dry_run 対応。
         cache: 'auto'（キャッシュがあれば再利用）/ 'force'（常に再生成）。
         """
-        if not isinstance(sub_project, Project):
+        if not is_project(sub_project):
             raise TypeError(
                 f"from_project: sub_project には Project を指定してください: "
                 f"{type(sub_project)}")
@@ -756,9 +767,9 @@ class Object:
             hint = _suggest_hint(cache, ("auto", "force"))
             raise ValueError(
                 f"from_project: cache は 'auto' か 'force' のいずれか: {cache!r}{hint}")
-        # 親 = 現在レイヤーを実行中のProject（sub = Project() が _current を
+        # 親 = 現在レイヤーを実行中のProject（sub = Project() が現在の Project を
         # 奪うため、_exec_stack から特定する）。レイヤー外では復元先のみ保持
-        parent = Project._exec_stack[-1] if Project._exec_stack else None
+        parent = exec_parent()
         if parent is None:
             raise ValueError(
                 "from_project: レイヤー実行中の親Projectがありません。"
@@ -771,12 +782,12 @@ class Object:
                 "from_project: sub_project に layer() が登録されていません。"
                 "sub.layer('xxx.py') でレイヤーを登録してから渡してください。")
         # サブProjectをdry_runで解決し、総尺・依存素材を確定する
-        # （Project._current が切り替わるため必ず親へ復元する）
+        # （現在の Project が切り替わるため必ず親へ復元する）
         try:
             sub_project.render("__from_project_probe__.webm",
                                dry_run=True, alpha=True)
         finally:
-            Project._current = parent
+            activate(parent)
         total = sub_project.duration
 
         # 署名: configure + レイヤーファイルFFP群 + レイヤー参照素材FFP群
@@ -824,7 +835,7 @@ class Object:
             try:
                 sub_cmd = sub_project.render(cache_path, dry_run=True, alpha=True)
             finally:
-                Project._current = parent
+                activate(parent)
             parent._pending_compute_cmds[cache_path] = sub_cmd
         else:
             # 実生成: 一時パスへレンダし成功時のみ確定（アトミック書き込み）。
@@ -839,7 +850,7 @@ class Object:
                 with _GEN_COUNTER_LOCK:
                     _GEN_COUNTER[0] += 1
             finally:
-                Project._current = parent
+                activate(parent)
                 try:
                     os.remove(tmp_path)
                 except OSError:
@@ -874,7 +885,7 @@ class Object:
         # Project解像度/fpsを鍵に含める（blur_background_fill 等の一部Effectは
         # Projectのwidth/heightでフィルタが変わるため、解像度違いの出力が
         # 同一pathへ衝突していた。issue #16 P1。checkpoint側も同じ書式で対応）
-        proj = Project._current
+        proj = current_project()
         if proj is not None:
             sigs.append(f"pctx={proj.width}x{proj.height}@{proj.fps}")
         else:
@@ -908,7 +919,7 @@ class Object:
 
     def _build_compute_video_cmd(self, cache_path, duration):
         """compute動画: Transform+Effect適用→WebM VP9 alpha"""
-        proj = Project._current
+        proj = current_project()
         fps = proj.fps if proj else 30
         temp = Object.__new__(Object)
         temp.source = self.source
@@ -941,7 +952,7 @@ class Object:
             if self.duration is None:
                 raise TypeError("web Objectにはduration引数が必須です")
             return self.duration
-        proj = Project._current
+        proj = current_project()
         if proj is None:
             raise RuntimeError("length()にはアクティブなProjectが必要です")
         info = proj._probe_media(self.source)
@@ -1315,7 +1326,7 @@ class Group:
         for o in self.objects:
             o.show(duration, priority=priority)
         # メンバーは advance しないため、タイムラインを一度だけ duration 進める
-        if self.objects and Project._current is not None:
+        if self.objects and current_project() is not None:
             pause.time(duration)
         return self
 
@@ -1325,12 +1336,9 @@ def group(*objects):
     return Group(*objects)
 
 
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
+# --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛。scripts/check_import_cycles.py で計測）---
 from scriptvedit.cache import _build_unified_ops, _fold_time_effects, _op_prefix_fingerprint, _ops_effective_quality, _sig_key, _src_bucket, _src_signature, _web_cache_path
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions
 from scriptvedit.plugins import _EFFECT_PLUGINS
-from scriptvedit.project import Project
-from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIX_FMT, _BAKE_PIXFMT_VER, _CACHE_DIR, _ENGINE_VER, _GEN_COUNTER, _GEN_COUNTER_LOCK, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
 from scriptvedit.timeline import _link_after, _register_anchor_owner, pause
-from scriptvedit.validate import _require_time, _validate_placement_anchor

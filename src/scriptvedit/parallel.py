@@ -24,6 +24,10 @@ import concurrent.futures as _futures
 from scriptvedit.chapters import _chapters_metadata_path, _write_chapters_metadata
 from scriptvedit.ffmpeg import _atomic_write_text, _run_ffmpeg, _unique_tmp_path
 
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_input_args, _build_video_overlay_parts, _unwrap_raw_stream_ref, _visible_window
+from scriptvedit.objects import Object
+
 
 def _parallel_chunk_count(project, parallel, output_path):
     """時間分割並列レンダの実チャンク数を決定する（適用不可なら1=従来経路）。
@@ -302,9 +306,3 @@ def _build_concat_mux_cmd(list_path, audio_path, meta_path, out_path):
                     "-map_chapters", str(m_idx)])
     cmd.append(out_path)
     return cmd
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.filters.video import _build_input_args, _build_video_overlay_parts, _visible_window
-from scriptvedit.objects import Object
-from scriptvedit.project import _DRAFT_SCALE_FILTER, _unwrap_raw_stream_ref

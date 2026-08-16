@@ -74,7 +74,7 @@ def _construct_all():
     """manifest の全 effect を構築し {公開名: [内部Effect名]} を返す"""
     import scriptvedit as sv
     result = {}
-    # Project._current が無いと DSL 糖衣（obj * n）が尺を確定できない
+    # current_project() が無いと DSL 糖衣（obj * n）が尺を確定できない
     p = Project()
     p.configure(width=320, height=180, fps=15)
     with warnings.catch_warnings():

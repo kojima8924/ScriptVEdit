@@ -6,6 +6,14 @@ import sys
 import hashlib
 import builtins as _builtins
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.expr import Const, Var, _resolve_param, round, sign
+from scriptvedit.state import _ARTIFACT_DIR, _TEXT_ANCHORS
+from scriptvedit.validate import _require_number, _validate_ffmpeg_color
+
 
 # --- テキスト/字幕（drawtext・subtitles）ヘルパー ---
 
@@ -290,7 +298,7 @@ def _build_text_filters(obj, start, dur):
     if kind == "progress_bar":
         # 動画全体の進行バー: 透明キャンバスに geq で帯を描画。
         # 進行は t/総尺（clip(T/total, 0, 1)）で毎フレーム更新する。
-        proj = Project._current
+        proj = current_project()
         total = proj.duration if proj and proj.duration else dur
         h = spec["height"]
         yfrac = spec["y"]
@@ -398,8 +406,8 @@ def _new_text_object(spec):
     obj._has_video = True
     obj._has_audio = False
     obj._text_spec = spec
-    if Project._current is not None:
-        Project._current.objects.append(obj)
+    if current_project() is not None:
+        current_project().objects.append(obj)
     return obj
 
 
@@ -572,7 +580,7 @@ def subtitles(srt_file, *, style=None):
         spec["synthetic_source"] = _text_synthetic_source(f"subs|{srt_file}|{style}")
     obj = _new_text_object(spec)
     # SRTをレイヤー依存として登録（cache鮮度検証で字幕変更を検知）
-    proj = Project._current
+    proj = current_project()
     if proj is not None and proj._current_layer_file:
         proj._extra_layer_deps.setdefault(
             proj._current_layer_file, []).append(srt_file)
@@ -744,12 +752,8 @@ def karaoke(lines, *, style=None):
     return subtitles(ass_path)
 
 
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
+# --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛。scripts/check_import_cycles.py で計測）---
 from scriptvedit.cache import _file_fingerprint
-from scriptvedit.expr import Const, Var, _resolve_param, round, sign
 from scriptvedit.ffmpeg import _atomic_write_text
 from scriptvedit.filters.video import _u_expr
 from scriptvedit.objects import Object
-from scriptvedit.project import Project
-from scriptvedit.state import _ARTIFACT_DIR, _TEXT_ANCHORS
-from scriptvedit.validate import _require_number, _validate_ffmpeg_color

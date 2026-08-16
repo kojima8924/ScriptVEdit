@@ -4,9 +4,15 @@ import re
 import builtins as _builtins
 import inspect as _inspect
 
-# state は他モジュールへ依存しない葉なので先頭で import できる
-# （補助テーブルの宣言でモジュールレベルに値が要るもの）。
-from scriptvedit.state import _AUDIO_VIZ_KINDS
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.effects.composite import _BLEND_MODES, _BLEND_MODE_ALIASES
+from scriptvedit.cache import _LAYER_CACHE_QUALITY, _respects_fast_hint
+from scriptvedit.expr import Expr
+from scriptvedit.media import _XFADE_TRANSITIONS
+from scriptvedit.objects import Group, Object
+from scriptvedit.plugins import _EFFECT_PLUGINS, _PLUGIN_PARAM_TYPES
+from scriptvedit.project import Project
+from scriptvedit.state import _AUDIO_VIZ_KINDS, _BAKEABLE_EFFECTS, _ENCODER_MAP, _PLACEMENT_ANCHORS, _PRESETS, _pkg_all, _pkg_ns, _suggest_hint
 
 
 # --- ケイパビリティ・マニフェスト（describe） ---
@@ -1604,14 +1610,3 @@ def describe_markdown(manifest=None):
 
 
 # --- キャッシュ管理 CLI / watch モード ---
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.effects.composite import _BLEND_MODES, _BLEND_MODE_ALIASES
-from scriptvedit.cache import _LAYER_CACHE_QUALITY, _respects_fast_hint
-from scriptvedit.expr import Expr
-from scriptvedit.media import _XFADE_TRANSITIONS
-from scriptvedit.objects import Group, Object
-from scriptvedit.plugins import _EFFECT_PLUGINS, _PLUGIN_PARAM_TYPES
-from scriptvedit.project import Project
-from scriptvedit.state import _BAKEABLE_EFFECTS, _ENCODER_MAP, _PLACEMENT_ANCHORS, _PRESETS, _pkg_all, _pkg_ns, _suggest_hint

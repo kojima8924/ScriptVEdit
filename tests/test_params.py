@@ -189,7 +189,8 @@ def _layer_params_after_render(tmp_path, monkeypatch, raw, default_src):
     layer = tmp_path / "param_layer.py"
     layer.write_text(
         "from scriptvedit import *\n"
-        "_p = Project._current\n"
+        "from scriptvedit.context import current_project\n"
+        "_p = current_project()\n"
         f"_n = _p.param('n', {default_src})\n"
         f"o = Object(r\"{asset('images/shape_badge.png')}\")\n"
         "o.time(1)\n",

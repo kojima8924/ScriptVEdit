@@ -10,6 +10,37 @@ import time as _time
 import threading as _threading
 import concurrent.futures as _futures
 
+# context は scriptvedit 内 import を持たない葉なので、末尾ではなく先頭で import
+# できる（循環しない）。「現在の Project」の実体はこちらが持つ。
+from scriptvedit.context import (
+    activate as _activate,
+    in_layer_exec as _in_layer_exec,
+    pop_exec as _pop_exec,
+    push_exec as _push_exec,
+    register_project_class as _register_project_class,
+)
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.audio import _probe_audio_length
+from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _file_fingerprint, _is_bakeable, _is_pending_cache_path, _layer_cache_encode_args, _layer_cache_paths, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _resolve_layer_cache_quality, _split_ops, _validate_morph_position, _web_cache_path
+from scriptvedit.expr import Expr, max, min
+from scriptvedit.ffmpeg import FFmpegError, _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _normalize_ffmpeg_cmd, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
+from scriptvedit.filters.audio import _build_audio_effect_filters, _build_audio_pre_filters
+from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _build_video_pre_filters, _get_base_dimensions, _optimize_filter_chain, _unwrap_raw_stream_ref, _visible_window
+from scriptvedit.objects import Object, _web_frames_dir
+from scriptvedit.assets import resolve_layer_path
+from scriptvedit.plugins import _EFFECT_PLUGINS, _autoload_plugins
+from scriptvedit.state import _BAKE_PIX_FMT, _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _PRESETS, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
+from scriptvedit.timeline import (
+    Pause, Scene, _AnchorMarker, _ScenePad, _check_until_zero_duration)
+from scriptvedit.validate import _require_number, _require_time, _validate_ffmpeg_color
+# 分割サブシステム（audit.py と同じ「project を第1引数に受ける自由関数」方式）
+from scriptvedit.params import (
+    check_unconsumed_params, param as _param_impl)
+from scriptvedit.chapters import _chapters_metadata_path, _write_chapters_metadata, export_chapters as _export_chapters_impl, export_metadata as _export_metadata_impl, marker as _marker_impl
+from scriptvedit.preview import storyboard as _storyboard_impl, thumbnail as _thumbnail_impl
+from scriptvedit.parallel import _parallel_chunk_bounds, _parallel_chunk_count, _render_parallel
+
 
 # _warn の集約リストはレイヤーキャッシュの並列生成スレッドからも触られる。
 # warnings.catch_warnings はプロセスグローバルでスレッドセーフでないため使わず、
@@ -64,32 +95,7 @@ def _morph_frame_count(fps, dur):
     return _builtins.max(1, int(_math.ceil(float(fps) * float(dur))))
 
 
-# draft レンダの縮小フィルタ（解像度を半分に。幾何は保持、偶数寸法に丸め）。
-# 逐次レンダ（_build_ffmpeg_cmd）と並列チャンク（parallel.py）で同一の式を使う。
-_DRAFT_SCALE_FILTER = "scale=trunc(iw/4)*2:trunc(ih/4)*2"
-
-
-def _unwrap_raw_stream_ref(label, kind):
-    """生入力参照（[N:v] / [N:a]）ならブラケットを外したストリーム指定を返す。
-
-    フィルタなしの生入力参照はフィルタグラフの出力ラベルではないため、
-    -map にブラケット付きで渡すと "Output with label ... does not exist" で
-    落ちる。ストリーム指定（N:v / N:a）へ外す。
-    project.py の映像・音声と parallel.py のチャンク側で共通利用する。
-    """
-    inner = label[1:-1]
-    if label.startswith("[") and inner.endswith(f":{kind}") \
-            and inner[:-2].isdigit():
-        return inner
-    return label
-
-
 class Project:
-    _current = None
-    # レイヤー実行中のProjectスタック（from_projectでの親特定用。
-    # レイヤー内で sub = Project() すると _current が奪われるため別管理）
-    _exec_stack = []
-
     def __init__(self):
         self.width = 1920
         self.height = 1080
@@ -137,11 +143,11 @@ class Project:
         self._render_planned = {}       # 中間生成物パス → レンダ開始前に存在したか
         self._render_warnings = []      # このレンダパスで出た警告（末尾で再掲）
         self._sticky_warnings = []      # レンダパス外（configure等）で出た警告
-        # レイヤー実行中に作られた Project は _current を奪わない。
+        # レイヤー実行中に作られた Project は現在の Project を奪わない。
         # 奪うと `sub = Project()` 以降のレイヤー内 Object がサブへ吸われ、
         # 親のタイムラインから無言で消える（監査 項目2）。
-        if not Project._exec_stack:
-            Project._current = self
+        if not _in_layer_exec():
+            _activate(self)
 
     def configure(self, **kwargs):
         unknown = set(kwargs.keys()) - _CONFIGURE_KEYS
@@ -649,8 +655,8 @@ class Project:
         """_exec_layer の本体（current layer context 設定済みで呼ばれる）"""
         # exec中にmorph_to等が積む追加依存をリセット（plan/renderの再実行で重複させない）
         self._extra_layer_deps[filename] = []
-        Project._current = self
-        Project._exec_stack.append(self)
+        _activate(self)
+        _push_exec(self)
         try:
             # レイヤーファイルと同階層の plugins/ を自動読込（cwd と異なる場合の保険）
             _autoload_plugins(os.path.dirname(os.path.abspath(filename)))
@@ -659,9 +665,9 @@ class Project:
             namespace = {}
             exec(compile(code, filename, "exec"), namespace)
         finally:
-            Project._exec_stack.pop()
-            # レイヤー内で sub = Project() された場合に _current を奪還する
-            Project._current = self
+            _pop_exec()
+            # レイヤー内で sub = Project() された場合に現在の Project を奪還する
+            _activate(self)
         end_idx = len(self.objects)
         self._layers.append((start_idx, end_idx, priority))
         self._stamp_layer_origin(start_idx, end_idx, filename)
@@ -2725,23 +2731,6 @@ class Project:
         return args
 
 
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.audio import _probe_audio_length
-from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _file_fingerprint, _is_bakeable, _is_pending_cache_path, _layer_cache_encode_args, _layer_cache_paths, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _resolve_layer_cache_quality, _split_ops, _validate_morph_position, _web_cache_path
-from scriptvedit.expr import Expr, max, min
-from scriptvedit.ffmpeg import FFmpegError, _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _normalize_ffmpeg_cmd, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
-from scriptvedit.filters.audio import _build_audio_effect_filters, _build_audio_pre_filters
-from scriptvedit.filters.video import _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _build_video_pre_filters, _get_base_dimensions, _optimize_filter_chain, _visible_window
-from scriptvedit.objects import Object, _web_frames_dir
-from scriptvedit.assets import resolve_layer_path
-from scriptvedit.plugins import _EFFECT_PLUGINS, _autoload_plugins
-from scriptvedit.state import _BAKE_PIX_FMT, _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _PRESETS, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
-from scriptvedit.timeline import (
-    Pause, Scene, _AnchorMarker, _ScenePad, _check_until_zero_duration)
-from scriptvedit.validate import _require_number, _require_time, _validate_ffmpeg_color
-# 分割サブシステム（audit.py と同じ「project を第1引数に受ける自由関数」方式）
-from scriptvedit.params import (
-    check_unconsumed_params, param as _param_impl)
-from scriptvedit.chapters import _chapters_metadata_path, _write_chapters_metadata, export_chapters as _export_chapters_impl, export_metadata as _export_metadata_impl, marker as _marker_impl
-from scriptvedit.preview import storyboard as _storyboard_impl, thumbnail as _thumbnail_impl
-from scriptvedit.parallel import _parallel_chunk_bounds, _parallel_chunk_count, _render_parallel
+# context に Project クラスの実体を渡す（context は project を import できないため、
+# 型判定だけを逆向きに注入する。objects.from_project の引数検証で使う）。
+_register_project_class(Project)

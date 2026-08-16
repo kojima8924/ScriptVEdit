@@ -2,6 +2,12 @@
 
 import warnings
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.validate import _require_time
+
 
 class _AnchorMarker:
     """アンカー位置マーカー（タイムライン上の位置を記録、レンダリングなし）"""
@@ -182,7 +188,7 @@ def _register_anchor_owner(proj, name):
 
 def anchor(name):
     """現在のレイヤー位置にアンカーを登録"""
-    proj = Project._current
+    proj = current_project()
     if proj is None:
         raise RuntimeError("anchor()にはアクティブなProjectが必要です")
     _register_anchor_owner(proj, name)
@@ -194,14 +200,14 @@ class _PauseFactory:
     """pause.time(N) / pause.until(name) でPauseを生成・登録するファクトリ"""
     def time(self, duration):
         p = Pause().time(duration)
-        if Project._current is not None:
-            Project._current.objects.append(p)
+        if current_project() is not None:
+            current_project().objects.append(p)
         return p
 
     def until(self, name, offset=0.0):
         p = Pause().until(name, offset)
-        if Project._current is not None:
-            Project._current.objects.append(p)
+        if current_project() is not None:
+            current_project().objects.append(p)
         return p
 
 
@@ -212,14 +218,9 @@ def scene(name, duration):
     """シーンのコンテキストマネージャ（アクティブProjectに対して動作）。
 
     レイヤーファイル内で `with scene("intro", 5): ...` のように使う。
-    p.scene() と同義だが Project._current を暗黙に使う（anchor/pause と同様）。
+    p.scene() と同義だが current_project() を暗黙に使う（anchor/pause と同様）。
     """
-    proj = Project._current
+    proj = current_project()
     if proj is None:
         raise RuntimeError("scene()にはアクティブなProjectが必要です")
     return Scene(proj, name, duration)
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.project import Project
-from scriptvedit.validate import _require_time

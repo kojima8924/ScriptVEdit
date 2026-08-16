@@ -16,7 +16,7 @@ import json
 import hashlib
 
 from scriptvedit.state import _ARTIFACT_DIR
-from scriptvedit.cache import _file_fingerprint
+from scriptvedit.cache import _file_fingerprint, _renderer_identity
 from scriptvedit.ffmpeg import _unique_tmp_path
 from scriptvedit.objects import Object
 from scriptvedit.validate import _FFMPEG_COLOR_NAMES, _require_number
@@ -59,7 +59,6 @@ def _katex_fingerprint():
                 f"KaTeX の同梱ファイルが見つかりません: {path}\n"
                 f"formula() は {_KATEX_DIR} に katex.min.css / katex.min.js / fonts/ が"
                 f"配置されている必要があります。")
-    from scriptvedit.cache import _renderer_identity
     parts = [f"renderer:{_renderer_identity()}",
              f"tpl:{_file_fingerprint(_template_path(_FORMULA_TEMPLATE))}"]
     # vendor(katex) のうち**レンダ結果に影響するファイルだけ**をハッシュ

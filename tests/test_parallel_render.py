@@ -16,21 +16,22 @@ import subprocess
 import pytest
 
 import scriptvedit as sv
+from scriptvedit.context import _exec_stack, activate, current_project
 from scriptvedit.project import Project
 
 
 @pytest.fixture(autouse=True)
 def _restore_project_globals():
     """各テスト後にProjectの暗黙登録先と実行スタックを戻す"""
-    old_current = sv.Project._current
-    old_stack = list(sv.Project._exec_stack)
-    sv.Project._current = None
-    sv.Project._exec_stack[:] = []
+    old_current = current_project()
+    old_stack = list(_exec_stack)
+    activate(None)
+    _exec_stack[:] = []
     try:
         yield
     finally:
-        sv.Project._current = old_current
-        sv.Project._exec_stack[:] = old_stack
+        activate(old_current)
+        _exec_stack[:] = old_stack
 
 
 def _write_layer(tmp_path, name, body):

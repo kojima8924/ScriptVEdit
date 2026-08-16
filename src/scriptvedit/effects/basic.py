@@ -1,3 +1,10 @@
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.effects.paths import look_at
+from scriptvedit.expr import Const, Expr, _resolve_param, _to_expr, deg2rad, lerp
+from scriptvedit.objects import AudioEffect, Effect, Transform
+from scriptvedit.state import _suggest_hint
+from scriptvedit.validate import _require_time, _validate_ffmpeg_color
 # -*- coding: utf-8 -*-
 
 
@@ -269,11 +276,3 @@ def atrim(duration=None, *, start=0):
 def atempo(rate=1.0):
     """音声テンポ変更（時間影響あり）"""
     return AudioEffect("atempo", rate=rate)
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.effects.paths import look_at
-from scriptvedit.expr import Const, Expr, _resolve_param, _to_expr, deg2rad, lerp
-from scriptvedit.objects import AudioEffect, Effect, Transform
-from scriptvedit.state import _suggest_hint
-from scriptvedit.validate import _require_time, _validate_ffmpeg_color

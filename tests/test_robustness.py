@@ -171,7 +171,8 @@ def _make_p27_project(tmp_path, cache_mode):
     layer = tmp_path / "param_layer.py"
     layer.write_text(
         "from scriptvedit import *\n"
-        "_p = Project._current\n"
+        "from scriptvedit.context import current_project\n"
+        "_p = current_project()\n"
         "_msg = _p.param('msg', 'a')\n"   # 出力尺に影響しないparam
         f"o = Object(r\"{png}\")\n"
         "o.time(1)\n",

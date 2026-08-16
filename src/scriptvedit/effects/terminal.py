@@ -2,6 +2,14 @@
 
 import warnings
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.expr import _resolve_param
+from scriptvedit.objects import Effect, Object
+from scriptvedit.validate import _reject_unknown_keys
+
 
 def _validate_terminal_input_object(func, name, obj):
     """morph_to(target)/assemble_from(source) に渡すObjectの早期検証。
@@ -38,7 +46,7 @@ def morph_to(target, blend=None, **morph_params):
     else:
         _reject_unknown_keys("morph_to", morph_params, MORPH_PARAM_KEYS)
     # ターゲットObjectをProjectから除外（morphに消費される）
-    proj = Project._current
+    proj = current_project()
     if proj is not None and target in proj.objects:
         proj.objects.remove(target)
         warnings.warn(
@@ -96,7 +104,7 @@ def assemble_from(source, blend=None, **particle_params):
         raise TypeError(f"assemble_from の source は Object のみ: {type(source)}")
     _validate_terminal_input_object("assemble_from", "source", source)
     _check_particle_params("assemble_from", particle_params)
-    proj = Project._current
+    proj = current_project()
     if proj is not None and source in proj.objects:
         proj.objects.remove(source)
         warnings.warn(
@@ -114,10 +122,3 @@ def assemble_from(source, blend=None, **particle_params):
     eff = Effect("assemble_from", blend=blend, **particle_params)
     eff._assemble_source = source
     return eff
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.expr import _resolve_param
-from scriptvedit.objects import Effect, Object
-from scriptvedit.project import Project
-from scriptvedit.validate import _reject_unknown_keys

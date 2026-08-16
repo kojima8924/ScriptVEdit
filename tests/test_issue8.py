@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import scriptvedit as sv
+from scriptvedit.context import _exec_stack, activate, current_project
 # 内部ヘルパーは実体モジュールから直接 import する
 # （package root からの private 再エクスポートは廃止済み）
 from scriptvedit.cache import (
@@ -23,15 +24,15 @@ from scriptvedit.text import _escape_ffpath
 @pytest.fixture(autouse=True)
 def _restore_project_globals():
     """各テスト後にProjectの暗黙登録先と実行スタックを戻す"""
-    old_current = sv.Project._current
-    old_stack = list(sv.Project._exec_stack)
-    sv.Project._current = None
-    sv.Project._exec_stack[:] = []
+    old_current = current_project()
+    old_stack = list(_exec_stack)
+    activate(None)
+    _exec_stack[:] = []
     try:
         yield
     finally:
-        sv.Project._current = old_current
-        sv.Project._exec_stack[:] = old_stack
+        activate(old_current)
+        _exec_stack[:] = old_stack
 
 
 def test_tilde_is_quality_hint_for_audio_and_never_deletes_content():
@@ -132,11 +133,11 @@ def test_empty_chain_policy_operators_raise_japanese_error(chain, operator, mess
 
 
 def test_from_project_outside_layer_preserves_current_project():
-    """レイヤー外の誤用でProject._currentをNoneへ破壊しない"""
+    """レイヤー外の誤用で現在の Project を None へ破壊しない"""
     sub = sv.Project()
     with pytest.raises(ValueError, match="レイヤー実行中の親Project"):
         sv.Object.from_project(sub)
-    assert sv.Project._current is sub
+    assert current_project() is sub
     following = sv.Object("following.png")
     assert following in sub.objects
 

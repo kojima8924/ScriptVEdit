@@ -1,3 +1,7 @@
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.objects import Effect
+from scriptvedit.validate import _require_number
 # -*- coding: utf-8 -*-
 
 
@@ -40,8 +44,3 @@ def freeze_frame(at, duration):
     _require_number("freeze_frame", "at", at, 0.0, None)
     _require_number("freeze_frame", "duration", duration, 0.01, None)
     return Effect("freeze_frame", at=float(at), duration=float(duration))
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.objects import Effect
-from scriptvedit.validate import _require_number

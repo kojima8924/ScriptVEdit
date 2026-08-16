@@ -6,6 +6,36 @@ import math as _math
 import warnings
 import builtins as _builtins
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.expr import Const, Expr
+from scriptvedit.state import _REVERSE_MAX_SEC
+from scriptvedit.validate import _parse_color_rgb
+
+
+# draft レンダの縮小フィルタ（解像度を半分に。幾何は保持、偶数寸法に丸め）。
+# 逐次レンダ（project.py の _build_ffmpeg_cmd）と並列チャンク（parallel.py）で
+# 同一の式を使う。フィルタ文字列なのでフィルタ生成モジュールに置く
+# （置き場所が project.py だと parallel.py → project.py の循環になる）。
+_DRAFT_SCALE_FILTER = "scale=trunc(iw/4)*2:trunc(ih/4)*2"
+
+
+def _unwrap_raw_stream_ref(label, kind):
+    """生入力参照（[N:v] / [N:a]）ならブラケットを外したストリーム指定を返す。
+
+    フィルタなしの生入力参照はフィルタグラフの出力ラベルではないため、
+    -map にブラケット付きで渡すと "Output with label ... does not exist" で
+    落ちる。ストリーム指定（N:v / N:a）へ外す。
+    project.py の映像・音声と parallel.py のチャンク側で共通利用する。
+    """
+    inner = label[1:-1]
+    if label.startswith("[") and inner.endswith(f":{kind}") \
+            and inner[:-2].isdigit():
+        return inner
+    return label
+
 
 # --- 共通式ヘルパー ---
 
@@ -46,7 +76,7 @@ def _get_media_dimensions(filepath):
     if _is_pending_cache_path(filepath):
         # dry_run中の未生成キャッシュ予定パスはprobeしない（警告スパム防止）
         return None, None
-    proj = Project._current
+    proj = current_project()
     if getattr(proj, "_dry_run", False) and _is_cache_artifact_path(filepath):
         return None, None
     try:
@@ -85,7 +115,7 @@ def _get_base_dimensions(obj):
     """
     if getattr(obj, "media_type", None) == "text":
         # テキスト系はキャンバス全面（Project解像度）を基底サイズとする
-        proj = Project._current
+        proj = current_project()
         if proj is not None:
             return proj.width, proj.height
         return None, None
@@ -132,7 +162,7 @@ def _build_input_args(obj, fps):
     if obj.media_type == "text":
         # テキスト系は実体ファイルを持たず、透明lavfiキャンバスを入力にする。
         # drawtext/subtitles は _build_video_overlay_parts でpre-filterとして重畳。
-        proj = Project._current
+        proj = current_project()
         w = proj.width if proj else 1920
         h = proj.height if proj else 1080
         d = obj.duration or getattr(obj, "_resolved_length", None)
@@ -251,7 +281,7 @@ def _build_blend_mode_overlay(parts, blend_eff, input_idx, obj_label, current_ba
     maskedmerge で採用する経路に切り替える。
     （blendはアルファ非考慮のため、透明領域まで合成されるのを防ぐ）
     """
-    proj = Project._current
+    proj = current_project()
     cw = proj.width if proj else 1920
     ch = proj.height if proj else 1080
     cfps = proj.fps if proj else 30
@@ -666,7 +696,7 @@ def _fx_mask_wipe(e, eff_idx, ctx):
     u_expr = _u_expr(ctx.start, ctx.dur, "T")
     prog_str = prog_expr.to_ffmpeg(u_expr)
     img = _escape_ffpath(e.params["image"])
-    proj = Project._current
+    proj = current_project()
     m_fps = proj.fps if proj else 30
     p = f"{ctx.label_prefix}e{eff_idx}"
     ctx.filters.append("format=rgba")
@@ -716,7 +746,7 @@ def _fx_rounded(e, eff_idx, ctx):
 def _fx_blur_background_fill(e, eff_idx, ctx):
     """ぼかし背景フィル（縦動画変換の定番。出力はキャンバスサイズ固定）"""
     # ぼかした自分自身をキャンバス全面に敷き、中央に本体を fit で重ねる
-    proj = Project._current
+    proj = current_project()
     cw = proj.width if proj else 1920
     ch = proj.height if proj else 1080
     sigma = e.params.get("blur", 20)
@@ -1060,7 +1090,7 @@ def _estimate_effect_input_length(obj, upto_effect):
     reverse の長尺ガード用。obj.source の実長に、upto_effect より前の
     trim/speed/freeze_frame を並び順に適用した値を返す。
     """
-    proj = Project._current
+    proj = current_project()
     base = None
     if proj is not None and getattr(obj, "media_type", None) not in ("image", "text"):
         info = proj._probe_media(obj.source)
@@ -1112,7 +1142,7 @@ def _build_video_pre_filters(obj, label_prefix="pre"):
             # （正規化しないと 10fps 素材の2周目以降が空になる。監査 issue #15）
             n = e.params["count"]
             segment = e.params["segment"]
-            proj = Project._current
+            proj = current_project()
             fps = proj.fps if proj else 30
             frames = _builtins.max(1, int(_math.ceil(segment * fps)))
             filters.append(f"fps={fps}")
@@ -1144,12 +1174,8 @@ def _build_video_pre_filters(obj, label_prefix="pre"):
     return filters
 
 
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
+# --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛。scripts/check_import_cycles.py で計測）---
 from scriptvedit.cache import _fold_time_effects, _is_cache_artifact_path, _is_pending_cache_path
-from scriptvedit.expr import Const, Expr
 from scriptvedit.ffmpeg import _decoder_input_args
 from scriptvedit.plugins import _EFFECT_PLUGINS, _build_plugin_effect_filters
-from scriptvedit.project import Project
-from scriptvedit.state import _REVERSE_MAX_SEC
 from scriptvedit.text import _build_text_filters, _escape_ffpath
-from scriptvedit.validate import _parse_color_rgb

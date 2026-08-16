@@ -3,6 +3,18 @@
 import os
 import builtins as _builtins
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.effects.basic import move
+from scriptvedit.effects.visual import drop_shadow, outline
+from scriptvedit.expr import Const, _resolve_param
+from scriptvedit.objects import Effect, EffectChain
+from scriptvedit.state import _detect_media_type, _suggest_hint
+from scriptvedit.text import _new_text_object, _text_synthetic_source
+from scriptvedit.validate import _parse_color_rgb, _require_number
+
 
 # --- 合成・コンポジション系Effect ---
 
@@ -19,7 +31,7 @@ def _validate_mask_image(func, image_path):
 
 def _register_material_dep(path):
     """素材をレイヤー依存として登録（レイヤーキャッシュの鮮度検証に載せる）"""
-    proj = Project._current
+    proj = current_project()
     if proj is not None and proj._current_layer_file:
         proj._extra_layer_deps.setdefault(
             proj._current_layer_file, []).append(path)
@@ -180,14 +192,3 @@ def progress_bar(*, height=6, color="white", bg="white@0.2", y=1.0):
     obj = _new_text_object(spec)
     obj._advance = False  # タイムラインを進めない（全体に重ねる表示専用）
     return obj
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.effects.basic import move
-from scriptvedit.effects.visual import drop_shadow, outline
-from scriptvedit.expr import Const, _resolve_param
-from scriptvedit.objects import Effect, EffectChain
-from scriptvedit.project import Project
-from scriptvedit.state import _detect_media_type, _suggest_hint
-from scriptvedit.text import _new_text_object, _text_synthetic_source
-from scriptvedit.validate import _parse_color_rgb, _require_number

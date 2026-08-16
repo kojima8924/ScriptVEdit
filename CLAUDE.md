@@ -16,7 +16,7 @@ Python の DSL で動画を構成し、ffmpeg でレンダリングするライ�
   （タイムライン時間・非進行）/ `a >> b` 直後連結（pause.time() を挟める）。
 - レイヤー .py の中で作った `Object` は exec 中に `Project` へ**自動登録**される。
   `p.objects.append()` の手動追加はしない（render 時のレイヤー再実行で消える）。
-- パッケージ本体は `src/scriptvedit/`（41モジュール）。`pip install -e .` で
+- パッケージ本体は `src/scriptvedit/`（42モジュール）。`pip install -e .` で
   どのディレクトリからでも `from scriptvedit import *`。
 
 ## 2. 最初に読むもの（最重要）
@@ -60,10 +60,46 @@ pytest tests/              # 全テスト（約1分）
 pytest tests/test_real_render.py --realrender  # 実レンダ回帰（選抜。CIと同じ）
 python tests/render_all.py # 実レンダリング全件（重い。出力は tests/output/）
 python scripts/check_unused_imports.py   # 未使用importの検出（CIでも実行）
+python scripts/check_import_cycles.py    # 循環import（SCC）の規模チェック
 ```
 
 未使用 import は CI で失敗にする。存在確認のためだけの import は `# noqa` を
 付けて意図を示す（`__init__.py` の再エクスポートは対象外）。
+
+### import の書き方（循環 import と「末尾 import」）
+
+**scriptvedit 内の import は原則としてファイル先頭に書く。**
+かつて全モジュールが1つの巨大な循環（SCC サイズ 19）に入っており、その回避策として
+「scriptvedit 内 import はファイル末尾に書く」という不文律があったが、
+`context.py` の新設（「現在の Project」を葉モジュールへ分離）で SCC は **7** まで縮んだ。
+先頭 import に戻せるものは戻してある。
+
+末尾 import が残ってよいのは、**同じ SCC に属するモジュール同士の import だけ**:
+
+```
+SCC(7) = cache / ffmpeg / filters.video / objects / plugins / text / timeline
+```
+
+この7つの相互 import のみ、ファイル末尾の
+`# --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛…）---` ブロックに置く。
+それ以外（SCC 外→SCC 内、SCC 内→SCC 外、SCC 外同士）は必ず先頭 import にする。
+
+`python scripts/check_import_cycles.py` が Tarjan で SCC を測り、
+既定の上限（7）を超えたら失敗する。**モジュールを足して循環が育ったらここで落ちる。**
+新しい循環を作りそうになったら、まず「共有している状態や定数を葉モジュール
+（`context.py` / `state.py`）へ出せないか」を検討すること。
+
+- `context.py` は **scriptvedit 内 import ゼロの葉**。`current_project()` /
+  `activate()` / `push_exec()` / `pop_exec()` / `exec_parent()` / `is_project()` を持つ。
+  ここに依存を足すと集約した意味が消えるので、**絶対に import を増やさない**。
+- `Project._current` / `Project._exec_stack` というクラス属性は**廃止**した。
+  現在の Project は `from scriptvedit.context import current_project` で読む。
+- `project.py` は純粋な sink（誰からも import されない）。唯一の例外は
+  `manifest.py`（`_inspect.getmembers(Project)` で型そのものが要る）。
+  `objects.from_project` の型判定は `context.is_project()` 経由にしてあり、
+  project.py がクラス定義直後に `register_project_class(Project)` で注入する。
+- morph（PIL/numpy）等 **optional 依存の遅延 import は関数内のままでよい**
+  （循環回避ではなく依存の遅延ロードが目的なので、この規約の対象外）。
 
 ### スナップショットテスト
 

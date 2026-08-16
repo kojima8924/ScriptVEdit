@@ -2,6 +2,10 @@
 
 import builtins as _builtins
 
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.effects.paths import _MAX_PATH_POINTS, _piecewise_scalar_expr
+from scriptvedit.expr import Const, E, _to_expr, abs, clip, cos, floor, if_, lerp, lt, mod, pow, sin, sqrt
+
 
 # --- イージング関数 ---
 
@@ -382,8 +386,3 @@ def keyframes(*args, easing=None):
         # 区分線形補間の実体は effects/paths の共通実装（生成される Expr は同一）
         return _piecewise_scalar_expr(u, points, easing)
     return _inner
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.effects.paths import _MAX_PATH_POINTS, _piecewise_scalar_expr
-from scriptvedit.expr import Const, E, _to_expr, abs, clip, cos, floor, if_, lerp, lt, mod, pow, sin, sqrt

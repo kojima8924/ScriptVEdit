@@ -79,6 +79,11 @@ jobs:
         # 再発すると読み手が依存関係を誤読するため、CIで止める
         # (__init__.py の再エクスポートと # noqa 付きは除外)
         run: python scripts/check_unused_imports.py
+      - name: 循環 import の検出
+        # 全モジュールが1つの巨大な循環(SCC 19)になっていたのを 7 まで縮めた。
+        # 増えると「末尾 import で回避する」不文律が再び広がり、
+        # 静的解析もIDEも効かなくなるため上限で止める(監査 項目18)
+        run: python scripts/check_import_cycles.py
       - name: テスト実行(カバレッジ付き)
         # --cov-fail-under は「4マトリクスの最小実測 -数ポイント」で置く。
         # 60 は実測(85%前後)から遠すぎてゲートとして機能していなかった(監査 項目23)。

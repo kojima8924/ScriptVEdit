@@ -7,6 +7,21 @@ import math as _math
 import builtins as _builtins
 from importlib import import_module as _import_module
 
+# context は scriptvedit 内 import を持たない葉なので先頭で import できる。
+from scriptvedit.context import current_project
+
+# --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.cache import _sig_key, _src_signature
+from scriptvedit.effects.basic import avolume
+from scriptvedit.ffmpeg import _atomic_write_text
+from scriptvedit.media import _finalize_generated_object
+from scriptvedit.objects import AudioEffect, Object
+from scriptvedit.state import (
+    _ARTIFACT_DIR, _AUDIO_VIZ_KINDS, _ENGINE_VER, _detect_media_type,
+    _suggest_hint)
+from scriptvedit.text import _text_synthetic_source, text
+from scriptvedit.validate import _require_number, _validate_ffmpeg_color
+
 
 # --- オーディオ系ファクトリ ---
 
@@ -29,7 +44,7 @@ def loop(until=None):
 
 def _probe_audio_length(path):
     """音声/動画の長さを取得（取得不能時はNone）"""
-    proj = Project._current
+    proj = current_project()
     if proj is not None:
         info = proj._probe_media(path)
         if info:
@@ -48,8 +63,8 @@ def _validate_audio_source(func, path):
     media_type = _detect_media_type(path)
     if media_type not in ("audio", "video"):
         raise ValueError(f"{func}: 音声(または動画音声)のみ指定できます: {path}")
-    if media_type == "video" and Project._current is not None:
-        info = Project._current._probe_media(path)
+    if media_type == "video" and current_project() is not None:
+        info = current_project()._probe_media(path)
         if info is not None and not info.get("has_audio", False):
             raise ValueError(
                 f"{func}: 動画に音声ストリームがありません: {path}")
@@ -64,7 +79,7 @@ def audio_sequence(*objs, crossfade=1.0):
     if len(objs) < 2:
         raise ValueError("audio_sequence: 2つ以上の音声を指定してください")
     _require_number("audio_sequence", "crossfade", crossfade, 0.01, None)
-    proj = Project._current
+    proj = current_project()
     sources = []
     input_volumes = []
     linked_subtitles = []
@@ -571,7 +586,7 @@ def audio_viz(source, *, kind="waves", color="white", size=None, duration=None):
             f"audio_viz: kind は "
             f"{'/'.join(repr(k) for k in _AUDIO_VIZ_KINDS)} "
             f"のいずれかです: {kind!r}{hint}")
-    proj = Project._current
+    proj = current_project()
     fps = proj.fps if proj else 30
     dur = duration or _probe_audio_length(source) or 5.0
     if size is not None:
@@ -657,17 +672,3 @@ def beat_sync(audio_source, *, min_bpm=60, max_bpm=200):
     # 並列実行での衝突・書きかけの残留を防ぐ）
     _atomic_write_text(cache_path, json.dumps(result, ensure_ascii=False))
     return result
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.cache import _sig_key, _src_signature
-from scriptvedit.effects.basic import avolume
-from scriptvedit.ffmpeg import _atomic_write_text
-from scriptvedit.media import _finalize_generated_object
-from scriptvedit.objects import AudioEffect, Object
-from scriptvedit.project import Project
-from scriptvedit.state import (
-    _ARTIFACT_DIR, _AUDIO_VIZ_KINDS, _ENGINE_VER, _detect_media_type,
-    _suggest_hint)
-from scriptvedit.text import _text_synthetic_source, text
-from scriptvedit.validate import _require_number, _validate_ffmpeg_color
