@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -27,6 +32,11 @@
     "__cache__/artifacts/subproject/fac389f307b5fe15.webm": {
       "main": [
         "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-stats",
+        "-nostdin",
         "-y",
         "-f",
         "lavfi",
@@ -60,6 +70,11 @@
       "cache": {
         "__cache__/artifacts/checkpoint/ac9b64e5/779aef4bcfcdcafe.png": [
           "ffmpeg",
+          "-hide_banner",
+          "-loglevel",
+          "warning",
+          "-stats",
+          "-nostdin",
           "-y",
           "-i",
           "assets/images/shape_badge.png",

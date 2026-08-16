@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -26,6 +31,11 @@
   "cache": {
     "__cache__/artifacts/web/test19_scene/dc84e02dd85c72a3.webm": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-framerate",
       "30",

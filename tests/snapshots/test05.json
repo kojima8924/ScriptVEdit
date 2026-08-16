@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -34,6 +39,11 @@
   "cache": {
     "__cache__/artifacts/checkpoint/a04e6a90/633867d099f283c3.png": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/images/bg_pattern_tiles.jpg",
@@ -47,6 +57,11 @@
     ],
     "__cache__/artifacts/checkpoint/ad076f7b/d2bb74bcb38952eb.png": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/images/shape_starburst.png",

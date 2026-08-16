@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -24,6 +29,11 @@
   "cache": {
     "__cache__/artifacts/checkpoint/ad076f7b/87ced3ecbc6dd725.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-loop",
       "1",

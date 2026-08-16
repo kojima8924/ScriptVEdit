@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -24,6 +29,11 @@
   "cache": {
     "__cache__/artifacts/morph/ac9b64e5/8118e81c38c6c56a.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-framerate",
       "30",

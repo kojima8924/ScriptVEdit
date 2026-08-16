@@ -36,6 +36,7 @@ __all__ = [
     "Project", "Object", "Transform", "TransformChain", "Effect", "EffectChain",
     "AudioEffect", "AudioEffectChain",
     "VideoView", "AudioView",
+    "FFmpegError",
     # ファクトリ関数
     "resize", "rotate", "crop", "pad", "blur", "eq",
     "scale", "fade", "move", "morph_to", "rotate_to",
@@ -155,7 +156,10 @@ from scriptvedit.easing import (  # noqa: F401
     ease_out_quad, ease_out_quart, ease_out_quint, ease_out_sine, ease_spring, keyframes,
     linear, phase, repeat, sequence_param, staircase, steps
 )
-_preload("scriptvedit.validate", "scriptvedit.ffmpeg")
+_preload("scriptvedit.validate")
+# FFmpegError は利用者が except で捕まえる公開例外（レンダ失敗の原因と
+# 対象オブジェクトを持つ）。ffmpeg モジュールの読み込み順もここで確定する
+from scriptvedit.ffmpeg import FFmpegError  # noqa: F401
 from scriptvedit.cache import (  # noqa: F401
     cache_clear, cache_gc, cache_stats
 )

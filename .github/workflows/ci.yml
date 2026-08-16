@@ -80,11 +80,17 @@ jobs:
         # (__init__.py の再エクスポートと # noqa 付きは除外)
         run: python scripts/check_unused_imports.py
       - name: テスト実行(カバレッジ付き)
-        run: python -m pytest tests/ -q -rs --cov=scriptvedit --cov-report=term --cov-fail-under=60 2>&1 | tee pytest.log
+        # --cov-fail-under は「4マトリクスの最小実測 -数ポイント」で置く。
+        # 60 は実測(85%前後)から遠すぎてゲートとして機能していなかった(監査 項目23)。
+        # 実測(2026-08, Windows/py3.10): Chromium あり 85% / 無し 85% /
+        # gitignore対象の大容量素材も無い最悪構成で 85%。OS 差の余地を見て 80 に置く。
+        # 実測が上がったらこの値も上げる(下げるときは理由をコメントに残すこと)。
+        run: python -m pytest tests/ -q -rs --cov=scriptvedit --cov-report=term --cov-fail-under=80 2>&1 | tee pytest.log
         shell: bash
       - name: 想定外の skip を検知
         # 許可された理由(gitignore対象の大容量素材・edge-tts・VOICEVOX・
-        # Windows での Chromium/Pillow 未導入)以外の skip は失敗にする
+        # Windows での Chromium/Pillow 未導入)以外の skip は失敗にする。
+        # 実レンダテストは skip ではなく deselect されるのでここには出ない。
         shell: bash
         run: |
           python - <<'EOF'
@@ -94,8 +100,11 @@ jobs:
               r"素材 .* が無い環境", r"ffmpeg", r"ffprobe", r"edge-tts",
               r"VOICEVOX", r"Chromium", r"chromium", r"Playwright",
               r"playwright", r"Pillow", r"scipy", r"numpy", r"フォント",
-              r"再生成しました",
           ]
+          # スナップショット再生成モードで CI が回っていないこと(検証の空洞化)
+          if "スナップショットを再生成しました" in log:
+              print("--snapshot-update 由来の skip があります(CI では検証のみ行うこと)")
+              sys.exit(1)
           bad = []
           for line in log.splitlines():
               m = re.match(r"SKIPPED \[\d+\] .*?: (.*)", line.strip())
@@ -105,8 +114,28 @@ jobs:
               print("想定外の skip:")
               print("\n".join(bad))
               sys.exit(1)
-          print("skip はすべて許可リスト内")
+          # skip が増えすぎると「通ったつもり」になるため総数でも縛る
+          m = re.search(r"(\d+) passed", log)
+          passed = int(m.group(1)) if m else 0
+          m = re.search(r"(\d+) skipped", log)
+          skipped = int(m.group(1)) if m else 0
+          total = passed + skipped
+          if total and skipped > total * 0.10:
+              print(f"skip が多すぎます: {skipped}/{total} (10% 超)")
+              sys.exit(1)
+          print(f"skip はすべて許可リスト内 ({skipped}/{total})")
           EOF
+      - name: 実レンダ回帰(選抜)
+        # dry_run では原理的に踏めない経路だけを実 FFmpeg で回す(監査 項目11)。
+        # 全93本は重すぎるので CI では回さない(`--realrender-all` で手元実行)。
+        # Chromium が要る formula 経路を含むため Linux の1マトリクスだけで実行する。
+        if: runner.os == 'Linux' && matrix.python == '3.13'
+        run: python -m pytest tests/test_real_render.py -q -rs --realrender
+      - name: 実レンダ後のキャッシュを掃除
+        # 実レンダでチェックポイントが実体化すると dry_run のコマンドが変わる。
+        # 同一ジョブ内で後続ステップを足したときに黙って壊れないようにする(CLAUDE.md §3)。
+        if: always() && runner.os == 'Linux' && matrix.python == '3.13'
+        run: python -m scriptvedit cache --clear
 
   build:
     runs-on: ubuntu-latest

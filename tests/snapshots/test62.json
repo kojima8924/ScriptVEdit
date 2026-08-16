@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -32,6 +37,11 @@
   "cache": {
     "__cache__/artifacts/checkpoint/294bde45/0457b3f44ce2a0f6.png": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/images/pattern_curtain.png",
@@ -45,6 +55,11 @@
     ],
     "__cache__/artifacts/checkpoint/ac9b64e5/5efe2cbb0f63c3a9.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-loop",
       "1",
@@ -66,6 +81,11 @@
     ],
     "__cache__/artifacts/checkpoint/b00c4c21/0c95bb536d3db37c.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-loop",
       "1",

@@ -94,6 +94,8 @@ def move(*, x=None, y=None, from_x=None, from_y=None, to_x=None, to_y=None,
 
     from_*/to_* を指定すると u による自動 lerp になる。anchor は座標の基準点
     （既定 'center'。有効値は state.py の _PLACEMENT_ANCHORS）。
+    center=中心 / topleft=左上の角 / left・right・top・bottom=その辺の中点。
+    例: anchor='right', x=1.0 で右端にぴったり寄せる（縦は中央）。
     イージングを掛けたいときは x=lambda u: lerp(0.2, 0.8, ease_out_quad(u))
     のように x/y の式で書く（move は easing 引数を取らない）。
     """

@@ -211,8 +211,10 @@ def transition(obj_a, obj_b, kind="fade", duration=1.0):
 
 
 def video_sequence(*objs, transition="fade", t_dur=0.5):
-    """複数の動画クリップを xfade（+全クリップに音声があれば acrossfade）で
-    連結した1本の合成Objectを生成する（slideshowの動画版・キャッシュ生成物）。
+    """複数の動画クリップを xfade で連結した1本の合成Objectを生成する。
+
+    slideshow の動画版（キャッシュ生成物）。全クリップに音声があれば
+    acrossfade で音声も連結する。
 
     objs: 動画Object または動画パス文字列（2つ以上）。素のObjectのみ
     （Transform/Effect適用済みは先に compute() で素材化する）。

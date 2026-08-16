@@ -8,6 +8,7 @@
 - 非対応形式/部分レンダとの併用時のフォールバック
 - 実ffmpegでの結合スモーク（ffmpeg/ffprobe があるときのみ）
 """
+import json
 import os
 import shutil
 import subprocess
@@ -63,7 +64,9 @@ def _mock_run(monkeypatch):
     """_run_ffmpeg を差し替えてコマンドを記録し、出力ファイルだけ作る"""
     calls = []
 
-    def fake_run(cmd, timeout=None):
+    def fake_run(cmd, timeout=None, **kwargs):
+        # 実装側の追加キーワード(context= 等)も受ける。署名変更でモックが壊れると
+        # 「実装の失敗」ではなく「モックの失敗」を報告してしまうため
         calls.append(list(cmd))
         out = cmd[-1]
         # 連番PNG等は置換不要（本テストでは単一ファイル出力のみ扱う）
@@ -268,3 +271,103 @@ def test_parallel_real_render_frame_count(tmp_path):
         return int(out.stdout.strip())
 
     assert frames(seq) == frames(par) == 50
+
+
+# --- 実ffmpegでの画素一致・チャプター・失敗系（監査項目24） ---
+#
+# parallel.py の docstring が主張する中核の性質（背景のPTSを+t0し全フィルタ
+# 評価後に-t0で戻せば各チャンクは全編レンダと同一フレームになる）は、コマンド
+# 文字列のモック検証では確かめられない。ここで実画素を比較して固定する。
+
+_HAS_FFMPEG = (shutil.which("ffmpeg") is not None
+               and shutil.which("ffprobe") is not None)
+
+
+def _require_font():
+    from scriptvedit.text import _resolve_font
+    try:
+        _resolve_font(None)
+    except FileNotFoundError as exc:
+        pytest.skip(str(exc))
+
+
+def _build_moving_project(tmp_path):
+    """160x90/10fps/3秒。前半・後半に1つずつ動くテキストを置く
+
+    総尺3秒 × parallel=3 で境界は t=1.0 / t=2.0。境界をまたぐ move と、
+    境界の前後で切り替わる enable の両方を1本で踏む。
+    """
+    p = sv.Project()
+    p.configure(width=160, height=90, fps=10, background_color="#101820")
+    body = (
+        "from scriptvedit import *\n"
+        "a = text('AAA', size=20, color='white')\n"
+        "a.time(1.5) <= move(from_x=0.1, from_y=0.2, to_x=0.9, to_y=0.8)\n"
+        "b = text('BBB', size=20, color='yellow')\n"
+        "b.time(1.5) <= move(from_x=0.9, from_y=0.2, to_x=0.1, to_y=0.8)\n")
+    p.layer(_write_layer(tmp_path, "l_pixels.py", body), priority=10)
+    return p
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg/ffprobe が無い環境ではスキップ")
+def test_parallel_matches_sequential_pixels(tmp_path):
+    """逐次レンダと並列レンダのフレームが（境界前後も含めて）一致すること"""
+    pytest.importorskip("numpy", reason="numpy が無い環境（tools extras）")
+    pytest.importorskip("PIL", reason="Pillow が無い環境（tools extras）")
+    _require_font()
+    from scriptvedit import testkit
+
+    seq = str(tmp_path / "seq.mp4")
+    par = str(tmp_path / "par.mp4")
+    _build_moving_project(tmp_path).render(seq)
+    _build_moving_project(tmp_path).render(par, parallel=3)
+
+    # チャンク境界(1.0/2.0)の直前・直後を必ず含む
+    for at in (0.0, 0.9, 1.0, 1.1, 1.5, 2.0, 2.9):
+        a = testkit.extract_frame(seq, at)
+        b = testkit.extract_frame(par, at)
+        score = testkit.ssim(a, b)
+        assert score > 0.99, f"t={at}s のフレームが一致しません (SSIM={score:.4f})"
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg/ffprobe が無い環境ではスキップ")
+def test_parallel_real_render_writes_chapters(tmp_path):
+    """marker がある並列レンダで FFMETADATA が実際に埋め込まれること"""
+    _require_font()
+    out = str(tmp_path / "chap.mp4")
+    p = _build_moving_project(tmp_path)
+    p.marker(0, "イントロ")
+    p.marker(1.5, "本編")
+    p.render(out, parallel=2)
+
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_chapters", "-of", "json", out],
+        capture_output=True, text=True, timeout=120)
+    chapters = json.loads(probe.stdout)["chapters"]
+    titles = [c.get("tags", {}).get("title") for c in chapters]
+    assert titles == ["イントロ", "本編"], probe.stdout
+
+
+def test_parallel_reports_failing_chunk(tmp_path, monkeypatch):
+    """チャンクの1本が失敗したら、どのジョブが落ちたかを名指しで報告する"""
+    def fake_run(cmd, timeout=None, **kwargs):
+        out = cmd[-1]
+        if os.path.basename(out).startswith("chunk_001"):
+            raise RuntimeError("わざと失敗")
+        with open(out, "wb"):
+            pass
+
+    monkeypatch.setattr("scriptvedit.parallel._run_ffmpeg", fake_run)
+    with pytest.raises(RuntimeError, match="並列レンダの chunk1"):
+        _build_project(tmp_path).render(str(tmp_path / "o.mp4"), parallel=2)
+
+
+def test_parallel_falls_back_when_too_few_frames(tmp_path, capsys):
+    """総フレーム数が分割に足りないときは通知して従来レンダへ落ちる"""
+    from scriptvedit.parallel import _parallel_chunk_count
+
+    p = _build_project(tmp_path)
+    p.duration = 0.05          # 10fps → 総1フレーム＝分割不能
+    p.fps = 10
+    assert _parallel_chunk_count(p, 4, str(tmp_path / "o.mp4")) == 1
+    assert "従来レンダ" in capsys.readouterr().out

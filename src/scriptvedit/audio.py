@@ -12,6 +12,7 @@ from importlib import import_module as _import_module
 
 def duck_under(other, *, ratio=8, threshold=0.05, attack=20, release=250):
     """sidechaincompress で other（ナレーション等）再生中に自音量を下げるAudioEffect。
+
     other は同じProjectに存在する音声Objectを指定する。"""
     if not isinstance(other, Object):
         raise TypeError(f"duck_under: other は音声Objectを指定してください: {type(other)}")
@@ -21,6 +22,7 @@ def duck_under(other, *, ratio=8, threshold=0.05, attack=20, release=250):
 
 def loop(until=None):
     """aloop で音声を until 時刻までループさせるAudioEffect。
+
     until 省略時は Project.duration までループする。"""
     return AudioEffect("loop", until=until)
 
@@ -55,6 +57,7 @@ def _validate_audio_source(func, path):
 
 def audio_sequence(*objs, crossfade=1.0):
     """複数の音声を acrossfade で連結した1つの音声Objectを生成（キャッシュ生成物）。
+
     objs は音声Object、Narration、または音声パス文字列（2つ以上）。
     Narrationを渡すと字幕もcrossfade込みの相対時刻へ配置し、返却Objectを
     数値時刻へ ``@`` した際に字幕も一緒に移動する。"""
@@ -196,6 +199,7 @@ def audio_sequence(*objs, crossfade=1.0):
 
 def sfx(source, at, *, volume=1.0):
     """同一音源を複数時刻(at)に配置した1つの音声Objectを生成（adelay+amix合成）。
+
     at は秒のリスト。生成Objectは開始0でタイムラインに配置する想定。"""
     _validate_audio_source("sfx", source)
     if not isinstance(at, (list, tuple)) or len(at) == 0:
@@ -557,13 +561,16 @@ def narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
 
 def audio_viz(source, *, kind="waves", color="white", size=None, duration=None):
     """音声を showwaves/showspectrum/showcqt で可視化した映像Objectを生成（キャッシュ生成物）。
+
     kind: 'waves' | 'spectrum' | 'cqt'。"""
     _validate_audio_source("audio_viz", source)
     color = _validate_ffmpeg_color("audio_viz", color)
-    if kind not in ("waves", "spectrum", "cqt"):
-        hint = _suggest_hint(str(kind), ("waves", "spectrum", "cqt"))
+    if kind not in _AUDIO_VIZ_KINDS:
+        hint = _suggest_hint(str(kind), _AUDIO_VIZ_KINDS)
         raise ValueError(
-            f"audio_viz: kind は 'waves'/'spectrum'/'cqt': {kind!r}{hint}")
+            f"audio_viz: kind は "
+            f"{'/'.join(repr(k) for k in _AUDIO_VIZ_KINDS)} "
+            f"のいずれかです: {kind!r}{hint}")
     proj = Project._current
     fps = proj.fps if proj else 30
     dur = duration or _probe_audio_length(source) or 5.0
@@ -659,6 +666,8 @@ from scriptvedit.ffmpeg import _atomic_write_text
 from scriptvedit.media import _finalize_generated_object
 from scriptvedit.objects import AudioEffect, Object
 from scriptvedit.project import Project
-from scriptvedit.state import _ARTIFACT_DIR, _ENGINE_VER, _detect_media_type, _suggest_hint
+from scriptvedit.state import (
+    _ARTIFACT_DIR, _AUDIO_VIZ_KINDS, _ENGINE_VER, _detect_media_type,
+    _suggest_hint)
 from scriptvedit.text import _text_synthetic_source, text
 from scriptvedit.validate import _require_number, _validate_ffmpeg_color

@@ -54,8 +54,11 @@ def mask_wipe(image_path, progress=None):
 
 
 def opacity(value):
-    """不透明度Effect。定数(0〜1)は colorchannelmixer（高速）、
-    Expr/lambda は geq による live アニメーション対応。"""
+    """不透明度Effect。value は 0〜1（0=完全透明 / 1=不透明）。
+
+    定数は colorchannelmixer（高速）、Expr/lambda は geq による
+    live アニメーションになる。
+    """
     v = _resolve_param(value)
     if isinstance(v, Const):
         _require_number("opacity", "value", v.value, 0.0, 1.0)

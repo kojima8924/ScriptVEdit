@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -30,6 +35,11 @@
   "cache": {
     "__cache__/artifacts/checkpoint/294bde45/c79cb892f279f7b2.png": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/images/pattern_curtain.png",
@@ -43,6 +53,11 @@
     ],
     "__cache__/artifacts/checkpoint/ac9b64e5/e8617f336c4e9a5d.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-loop",
       "1",
@@ -64,6 +79,11 @@
     ],
     "__cache__/artifacts/layer/test14_maku/75737667ba25f588.webm": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-f",
       "lavfi",

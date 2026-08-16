@@ -65,21 +65,43 @@ def _reserved_plugin_names():
     return _RESERVED_NAMES_CACHE[0]
 
 
+def _builder_bytecode_ffp(builder):
+    """ビルダー関数のバイトコード指紋（"bc-" + sha256[:16]）を返す。
+
+    定義元ファイルを読めないとき（REPL / exec(<文字列>) / zip 同梱 / 権限）の
+    フォールバック。以前はここが定数 "inline" だったため、
+      * プラグイン本体を書き換えても鍵が変わらず古い焼き込みが黙って再利用される
+      * 全プラグインが同じ鍵成分を共有する
+    という二重の穴になっていた（監査 項目22b）。co_code と co_consts を混ぜる
+    ことで、ビルダーの実装が変われば鍵も変わる。由来が判別できるよう "bc-" を
+    前置する（ファイル指紋と混同しないため）。
+    """
+    code = getattr(builder, "__code__", None)
+    if code is None:
+        # 関数以外（呼び出し可能オブジェクト等）は型名+qualnameで代替する
+        material = f"{type(builder)!r}:{getattr(builder, '__qualname__', '')}"
+    else:
+        material = repr((code.co_code, code.co_consts, code.co_names,
+                         code.co_varnames))
+    digest = hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
+    return "bc-" + digest[:16]
+
+
 def _plugin_code_ffp(builder):
     """プラグイン定義ファイルの内容ハッシュ（sha256[:16]）を返す。
 
     素材の指紋(_file_fingerprint)と同じ内容ハッシュ方式。プラグインを書き換えた時
     だけキャッシュを無効化し、コピー/チェックアウトでmtimeが変わっただけの再生成は
-    避ける。取得不能なら "inline" を返す。
+    避ける。ファイルを読めない場合はビルダーのバイトコード指紋へ落とす。
     """
     path = getattr(getattr(builder, "__code__", None), "co_filename", None)
     if not path or not os.path.exists(path):
-        return None, "inline"
+        return None, _builder_bytecode_ffp(builder)
     try:
         with open(path, "rb") as f:
             data = f.read()
     except OSError:
-        return path, "inline"
+        return path, _builder_bytecode_ffp(builder)
     return path, hashlib.sha256(data).hexdigest()[:16]
 
 

@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -31,6 +36,11 @@
   "cache": {
     "__cache__/artifacts/checkpoint/3177c556/73ae0dd1fd03fcd2.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/video/guitar_noaudio.mp4",

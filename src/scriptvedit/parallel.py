@@ -111,18 +111,22 @@ def _render_parallel(project, output_path, n, timeout):
         times = {}
         errors = []
 
-        def _run_job(name, cmd):
+        def _run_job(name, cmd, context):
             jt0 = _time.perf_counter()
-            _run_ffmpeg(cmd, timeout=timeout)
+            _run_ffmpeg(cmd, timeout=timeout, context=context)
             times[name] = _time.perf_counter() - jt0
 
         workers = n_eff + (1 if audio_cmd is not None else 0)
         with _futures.ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {}
             if audio_cmd is not None:
-                futs[ex.submit(_run_job, "audio", audio_cmd)] = "audio"
+                futs[ex.submit(_run_job, "audio", audio_cmd,
+                               "並列レンダの音声レグ（全編1本）")] = "audio"
             for i, ccmd in enumerate(chunk_cmds):
-                futs[ex.submit(_run_job, f"chunk{i}", ccmd)] = f"chunk{i}"
+                ctx = (f"並列レンダの chunk{i}: フレーム"
+                       f"[{bounds[i]}, {bounds[i + 1]}) "
+                       f"t=[{bounds[i] / fps:.3f}s, {bounds[i + 1] / fps:.3f}s)")
+                futs[ex.submit(_run_job, f"chunk{i}", ccmd, ctx)] = f"chunk{i}"
             for fut in _futures.as_completed(futs):
                 try:
                     fut.result()
@@ -150,7 +154,8 @@ def _render_parallel(project, output_path, n, timeout):
         run_cmd = list(mux_cmd)
         run_cmd[-1] = tmp_path
         try:
-            _run_ffmpeg(run_cmd, timeout=timeout)
+            _run_ffmpeg(run_cmd, timeout=timeout,
+                        context=f"チャンクの結合(concat)と音声mux: {final_path}")
             os.replace(tmp_path, final_path)
         finally:
             try:
@@ -162,12 +167,17 @@ def _render_parallel(project, output_path, n, timeout):
     return n_eff
 
 
-def _build_chunk_ffmpeg_cmd(project, chunk_path, k0, k1, threads):
+def _build_chunk_ffmpeg_cmd(project, chunk_path, k0, k1, threads,
+                            *, fmt=None, out_opts=None):
     """フレーム区間[k0, k1)の映像チャンクをレンダするffmpegコマンドを構築する。
 
     フィルタ式は全編レンダと同一（絶対時刻t基準）。背景PTSの+t0シフトと
     末尾の-t0戻し、各オブジェクトのhead_trimだけがチャンク固有の差分。
-    チャンクは常に音声なしのh264（音声は_build_audio_leg_cmdで別レンダ）。
+    チャンクは常に音声なし（音声は_build_audio_leg_cmdで別レンダ）。
+
+    fmt / out_opts はサムネイル抽出（preview.py）との共有のための引数:
+      fmt      … _encode_args へ渡す出力形式（既定: 音声なしh264チャンク）
+      out_opts … 出力パス直前のオプション（既定: -t <尺> -frames:v <枚数>）
     """
     fps = project.fps
     nf = k1 - k0
@@ -226,7 +236,7 @@ def _build_chunk_ffmpeg_cmd(project, chunk_path, k0, k1, threads):
         filter_parts.append(f"{video_map}{_DRAFT_SCALE_FILTER}[chdraft]")
         video_map = "[chdraft]"
 
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    cmd = ["ffmpeg", "-y"]
     cmd.extend(inputs)
     if filter_parts:
         cmd.extend(["-filter_complex", ";".join(filter_parts)])
@@ -235,12 +245,15 @@ def _build_chunk_ffmpeg_cmd(project, chunk_path, k0, k1, threads):
         cmd.extend(["-map", video_map])
     else:
         cmd.extend(["-map", "0:v"])
-    fmt_chunk = {"kind": "h264", "alpha": False, "has_audio": False,
-                 "output_path": chunk_path}
+    fmt_chunk = fmt or {"kind": "h264", "alpha": False, "has_audio": False,
+                        "output_path": chunk_path}
     cmd.extend(project._encode_args(fmt_chunk, False))
     cmd.extend(["-threads", str(threads)])
-    # -t に加えて -frames:v で正確なフレーム数を保証（浮動小数の防波堤）
-    cmd.extend(["-t", str(dur), "-frames:v", str(nf), chunk_path])
+    if out_opts is None:
+        # -t に加えて -frames:v で正確なフレーム数を保証（浮動小数の防波堤）
+        out_opts = ["-t", str(dur), "-frames:v", str(nf)]
+    cmd.extend(out_opts)
+    cmd.append(chunk_path)
     return cmd
 
 
@@ -269,8 +282,7 @@ def _build_concat_mux_cmd(list_path, audio_path, meta_path, out_path):
     映像・音声とも再エンコードなし（-c copy）。各チャンクはIDRフレーム
     始まりのMP4なのでconcat demuxerで無劣化結合できる。
     """
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-           "-f", "concat", "-safe", "0", "-i", list_path]
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path]
     next_idx = 1
     a_idx = None
     m_idx = None

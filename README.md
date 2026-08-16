@@ -1466,15 +1466,16 @@ pytest tests/test_errors.py -k plugin     # 名前で絞り込み
 pytest tests/test_snapshot.py --snapshot-update   # スナップショット再生成
 ```
 
-pytest 無しでもスクリプト直接実行できる。
+実レンダリング（dry_run では踏めない経路の検証）は既定で除外されており、明示的に有効化する。
 
 ```
-python tests/test_snapshot.py             # スナップショット一式
-python tests/test_snapshot.py --update    # スナップショット再生成
-python tests/test_errors.py               # エラーケース一式（件数は tests/test_errors.py 参照）
-python tests/render_all.py                # 実レンダリング（重い）
+pytest tests/test_real_render.py --realrender      # 選抜（CI と同じ）
+pytest tests/test_real_render.py --realrender-all  # 全件（重い）
+python tests/render_all.py                # 従来のランナー（全件）
 python tests/render_all.py test01 test75  # 指定のみ
 ```
+
+テストプロジェクトの定義は `tests/projects.py` が単一の正で、スナップショットと実レンダの両方がそこを参照する。
 
 依存コマンド、edge-tts またはそのネットワーク、gitignore 対象の大容量素材が無い
 環境では、対象テストだけを

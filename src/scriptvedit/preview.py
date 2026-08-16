@@ -18,6 +18,8 @@ from scriptvedit.validate import _require_number
 # project.py と同じシャドウを再現する: 素の max/min は Expr 対応版
 # （builtins へ変えると挙動が変わるため、この import を外さないこと）
 from scriptvedit.expr import max, min
+# サムネイルは並列レンダのチャンク生成器を1フレーム幅で再利用する（監査 項目19）
+from scriptvedit.parallel import _build_chunk_ffmpeg_cmd
 
 
 def thumbnail(project, at, out, *, timeout=600, source=None):
@@ -90,7 +92,8 @@ def _extract_source_frame(source, at, out, *, timeout=600):
     ]
     print(f"完成動画からサムネイル抽出 @{at}s: {out}")
     try:
-        _run_ffmpeg(cmd, timeout=timeout)
+        _run_ffmpeg(cmd, timeout=timeout,
+                    context=f"完成動画からのサムネイル抽出 @{at}s: {source}")
         if not os.path.isfile(tmp_out) or os.path.getsize(tmp_out) <= 0:
             raise RuntimeError(
                 f"フレーム抽出結果が生成されませんでした: {out}")
@@ -120,16 +123,45 @@ def _prepare_thumbnail_graph(project):
     project._ensure_checkpoints()
 
 
+def _thumbnail_frame_index(project, at):
+    """at 秒に対応するCFRフレーム番号を返す（storyboard と同一の丸め規約）。
+
+    旧実装の出力側 -ss は「pts が at 以上の最初のフレーム」を採用したので
+    ceil。総尺の外へ出ないよう実在する最終フレームへクランプする。
+    """
+    fps = float(project.fps)
+    index = _builtins.max(0, int(_math.ceil(float(at) * fps - 1e-9)))
+    total = project.duration
+    if total:
+        last_index = _builtins.max(
+            0, int(_math.ceil(float(total) * fps - 1e-9)) - 1)
+        index = _builtins.min(index, last_index)
+    return index
+
+
+def _build_thumbnail_cmd(project, at, out):
+    """準備済みグラフから1フレームだけを取り出すffmpegコマンドを組む。"""
+    k0 = _thumbnail_frame_index(project, at)
+    fmt = {"kind": "thumb", "alpha": False, "has_audio": False,
+           "output_path": out}
+    return k0, _build_chunk_ffmpeg_cmd(
+        project, out, k0, k0 + 1, 1,
+        fmt=fmt, out_opts=["-frames:v", "1", "-update", "1"])
+
+
 def _extract_frame(project, at, out, *, timeout=600):
-    """準備済みグラフに対し -ss + -frames:v 1 で1フレームだけ抽出する。"""
-    project._thumbnail_at = float(at)
-    try:
-        cmd = project._build_ffmpeg_cmd(out)
-        print(f"サムネイル抽出 @{at}s: {out}")
-        print(f"  ffmpeg {' '.join(cmd[1:])}")
-        _run_ffmpeg(cmd, timeout=timeout)
-    finally:
-        project._thumbnail_at = None
+    """準備済みグラフから1フレームだけ抽出する（チャンク方式）。
+
+    旧実装は全尺グラフを組み、出力側 -ss で at までのフレームを捨てていた。
+    出力側 -ss はフィルタ通過後に捨てるだけなので、合成は t=0 から at まで
+    全部走る（40秒・字幕20本の終盤で実測 16.8s）。並列レンダのチャンク生成と
+    同じ「背景PTSを +t0 シフトし、可視オブジェクトだけを重いフィルタへ通す」
+    経路を1フレーム幅で使う（同 0.24s / 出力PNGは sha256 一致）。
+    """
+    k0, cmd = _build_thumbnail_cmd(project, at, out)
+    print(f"サムネイル抽出 @{at}s (frame {k0}): {out}")
+    _run_ffmpeg(cmd, timeout=timeout,
+                context=f"サムネイル抽出 @{at}s (frame {k0}) → {out}")
     return out
 
 
@@ -278,7 +310,7 @@ def _extract_storyboard_frames(project, frame_indices, pattern, *, timeout=600):
     try:
         cmd = project._build_ffmpeg_cmd(pattern)
         print(f"絵コンテ一括抽出: {len(frame_indices)}コマ")
-        print(f"  ffmpeg {' '.join(cmd[1:])}")
-        _run_ffmpeg(cmd, timeout=timeout)
+        _run_ffmpeg(cmd, timeout=timeout,
+                    context=f"絵コンテの一括抽出（{len(frame_indices)}コマ）")
     finally:
         project._storyboard_frame_indices = None

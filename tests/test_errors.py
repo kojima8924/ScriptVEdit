@@ -1354,12 +1354,15 @@ def check_show_no_advance():
 
 def check_show_until_with_anchor():
     """show_until がanchor確定後にduration正しくなる"""
+    # show_until は「同時表示」なので基準アイテムより前に置く。後ろに置くと
+    # 開始時刻＝アンカー時刻になって尺0（＝不可視）になるが、それは
+    # tests/test_until_zero_duration.py が RuntimeError として固定している。
     layer_code = (
         'from scriptvedit import *\n'
-        'obj1 = Object(asset("images/shape_badge.png"))\n'
-        'obj1.time(3, name="main") <= move(x=0.5, y=0.5, anchor="center")\n'
         'overlay = Object(asset("images/shape_badge.png"))\n'
         'overlay.show_until("main.end") <= move(x=0.3, y=0.3, anchor="center")\n'
+        'obj1 = Object(asset("images/shape_badge.png"))\n'
+        'obj1.time(3, name="main") <= move(x=0.5, y=0.5, anchor="center")\n'
     )
     temp_path = _tmp_file("_tmp_show_until.py")
     try:
@@ -1370,15 +1373,13 @@ def check_show_until_with_anchor():
         p.layer(temp_path, priority=0)
         p.render("_tmp.mp4", dry_run=True)
         found = [o for o in p.objects if isinstance(o, Object)]
-        overlay = found[-1]
-        # overlay: show_until("main.end") → target=3.0, start=3.0 → dur=max(0, 3.0-3.0)=0
-        # ただし show_until は obj1.time(3) の後に呼ばれるので start_time=3.0
-        # main.end = 3.0, overlay.start = 3.0 → dur = 0.0
-        # → テスト修正: show_until は「同時表示」なので obj1 の前に置くべき
-        # 実際: obj1.time(3) → current=3, overlay.show_until → start=3, dur=max(0,3-3)=0
-        if overlay.duration is not None and overlay.duration >= 0:
-            return True, f"overlay.start={overlay.start_time}, dur={overlay.duration}"
-        return False, f"overlay.duration={overlay.duration}"
+        overlay = found[0]
+        # overlay は show_until なので開始0・非進行のまま main.end=3.0 まで伸びる
+        if overlay.start_time != 0:
+            return False, f"show_until が開始時刻を進めた: start={overlay.start_time}"
+        if overlay.duration != 3.0:
+            return False, f"アンカーまで伸びていない: dur={overlay.duration}"
+        return True, f"overlay.start={overlay.start_time}, dur={overlay.duration}"
     finally:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
@@ -5054,18 +5055,43 @@ def check_move_typo_anchor_rejected():
                          ("anchor", "center"))
 
 
-def check_move_unimplemented_anchor_rejected():
-    """move(anchor='right'): 未実装 anchor → ValueError（topleft へ黙って落ちない）"""
-    return _expect_raise(lambda: move(x=0.9, y=0.5, anchor="right"), ValueError,
-                         ("right", "未実装"))
+def check_move_edge_anchors_accepted():
+    """move(anchor='right' 等): 辺の中点 anchor が受理され、左上へ換算される
+
+    left/right/top/bottom は以前「公称だけで未実装」だったため構築時に
+    ValueError で拒否していた。実装後は受理され、かつ各辺に応じた
+    オフセット（右辺なら幅ぶん・下辺なら高さぶん）が引かれる。
+    """
+    from scriptvedit.filters.video import _build_move_exprs
+    _mk_project()
+    expected = {
+        # anchor: (x式に含まれるべき引き算, y式に含まれるべき引き算)
+        "left":   ("",     "-h/2"),
+        "right":  ("-w",   "-h/2"),
+        "top":    ("-w/2", ""),
+        "bottom": ("-w/2", "-h"),
+    }
+    for a, (want_x, want_y) in expected.items():
+        o = Object(asset("images/shape_badge.png"))
+        o <= move(x=0.9, y=0.5, anchor=a)
+        x_expr, y_expr = _build_move_exprs(o, 0, 3)
+        if want_x and want_x not in x_expr:
+            return False, f"anchor={a}: x式に {want_x} がない: {x_expr}"
+        if not want_x and ("-w/2" in x_expr or "-w)" in x_expr):
+            return False, f"anchor={a}: x式に不要な引き算がある: {x_expr}"
+        if want_y and want_y not in y_expr:
+            return False, f"anchor={a}: y式に {want_y} がない: {y_expr}"
+        if not want_y and ("-h/2" in y_expr or "-h)" in y_expr):
+            return False, f"anchor={a}: y式に不要な引き算がある: {y_expr}"
+    return True, "left/right/top/bottom の4値が実装どおり換算された"
 
 
 def check_path_effects_validate_anchor():
     """anchor 検証は Effect 構築側の共通関門（move系ファクトリ全部に効く）"""
     cases = [
         lambda: move_along([(0, 0), (1, 1)], anchor="cetner"),
-        lambda: path_bezier((0, 0), (0.3, 0.2), (0.6, 0.8), (1, 1), anchor="right"),
-        lambda: throw(0.1, -0.2, anchor="bottom"),
+        lambda: path_bezier((0, 0), (0.3, 0.2), (0.6, 0.8), (1, 1), anchor="rigth"),
+        lambda: throw(0.1, -0.2, anchor="bottm"),
         lambda: inertia(0.1, 0.1, anchor="topleftt"),
     ]
     for fn in cases:
@@ -5236,7 +5262,7 @@ ALL_TESTS += [
     ("resize 正常呼び出し", check_resize_normal_call_ok),
     ("move 未知kwargs拒否", check_move_unknown_kwargs_rejected),
     ("move anchor誤記拒否", check_move_typo_anchor_rejected),
-    ("move anchor未実装拒否", check_move_unimplemented_anchor_rejected),
+    ("move 辺anchor実装", check_move_edge_anchors_accepted),
     ("anchor検証は共通関門", check_path_effects_validate_anchor),
     ("move 正常呼び出し", check_move_normal_call_ok),
     ("anchor 各値は別の式", check_anchor_choices_produce_distinct_exprs),
@@ -5269,23 +5295,28 @@ def test_error_case(name, check):
     assert ok, f"{name}: {msg}"
 
 
-if __name__ == "__main__":
-    print("エラーケーステスト")
-    passed = 0
-    failed = 0
-    skipped = 0
-    for name, fn in ALL_TESTS:
-        try:
-            ok, msg = fn()
-        except pytest.skip.Exception as e:  # 依存不在は skip として集計
-            print(f"  {name}: SKIP - {str(e)[:80]}")
-            skipped += 1
-            continue
-        status = "OK" if ok else "FAIL"
-        print(f"  {name}: {status} - {msg[:80]}")
-        if ok:
-            passed += 1
-        else:
-            failed += 1
-    print(f"\n結果: {passed} passed, {failed} failed, {skipped} skipped")
-    sys.exit(1 if failed else 0)
+def test_all_checks_are_registered():
+    """定義済みの check_* が全て ALL_TESTS に登録されていること（重複なし）
+
+    登録し忘れると「テストを書いたのに一度も実行されない」状態になり、差分上は
+    テストを追加したように見えてしまう（監査項目23-4）。逆に、削除した関数が
+    登録に残っていないことも同時に見る。
+    """
+    with open(os.path.abspath(__file__), encoding="utf-8") as f:
+        source = f.read()
+    defined = set(re.findall(r"^def (check_\w+)", source, re.M))
+    registered = [fn.__name__ for _, fn in ALL_TESTS]
+    duplicated = sorted({n for n in registered if registered.count(n) > 1})
+    assert not duplicated, f"ALL_TESTS に重複登録があります: {duplicated}"
+    missing = sorted(defined - set(registered))
+    assert not missing, (
+        f"ALL_TESTS へ未登録の check があります（一度も実行されません）: {missing}")
+    stale = sorted(set(registered) - defined)
+    assert not stale, f"ALL_TESTS に定義の無い名前が残っています: {stale}"
+
+
+def test_all_check_display_names_are_unique():
+    """ALL_TESTS の表示名が一意であること（pytest の id が衝突しない）"""
+    names = [n for n, _ in ALL_TESTS]
+    duplicated = sorted({n for n in names if names.count(n) > 1})
+    assert not duplicated, f"表示名が重複しています: {duplicated}"

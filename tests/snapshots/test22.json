@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -24,6 +29,11 @@
   "cache": {
     "__cache__/artifacts/checkpoint/ac9b64e5/375081f949abec81.png": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/images/shape_badge.png",
@@ -37,6 +47,11 @@
     ],
     "__cache__/artifacts/checkpoint/ac9b64e5/4a157388858e001b.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-loop",
       "1",

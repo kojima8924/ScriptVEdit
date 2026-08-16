@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -26,6 +31,11 @@
   "cache": {
     "__cache__/artifacts/checkpoint/294bde45/f0600d2784a9d483.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-loop",
       "1",
@@ -47,6 +57,11 @@
     ],
     "__cache__/artifacts/checkpoint/ac9b64e5/24dbf834a131a5c5.png": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/images/shape_badge.png",
@@ -60,6 +75,11 @@
     ],
     "__cache__/artifacts/checkpoint/ac9b64e5/5f2d6de044d5065c.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-loop",
       "1",

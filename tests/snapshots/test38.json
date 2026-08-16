@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -32,6 +37,11 @@
   "cache": {
     "__cache__/artifacts/web/subtitle_box_b5cdcfa0/f33f07cf3dc98b44.webm": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-framerate",
       "30",
@@ -53,6 +63,11 @@
     ],
     "__cache__/artifacts/checkpoint/a04e6a90/633867d099f283c3.png": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/images/bg_pattern_tiles.jpg",

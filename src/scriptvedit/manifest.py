@@ -4,6 +4,10 @@ import re
 import builtins as _builtins
 import inspect as _inspect
 
+# state は他モジュールへ依存しない葉なので先頭で import できる
+# （補助テーブルの宣言でモジュールレベルに値が要るもの）。
+from scriptvedit.state import _AUDIO_VIZ_KINDS
+
 
 # --- ケイパビリティ・マニフェスト（describe） ---
 # 目的: コーディングAIが本体（数千行）を読まずに、使える機能・シグネチャ・制約を
@@ -77,6 +81,84 @@ _MANIFEST_SUMMARIES = {
     "cbrt": "立方根",
     "deg2rad": "度→ラジアン変換",
     "rad2deg": "ラジアン→度変換",
+    # ffmpeg 式へそのまま落ちる数学関数（expr.py。docstring を持たない）。
+    # 角度の単位はすべてラジアン（度で書きたいときは deg2rad を挟む）
+    "sin": "正弦 sin(x)（x はラジアン）",
+    "cos": "余弦 cos(x)（x はラジアン）",
+    "tan": "正接 tan(x)（x はラジアン）",
+    "asin": "逆正弦 asin(x)（戻り値はラジアン）",
+    "acos": "逆余弦 acos(x)（戻り値はラジアン）",
+    "atan": "逆正接 atan(x)（戻り値はラジアン）",
+    "atan2": "2引数の逆正接 atan2(y, x)（戻り値はラジアン）",
+    "sinh": "双曲線正弦 sinh(x)",
+    "cosh": "双曲線余弦 cosh(x)",
+    "tanh": "双曲線正接 tanh(x)",
+    "exp": "指数関数 e^x",
+    "log": "自然対数 ln(x)",
+    "log10": "常用対数 log10(x)",
+    "sqrt": "平方根 √x",
+    "pow": "べき乗 a^b",
+    "abs": "絶対値 |x|",
+    "floor": "床関数（x 以下の最大の整数）",
+    "ceil": "天井関数（x 以上の最小の整数）",
+    "trunc": "0 方向への切り捨て（負数は floor と異なる）",
+    "round": "四捨五入（ffmpeg 式では floor(x+0.5) 相当）",
+    "min": "2値の小さい方",
+    "max": "2値の大きい方",
+    # docstring を持たない Project メソッド（describe が summary 空になっていた）
+    "Project.configure": "出力設定（画面サイズ・fps・背景色・プリセット等）をまとめて指定する。",
+    "Project.render": "タイムラインを1本の動画へ書き出す（dry_run=True なら ffmpeg コマンドだけ返す）。",
+    # クラスエントリの methods 一覧はメソッド名だけで引かれる
+    "configure": "出力設定（画面サイズ・fps・背景色・プリセット等）をまとめて指定する。",
+    "render": "タイムラインを1本の動画へ書き出す（dry_run=True なら ffmpeg コマンドだけ返す）。",
+    "Group": "複数Objectをまとめて同一Transform/Effectを一括適用するプロキシ。",
+}
+
+# 要約（1行目）だけでは足りない補足。docstring が無い／短い名前にだけ宣言する
+# （docstring がある場合は自動で details に載るのでここへは書かない）。
+_MANIFEST_DETAILS = {
+    "Project.configure": (
+        "未知のキーは difflib の「もしかして」つきで ValueError。\n"
+        "preset を指定すると width/height/fps がまとめて設定される"
+        "（個別指定が優先）。"),
+    "Project.render": (
+        "dry_run=True の戻り値は必ず {'main': [...], 'cache': {...}} の dict。\n"
+        "start/end で時間範囲を切り出し、draft=True で低品質高速プレビュー、\n"
+        "alpha=True で透過 webm（from_project のサブレンダに使う）、\n"
+        "strict=True で audit() の warning を RuntimeError にする。"),
+}
+
+# __all__ にある非callableの公開定数（describe の callable 判定から漏れていた）
+_MANIFEST_CONSTANTS = {
+    "pause": {
+        "category": "タイムライン",
+        "summary": "無音・無映像の時間を挿入するファクトリ（タイムラインを進める）。",
+        "signature": "pause.time(seconds) / pause.until(name, offset=0.0)",
+        "details": "pause.time(3) で3秒空ける。pause.until('mark.end') は"
+                   "アンカー時刻まで空ける。a >> pause.time(1) >> b のように"
+                   "直後連結の間にも挟める。",
+        "example": "pause.time(2)\npause.until('intro.end')",
+    },
+    "PI": {
+        "category": "定数",
+        "summary": "円周率 π（Expr の式でそのまま使える float 定数）。",
+        "signature": "PI",
+        "details": "Python の math.pi と同値。Expr の中で math.sin 等を使わず、"
+                   "scriptvedit の sin/cos と PI を組み合わせること。",
+    },
+    "E": {
+        "category": "定数",
+        "summary": "自然対数の底 e（Expr の式でそのまま使える float 定数）。",
+        "signature": "E",
+    },
+    "P": {
+        "category": "定数",
+        "summary": "パーセント記法のヘルパ。`50 % P` で 0.5 を表す。",
+        "signature": "P",
+        "details": "x=50 % P は x=0.5 と同じ（演算子は剰余の % を流用している。"
+                   "`50 * P` ではない）。画面比率を「％で書きたい」ときの糖衣。",
+        "example": "obj <= move(x=50 % P, y=80 % P)",
+    },
 }
 
 # イージング名の日本語化パーツ（30種の要約を自動生成するため）
@@ -102,12 +184,12 @@ _MANIFEST_PARAM_META = {
     ("move", "from_y"): {"type": "number", "default": None, "desc": "開始Y（to_y と併用で自動 lerp）"},
     ("move", "to_x"): {"type": "number", "default": None, "desc": "終了X"},
     ("move", "to_y"): {"type": "number", "default": None, "desc": "終了Y"},
-    # choices は実装（filters/video.py の _build_move_exprs）が実際に区別できる
-    # 値だけを載せる。left/right/top/bottom は未実装で、指定すると構築時に
-    # ValueError になる（state.py の _PLACEMENT_ANCHORS_UNIMPLEMENTED）
+    # choices は実装（filters/video.py の _ANCHOR_OFFSETS）が実際に区別できる
+    # 値だけを載せる。語彙は state.py の _PLACEMENT_ANCHORS が正
     ("move", "anchor"): {"type": "choice", "default": "center",
                          "choices": None,   # → state.py の _PLACEMENT_ANCHORS
-                         "desc": "座標の基準点（center=中心 / topleft=左上）"},
+                         "desc": "座標の基準点。center=中心 / topleft=左上の角 / "
+                                 "left・right・top・bottom=その辺の中点"},
     # trim/atrim は「素材時間の切り出し」。start=2, duration=3 なら素材の 2〜5 秒
     ("trim", "duration"): {"type": "number", "default": None, "min": 0,
                            "desc": "出力する尺（秒。省略時は素材末尾まで）"},
@@ -205,10 +287,107 @@ _MANIFEST_PARAM_META = {
     ("wipe", "direction"): {"type": "choice", "choices": ["left", "right", "up", "down"]},
     ("blend_mode", "mode"): {"type": "choice", "choices": None},   # None → enums から解決
     ("slideshow", "transition"): {"type": "choice", "choices": None},
+    # transition は Object のみ受ける（実装は文字列パスを TypeError で拒否）
+    ("transition", "obj_a"): {"type": "object", "required": True,
+                              "desc": "前半の Object（Transform/Effect 未適用の素材）"},
+    ("transition", "obj_b"): {"type": "object", "required": True,
+                              "desc": "後半の Object（Transform/Effect 未適用の素材）"},
     ("transition", "kind"): {"type": "choice", "choices": None},
     ("video_sequence", "transition"): {"type": "choice", "choices": None},
     ("steps", "jump"): {"type": "choice", "choices": ["start", "end"]},
-    ("audio_viz", "kind"): {"type": "choice", "choices": ["waves", "bars", "cqt"]},
+    # --- 単位が曖昧で誤用しても ffmpeg が正常終了するパラメータ ---
+    # 「画面比率か px か」「+y の向き」「0..1 か 0..255 か」「秒かフレームか」を
+    # 最優先で明記する（throw(vx=200) を px のつもりで書くと被写体が飛ぶ）
+    ("throw", "vx"): {"type": "number", "required": True,
+                      "desc": "初速の横成分（画面幅に対する比率/正規化時間。px ではない）"},
+    ("throw", "vy"): {"type": "number", "required": True,
+                      "desc": "初速の縦成分（画面高に対する比率。+y は画面下向き）"},
+    ("throw", "gravity"): {"type": "number", "default": 1.0,
+                           "desc": "重力加速度（画面高に対する比率。+ で下へ加速）"},
+    ("throw", "x0"): {"type": "number", "default": 0.5, "desc": "開始X（画面比率 0〜1）"},
+    ("throw", "y0"): {"type": "number", "default": 0.5, "desc": "開始Y（画面比率 0〜1）"},
+    ("throw", "anchor"): {"type": "choice", "default": "center", "choices": None,
+                          "desc": "座標の基準点（move と同じ語彙）"},
+    ("inertia", "vx"): {"type": "number", "required": True,
+                        "desc": "初速の横成分（画面幅に対する比率。px ではない）"},
+    ("inertia", "vy"): {"type": "number", "required": True,
+                        "desc": "初速の縦成分（画面高に対する比率。+y は画面下向き）"},
+    ("inertia", "damping"): {"type": "number", "default": 3.0, "min": 0,
+                             "desc": "減衰係数（大きいほど早く止まる。無次元）"},
+    ("inertia", "x0"): {"type": "number", "default": 0.5, "desc": "開始X（画面比率 0〜1）"},
+    ("inertia", "y0"): {"type": "number", "default": 0.5, "desc": "開始Y（画面比率 0〜1）"},
+    ("inertia", "anchor"): {"type": "choice", "default": "center", "choices": None,
+                            "desc": "座標の基準点（move と同じ語彙）"},
+    ("move_along", "points"): {"type": "any", "required": True,
+                               "desc": "[(x, y), ...] の座標列（画面比率 0〜1。px ではない）"},
+    ("move_along", "easing"): {"type": "any", "default": None,
+                               "desc": "u の再マッピング関数（省略時は等速）"},
+    ("move_along", "anchor"): {"type": "choice", "default": "center", "choices": None,
+                               "desc": "座標の基準点（move と同じ語彙）"},
+    ("path_bezier", "anchor"): {"type": "choice", "default": "center", "choices": None,
+                                "desc": "座標の基準点（move と同じ語彙）"},
+    ("perspective_warp", "x0"): {"type": "number", "required": True,
+                                 "desc": "左上隅の移動先X（px。画面比率ではない）"},
+    ("perspective_warp", "y0"): {"type": "number", "required": True,
+                                 "desc": "左上隅の移動先Y（px。+y は画面下向き）"},
+    ("perspective_warp", "x1"): {"type": "number", "required": True,
+                                 "desc": "右上隅の移動先X（px）"},
+    ("perspective_warp", "y1"): {"type": "number", "required": True,
+                                 "desc": "右上隅の移動先Y（px）"},
+    ("perspective_warp", "x2"): {"type": "number", "required": True,
+                                 "desc": "左下隅の移動先X（px）"},
+    ("perspective_warp", "y2"): {"type": "number", "required": True,
+                                 "desc": "左下隅の移動先Y（px）"},
+    ("perspective_warp", "x3"): {"type": "number", "required": True,
+                                 "desc": "右下隅の移動先X（px）"},
+    ("perspective_warp", "y3"): {"type": "number", "required": True,
+                                 "desc": "右下隅の移動先Y（px）"},
+    ("shake", "amplitude"): {"type": "number", "default": 0.02, "min": 0,
+                             "desc": "振れ幅（画面サイズに対する比率。px ではない）"},
+    ("shake", "frequency"): {"type": "number", "default": 10, "min": 0,
+                             "desc": "振動回数（表示尺全体を 1 とした回数。Hz ではない）"},
+    ("scale", "value"): {"type": "expr", "default": 1, "min": 0,
+                         "desc": "拡大率（1.0=等倍。Expr/lambda で時間変化可）"},
+    ("blur", "radius"): {"type": "number", "default": 5, "min": 0,
+                         "desc": "ガウスぼかしの sigma（px 相当。大きいほど強い）"},
+    ("duck_under", "ratio"): {"type": "number", "default": 8, "min": 1,
+                              "desc": "圧縮比（大きいほど深く下がる。無次元）"},
+    ("duck_under", "threshold"): {"type": "number", "default": 0.05,
+                                  "min": 0, "max": 1,
+                                  "desc": "動作を始める入力レベル（0〜1 の振幅。dB ではない）"},
+    ("duck_under", "attack"): {"type": "number", "default": 20, "min": 0,
+                               "desc": "音量を下げ始める速さ（ミリ秒）"},
+    ("duck_under", "release"): {"type": "number", "default": 250, "min": 0,
+                                "desc": "音量を戻す速さ（ミリ秒）"},
+    # Project.configure(**kwargs) の各キー（_CONFIGURE_KEYS。**kwargs なので
+    # シグネチャからは導出できず、宣言しないと params が空になる）
+    ("Project.configure", "width"): {
+        "type": "int", "default": 1920, "min": 1, "desc": "出力の横px"},
+    ("Project.configure", "height"): {
+        "type": "int", "default": 1080, "min": 1, "desc": "出力の縦px"},
+    ("Project.configure", "fps"): {
+        "type": "number", "default": 30, "min": 1, "desc": "フレームレート"},
+    ("Project.configure", "duration"): {
+        "type": "number", "default": None, "min": 0,
+        "desc": "総尺（秒）。省略時はタイムラインから自動決定"},
+    ("Project.configure", "background_color"): {
+        "type": "ffcolor", "default": "black", "desc": "背景色（ffcolor形式）"},
+    ("Project.configure", "preset"): {
+        "type": "choice", "default": None, "choices": None,
+        "desc": "画面サイズ/fpsの一括指定（個別指定が優先）"},
+    ("Project.configure", "encoder"): {
+        "type": "choice", "default": None, "choices": None,
+        "desc": "映像エンコーダ。利用不可なら警告つきで libx264 へフォールバック"},
+    ("Project.configure", "parallel"): {
+        "type": "int", "default": None, "min": 1,
+        "desc": "キャッシュ生成の並列数（時間分割並列は render(parallel=)）"},
+    ("Project.configure", "draft_web_fps"): {
+        "type": "number", "default": None, "min": 1,
+        "desc": "draft レンダ時の web クリップの fps 上限"},
+    # choices は実装（audio.py の audio_viz）と同じ集合を参照する
+    ("audio_viz", "kind"): {"type": "choice", "choices": list(_AUDIO_VIZ_KINDS),
+                            "desc": "可視化方式。waves=波形 / spectrum=スペクトログラム "
+                                    "/ cqt=定Q変換（音階表示）"},
     # 定数しか受け付けない（式にすると FFmpeg 8 で SEGV）
     ("text", "size"): {"type": "int", "desc": "文字サイズpx（定数のみ。式/lambda 不可）"},
     ("typewriter", "size"): {"type": "int", "desc": "文字サイズpx（定数のみ。式/lambda 不可）"},
@@ -220,9 +399,14 @@ _MANIFEST_PARAM_META = {
     ("mask_wipe", "image_path"): {"type": "string", "required": True,
                                   "desc": "グラデーション画像パス（掃引マスク）"},
     ("subtitles", "srt_file"): {"type": "string", "required": True, "desc": ".srt ファイルパス"},
-    ("morph_to", "target"): {"type": "string", "required": True,
-                             "desc": "モーフ先の画像パス or Object"},
-    ("assemble_from", "source"): {"type": "string", "required": True, "desc": "集合元の画像パス"},
+    # 実装（effects/terminal.py）は Object 以外を TypeError で拒否する。
+    # 文字列パスは受け付けない（Object(...) で包んでから渡す）
+    ("morph_to", "target"): {"type": "object", "required": True,
+                             "desc": "モーフ先の画像 Object（パス文字列は不可: "
+                                     "Object('target.png') で包む）"},
+    ("assemble_from", "source"): {"type": "object", "required": True,
+                                  "desc": "集合元の画像 Object（パス文字列は不可: "
+                                          "Object('src.png') で包む）"},
     ("narrate", "text_content"): {"type": "string", "required": True, "desc": "読み上げテキスト"},
     ("voice", "text"): {"type": "string", "required": True, "desc": "読み上げテキスト"},
     # TTS バックエンド（None で自動選択: env SCRIPTVEDIT_TTS_BACKEND → VOICEVOX 起動判定 → edge）
@@ -245,6 +429,18 @@ _MANIFEST_PARAM_META = {
 
 # エントリごとの注記（AI が踏みがちな地雷。constraints の該当分をここにも展開する）
 _MANIFEST_NOTES = {
+    "Project.param": [
+        "型は default から推論する（int/float/bool/str）。解釈できない値は"
+        "既定値へ黙って戻さず ValueError",
+        "どの p.param() にも読まれなかった --param は誤記として ValueError"
+        "（SCRIPTVEDIT_PARAM_* 由来は共有されうるので警告）",
+        "`--param n=v` と `--param=n=v` は同値。`=` の無い指定は ValueError",
+    ],
+    "group": [
+        "返り値は Group（Object ではない）",
+        "time(N) は各メンバーを**順次配置**するのでグループ全体の尺は N 倍になる。"
+        "同時に重ねたいときは stack(N) を使う",
+    ],
     "text": ["size は定数のみ。lambda/Expr を渡すと FFmpeg 8 で SEGV するため拒否される",
              "x/y/alpha は Expr/lambda 可（アニメーション可能）",
              "border=2 の縁取りや shadow=(2, 2) の影で細い文字の可読性を上げられる"],
@@ -258,9 +454,13 @@ _MANIFEST_NOTES = {
     "blend_mode": ["キャンバス全面へパドしてから blend する前提（オブジェクト単位の局所合成ではない）",
                    "live Effect（bakeable 不可）"],
     "morph_to": ["bakeable ops の末尾に1つだけ置ける（終端フレーム生成Effect）",
-                 "ターゲット Object の transforms は無視される（素の source でモーフする）"],
+                 "target は Object のみ（パス文字列は TypeError）。画像 media_type 限定",
+                 "target に Transform/Effect が付いていると ValueError"
+                 "（生成処理は素の source しか読まないため）"],
     "explode_to": ["bakeable ops の末尾に1つだけ置ける（終端フレーム生成Effect）"],
-    "assemble_from": ["bakeable ops の末尾に1つだけ置ける（終端フレーム生成Effect）"],
+    "assemble_from": ["bakeable ops の末尾に1つだけ置ける（終端フレーム生成Effect）",
+                      "source は Object のみ（パス文字列は TypeError）。画像 media_type 限定",
+                      "source に Transform/Effect が付いていると ValueError"],
     "rotate": ["時間依存の式（u を含む式）は不可。時間変化する回転は rotate_to() を使う"],
     "scale": ["pad サイズ決定のため、u のみに依存する数値評価可能な式であること"],
     "narrate": ['backend="voicevox"（既定候補）は VOICEVOX（別プロセス）の起動が必要',
@@ -304,7 +504,7 @@ _MANIFEST_EXAMPLES = {
     "opacity": "obj <= opacity(0.5)",
     "speed": "clip_.time(4) <= speed(2.0)   # 2倍速",
     "reverse": "clip_ <= reverse()",
-    "morph_to": "img <= morph_to('target.png')",
+    "morph_to": "img <= morph_to(Object(asset('images/target.png')))",
     "slideshow": "slideshow(['a.png', 'b.png', 'c.png'], each=3.0, transition='fade')",
     "transition": "transition(obj_a, obj_b, kind='wipeleft', duration=1.0)",
     "keyframes": "img <= scale(keyframes((0, 1.0), (0.5, 1.5), (1, 1.0), easing=ease_in_out_sine))",
@@ -321,6 +521,16 @@ _MANIFEST_EXAMPLES = {
 
 # 既知の制約・落とし穴（トップレベル constraints）
 _MANIFEST_CONSTRAINTS = [
+    {
+        "id": "group_time_is_sequential",
+        "topic": "グループ",
+        "severity": "warning",
+        "applies_to": ["group", "Group"],
+        "text": "group(a, b, c).time(3) は各メンバーを順次配置するため、"
+                "グループ全体の尺は 3 秒ではなく 9 秒（N 倍）になる。"
+                "全メンバーを同時に重ねて 3 秒表示したい場合は "
+                "group(a, b, c).stack(3) を使う。",
+    },
     {
         "id": "text_size_const",
         "topic": "テキスト",
@@ -579,6 +789,14 @@ _MANIFEST_USAGE = {
 }
 
 
+def _brackets_balanced(text):
+    """全角/半角の丸括弧・鉤括弧が閉じているか（説明文の途中切断の検出用）"""
+    for open_c, close_c in (("（", "）"), ("(", ")"), ("「", "」")):
+        if text.count(open_c) != text.count(close_c):
+            return False
+    return True
+
+
 def _manifest_doc_param_descs(doc):
     """docstring から `param: 説明` 形式のパラメータ説明を best-effort で抽出する"""
     out = {}
@@ -587,7 +805,18 @@ def _manifest_doc_param_descs(doc):
     # 行・句読点で区切って「名前: 説明」を拾う（例: "direction: left/right/up/down"）
     segments = []
     for line in doc.splitlines():
-        segments.extend(s for s in re.split(r"[。\n]", line) if s.strip())
+        # 「。」で切ると括弧の途中で切れることがある
+        # （"縁取りの色（ffcolor形式。例 'black'）" → "縁取りの色（ffcolor形式"）。
+        # 括弧が閉じるまで「。」を戻しながら連結する。
+        buf = ""
+        for frag in re.split(r"。", line):
+            buf = f"{buf}。{frag}" if buf else frag
+            if _brackets_balanced(buf):
+                if buf.strip():
+                    segments.append(buf)
+                buf = ""
+        if buf.strip():
+            segments.append(buf)
     for seg in segments:
         m = re.match(r"^\s*([a-z_][a-z0-9_]*(?:\s*[,/]\s*[a-z_][a-z0-9_]*)*)\s*[:：]\s*(.+)$",
                      seg)
@@ -642,6 +871,10 @@ def _manifest_choices(fn_name, pname, meta):
         if pname == "anchor":
             # 実装が実際に区別できる基準点だけを公称する（state.py が正）
             return list(_PLACEMENT_ANCHORS)
+        if pname == "preset":
+            return sorted(_PRESETS)
+        if pname == "encoder":
+            return sorted(_ENCODER_MAP)
     return None
 
 
@@ -741,6 +974,21 @@ def _manifest_summary(name, fn):
         c = _MANIFEST_EASE_CURVES.get(m.group(2), m.group(2))
         return f"イージング関数: {c}カーブの{d}"
     return ""
+
+
+def _manifest_details(name, fn):
+    """docstring の2行目以降（要約に載らない本文）を返す。
+
+    要約は1行目だけなので、単位・前提・落とし穴といった「実際に必要な情報」が
+    describe から丸ごと消えていた（監査項目10）。ここで details として拾う。
+    """
+    doc = _inspect.getdoc(fn) if fn is not None else None
+    if not doc:
+        return ""
+    rest = doc.split("\n", 1)
+    if len(rest) < 2:
+        return ""
+    return rest[1].strip()
 
 
 def _manifest_signature(name, fn):
@@ -845,6 +1093,9 @@ def _manifest_entry(name, fn, kind, *, category=None, bakeable=None,
         "signature": _manifest_signature(name, fn) if fn is not None else name,
         "params": _manifest_params(fn, name) if fn is not None else {},
     }
+    details = _manifest_details(name, fn) or _MANIFEST_DETAILS.get(name, "")
+    if details:
+        entry["details"] = details
     if bakeable is not None:
         entry["bakeable"] = bakeable
     if effect_names:
@@ -871,11 +1122,16 @@ def _manifest_class_entry(name, cls):
     for mname, m in _inspect.getmembers(cls, predicate=_inspect.isroutine):
         if mname.startswith("_"):
             continue
-        methods.append({
+        method = {
             "name": mname,
             "signature": _manifest_signature(mname, m),
             "summary": _manifest_summary(mname, m),
-        })
+        }
+        mdetails = (_manifest_details(mname, m)
+                    or _MANIFEST_DETAILS.get(f"{name}.{mname}", ""))
+        if mdetails:
+            method["details"] = mdetails
+        methods.append(method)
     methods.sort(key=lambda d: d["name"])
     entry = {
         "name": name,
@@ -885,6 +1141,9 @@ def _manifest_class_entry(name, cls):
         "signature": _manifest_signature(name, cls),
         "methods": methods,
     }
+    details = _manifest_details(name, cls)
+    if details:
+        entry["details"] = details
     if name in _MANIFEST_EXAMPLES:
         entry["example"] = _MANIFEST_EXAMPLES[name]
     return entry
@@ -964,6 +1223,26 @@ def describe(kind=None, name=None):
             exprs.append(_manifest_entry(pname, obj, "expr", category=group))
         else:
             factories.append(_manifest_entry(pname, obj, "factory"))
+
+    # __all__ に無いが公開契約に含まれる型（group() の返り値）。
+    # 収載しないと Group.time() の「尺が N 倍」警告が describe から辿れない。
+    classes.append(_manifest_class_entry("Group", Group))
+
+    # __all__ にある非callableの公開定数（pause / PI / E / P）。
+    # callable 判定のループから漏れて、全 example が使うのに未収載だった。
+    for cname, spec in _MANIFEST_CONSTANTS.items():
+        entry = {
+            "name": cname,
+            "kind": "meta",
+            "category": spec.get("category", "メタAPI"),
+            "summary": spec["summary"],
+            "signature": spec.get("signature", cname),
+            "params": {},
+        }
+        for key in ("details", "example"):
+            if spec.get(key):
+                entry[key] = spec[key]
+        metas.append(entry)
 
     # 公開ファクトリを持たない内部操作（grid 等）
     for iname, spec in sorted(_MANIFEST_INTERNAL_OPS.items()):
@@ -1106,7 +1385,7 @@ _MANIFEST_ENTRY_SECTIONS = ("effects", "transforms", "audio_effects", "factories
 
 
 def _manifest_filter_kind(manifest, kind):
-    """--kind でセクションを絞る"""
+    """--kind でセクションを絞る（usage は落とす: 前置きが本体を埋もれさせる）"""
     section = _MANIFEST_KIND_SECTIONS.get(kind)
     if section is None:
         hint = _suggest_hint(str(kind), _MANIFEST_KIND_SECTIONS.keys())
@@ -1114,35 +1393,109 @@ def _manifest_filter_kind(manifest, kind):
             f"describe: 未知の kind '{kind}'。{hint}\n"
             f"有効な kind: {', '.join(sorted(_MANIFEST_KIND_SECTIONS))}")
     out = {k: v for k, v in manifest.items()
-           if k not in _MANIFEST_ENTRY_SECTIONS}
+           if k not in _MANIFEST_ENTRY_SECTIONS and k != "usage"}
     out[section] = manifest[section]
     out["stats"] = {section: len(manifest[section])}
     return out
 
 
+# 部分一致を許す最短クエリ長。これより短いと 'P' が 'Project'/'pip' 等を
+# 巻き込んで絞り込みにならないため、完全一致だけに制限する。
+_MANIFEST_NAME_PARTIAL_MIN = 3
+
+
+def _manifest_name_matches(entry_name, query):
+    """--name のマッチ判定（完全一致 > 末尾要素一致 > 部分一致）"""
+    if entry_name == query or entry_name.split(".")[-1] == query:
+        return True
+    if len(query) < _MANIFEST_NAME_PARTIAL_MIN:
+        return False
+    return query.lower() in entry_name.lower()
+
+
 def _manifest_filter_name(manifest, name):
-    """--name で単一エントリに絞る（見つからなければ suggest 付きエラー）"""
+    """--name でエントリを絞る（部分一致・カンマ区切りの複数指定に対応）。
+
+    usage（約10,000文字の前置き）は落とし、constraints も該当エントリに
+    紐づくものだけに絞る。`--name throw` が 10,753 文字のうち約 10,000 文字を
+    前置きに費やしていた（監査項目10）。
+    """
+    queries = [q.strip() for q in str(name).split(",") if q.strip()]
+    if not queries:
+        raise ValueError("describe: --name が空です（例: --name fade,scale）")
     found = []
+    matched_names = set()
     all_names = []
     for section in _MANIFEST_ENTRY_SECTIONS:
         for e in manifest.get(section, []):
             all_names.append(e["name"])
-            if e["name"] == name or e["name"].split(".")[-1] == name:
+            if any(_manifest_name_matches(e["name"], q) for q in queries):
                 found.append((section, e))
-    if not found:
-        hint = _suggest_hint(str(name), all_names)
-        raise ValueError(f"describe: '{name}' という機能はありません。{hint}")
+                matched_names.add(e["name"])
+    missing = [q for q in queries
+               if not any(_manifest_name_matches(n, q) for n in all_names)]
+    if missing:
+        hint = _suggest_hint(missing[0], all_names)
+        raise ValueError(
+            f"describe: '{missing[0]}' という機能はありません。{hint}")
     out = {k: v for k, v in manifest.items()
-           if k not in _MANIFEST_ENTRY_SECTIONS}
-    # 単一エントリでも該当する制約は残す（AI が地雷を踏まないように）
-    out["constraints"] = [c for c in manifest["constraints"]
-                          if not c["applies_to"]
-                          or any(a == name or a.split(".")[-1] == name
-                                 for a in c["applies_to"])]
+           if k not in _MANIFEST_ENTRY_SECTIONS and k != "usage"}
+
+    # 該当エントリに紐づく制約だけ残す（AI が地雷を踏まないように）
+    def _applies(c):
+        if not c["applies_to"]:
+            return True
+        return any(a in matched_names or a.split(".")[-1] in
+                   {n.split(".")[-1] for n in matched_names}
+                   for a in c["applies_to"])
+    out["constraints"] = [c for c in manifest["constraints"] if _applies(c)]
     for section, e in found:
         out.setdefault(section, []).append(e)
+    # enums も該当エントリが実際に使うものだけへ絞る（全列挙は数千文字ある）
+    used_enum_keys = set()
+    for _section, e in found:
+        for pname, pmeta in e.get("params", {}).items():
+            if pmeta.get("choices") and pname in _MANIFEST_PARAM_ENUM_KEY:
+                used_enum_keys.add(_MANIFEST_PARAM_ENUM_KEY[pname])
+    out["enums"] = {k: v for k, v in manifest.get("enums", {}).items()
+                    if k in used_enum_keys}
     out["stats"] = {"matched": len(found)}
     return out
+
+
+# choices を持つパラメータ名 → enums のキー（md の打ち切り時に参照先を示す）
+_MANIFEST_PARAM_ENUM_KEY = {
+    "mode": "blend_mode",
+    "transition": "xfade_transition",
+    "kind": "xfade_transition",
+    "anchor": "anchor",
+    "preset": "preset",
+    "encoder": "encoder",
+    "cache_quality": "layer_cache_quality",
+    "cache": "layer_cache",
+}
+
+# md の表へ載せる choices の最大件数（超えたら参照先を示して打ち切る）
+_MANIFEST_MD_CHOICES_MAX = 8
+
+
+def _manifest_md_choices(pname, choices, default=None):
+    """md 用に choices を整形する（打ち切りを明示し、既定値は必ず載せる）。
+
+    以前は先頭8件で無言に打ち切っていたため、slideshow(transition=) の
+    57値が8値に見え、しかも既定の 'fade' が候補から漏れていた（監査項目10）。
+    """
+    shown = [str(c) for c in choices[:_MANIFEST_MD_CHOICES_MAX]]
+    rest = len(choices) - len(shown)
+    if rest <= 0:
+        return "/".join(shown)
+    # 既定値が打ち切りで消えると「候補に無い既定値」に見えるので必ず含める
+    if default is not None and str(default) not in shown:
+        shown = shown[:-1] + [str(default)]
+        rest += 1
+    key = _MANIFEST_PARAM_ENUM_KEY.get(pname)
+    where = f"enums.{key} 参照" if key else "describe の enums 参照"
+    return "/".join(shown) + f"/… 他 {rest} 件（{where}）"
 
 
 def _manifest_md_entry(e, lines):
@@ -1159,6 +1512,9 @@ def _manifest_md_entry(e, lines):
     if e.get("summary"):
         lines.append("")
         lines.append(e["summary"])
+    if e.get("details"):
+        lines.append("")
+        lines.append(e["details"])
     if e.get("params"):
         lines.append("")
         lines.append("| 引数 | 型 | 既定 | 必須 | 説明 |")
@@ -1166,7 +1522,7 @@ def _manifest_md_entry(e, lines):
         for k, v in e["params"].items():
             t = v.get("type", "any")
             if v.get("choices"):
-                t += " (%s)" % "/".join(str(c) for c in v["choices"][:8])
+                t += " (%s)" % _manifest_md_choices(k, v["choices"], v.get("default"))
             lines.append("| `%s` | %s | `%r` | %s | %s |" % (
                 k, t, v.get("default"), "○" if v.get("required") else "",
                 v.get("desc", "")))
@@ -1174,6 +1530,9 @@ def _manifest_md_entry(e, lines):
         lines.append("")
         for m in e["methods"]:
             lines.append(f"- `{m['signature']}` — {m.get('summary', '')}")
+            if m.get("details"):
+                for dl in m["details"].splitlines():
+                    lines.append(f"  {dl}")
     if e.get("example"):
         lines.append("")
         lines.append("```python")
@@ -1252,7 +1611,7 @@ from scriptvedit.effects.composite import _BLEND_MODES, _BLEND_MODE_ALIASES
 from scriptvedit.cache import _LAYER_CACHE_QUALITY, _respects_fast_hint
 from scriptvedit.expr import Expr
 from scriptvedit.media import _XFADE_TRANSITIONS
-from scriptvedit.objects import Object
+from scriptvedit.objects import Group, Object
 from scriptvedit.plugins import _EFFECT_PLUGINS, _PLUGIN_PARAM_TYPES
 from scriptvedit.project import Project
 from scriptvedit.state import _BAKEABLE_EFFECTS, _ENCODER_MAP, _PLACEMENT_ANCHORS, _PRESETS, _pkg_all, _pkg_ns, _suggest_hint

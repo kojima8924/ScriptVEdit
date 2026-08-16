@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -33,6 +38,11 @@
   "cache": {
     "__cache__/artifacts/aseq/87d2276c56d03903.m4a": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/audio/bgm_loop.mp3",
@@ -50,6 +60,11 @@
     ],
     "__cache__/artifacts/sfx/816ec1640f8d0d7c.m4a": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/audio/効果音.mp3",

@@ -738,8 +738,9 @@ class Object:
 
     @staticmethod
     def from_project(sub_project, *, cache="auto"):
-        """ネストコンポジション（プリコンポーズ）: サブProjectを透過webm素材化して
-        1つのObjectとして親タイムラインに配置する。
+        """ネストコンポジション: サブProjectを透過webm素材化して1つのObjectにする。
+
+        プリコンポーズ。返った Object は親タイムラインへ通常どおり配置できる。
 
         sub_project: layer() 登録済みの Project。render(alpha=True) 機構で
         透過webmキャッシュ生成物を作り、そのwebmをsourceとするObjectを返す。
@@ -1290,11 +1291,16 @@ class Group:
         return self
 
     def until(self, name, offset=0.0):
+        """各メンバーの尺をアンカー時刻まで伸ばす（Object.until を全員へ委譲）。"""
         for o in self.objects:
             o.until(name, offset=offset)
         return self
 
     def show(self, duration, *, priority=None):
+        """各メンバーを同一開始時刻に重ねて表示する（タイムラインは進めない）。
+
+        タイムラインを duration 進めたい場合は stack() を使う。
+        """
         for o in self.objects:
             o.show(duration, priority=priority)
         return self

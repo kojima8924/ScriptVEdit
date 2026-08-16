@@ -7,7 +7,51 @@ import math as _math
 import warnings
 import builtins as _builtins
 import time as _time
+import threading as _threading
 import concurrent.futures as _futures
+
+
+# _warn の集約リストはレイヤーキャッシュの並列生成スレッドからも触られる。
+# warnings.catch_warnings はプロセスグローバルでスレッドセーフでないため使わず、
+# append だけをロックで保護する（監査 項目8）。
+_WARN_LOCK = _threading.Lock()
+
+
+def _normalize_extra_cmds(value):
+    """中間生成物コマンド辞書へ再帰的に共通の ffmpeg 診断フラグを付ける。
+
+    from_project のサブレンダは値が {"main": [...], "cache": {...}} の
+    入れ子になるため、コマンドのリストだけを見分けて正規化する
+    （dict をそのまま _normalize_ffmpeg_cmd へ渡すとキーのリストに潰れる）。
+    """
+    if isinstance(value, dict):
+        return {k: _normalize_extra_cmds(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return _normalize_ffmpeg_cmd(value)
+    return value
+
+
+def _warn(project, message, *, sticky=False):
+    """警告を warnings.warn で出しつつ、レンダ末尾の [警告] ブロックへ集約する。
+
+    warnings は stderr へ流れるが ffmpeg の出力に埋もれ、Python 既定の
+    フィルタは同一箇所の再出力を抑制する。出力末尾しか読まない利用者・AIには
+    「音声が脱落した」「エンコーダがフォールバックした」等の**内容に影響する
+    警告**が届かないため、レンダ完了時にまとめて再掲する。
+
+    sticky=True: configure() 等レンダパス外で出た警告。次のレンダパス開始で
+    クリアせず、以後のレンダでも再掲する（設定はレンダをまたいで効くため）。
+    """
+    warnings.warn(message, stacklevel=3)
+    if project is None:
+        return
+    attr = "_sticky_warnings" if sticky else "_render_warnings"
+    bucket = getattr(project, attr, None)
+    if bucket is None:
+        return
+    with _WARN_LOCK:
+        if message not in bucket:  # 同一内容は1件にまとめる（再掲のため）
+            bucket.append(message)
 
 
 def _morph_frame_count(fps, dur):
@@ -80,7 +124,6 @@ class Project:
         self.draft_web_fps = 8      # draft時のWeb screenshot上限（None=本番同等）
         self._draft = False         # ドラフトレンダ中フラグ
         self._render_quality = "final"
-        self._thumbnail_at = None   # thumbnail()実行中のみ非None
         self._storyboard_frame_indices = None  # storyboard一括抽出中のframe番号
         # --- レンダパス中にだけ意味を持つフラグ（_begin_render_pass が上書きする）---
         # 「常に存在する属性」と「レンダ中にしか存在しない属性」の境界を
@@ -92,6 +135,8 @@ class Project:
         self._plan_structure = None     # Plan pass のレイヤー構造署名
         self._generated = 0             # レンダ開始時の生成カウンタ基準値
         self._render_planned = {}       # 中間生成物パス → レンダ開始前に存在したか
+        self._render_warnings = []      # このレンダパスで出た警告（末尾で再掲）
+        self._sticky_warnings = []      # レンダパス外（configure等）で出た警告
         # レイヤー実行中に作られた Project は _current を奪わない。
         # 奪うと `sub = Project()` 以降のレイヤー内 Object がサブへ吸われ、
         # 親のタイムラインから無言で消える（監査 項目2）。
@@ -175,9 +220,9 @@ class Project:
         available = _ffmpeg_available_encoders()
         # available が空（検出失敗）の場合は指定を尊重（検出不能≠利用不可）
         if available and cv not in available and encoder != "libx264":
-            warnings.warn(
-                f"エンコーダ '{encoder}' ({cv}) はこのffmpegで利用できません。"
-                f"libx264 にフォールバックします。")
+            _warn(self,
+                  f"エンコーダ '{encoder}' ({cv}) はこのffmpegで利用できません。"
+                  f"libx264 にフォールバックします。", sticky=True)
             encoder = "libx264"
             info = _ENCODER_MAP["libx264"]
             cv = info["cv"]
@@ -445,6 +490,7 @@ class Project:
         self._pending_compute_cmds = {}
         self._render_window = None
         self._render_planned = {}
+        self._render_warnings = []
 
     def _resolve_plan_duration(self):
         """Plan pass（アンカー解決。cache模擬、objects破棄）→総尺確定。
@@ -480,6 +526,9 @@ class Project:
                 self._exec_layer(spec["filename"], spec["priority"])
         self._resolve_anchors()
         self._verify_plan_structure(used_cache_files)
+        # 全レイヤーの実行が終わった時点で、CLI/環境変数から渡されたのに
+        # どのレイヤーからも参照されなかった param を報告する（綴り間違いの検出）
+        check_unconsumed_params(self)
         return used_cache_files
 
     def _probe_media(self, path):
@@ -549,13 +598,13 @@ class Project:
         except FileNotFoundError:
             # 失敗もrender内ではキャッシュ（_reset_runtime_stateでNoneのみ破棄され、
             # renderをまたげば再試行される）
-            warnings.warn(
-                f"ffprobeが見つかりません ({path})。PATHを確認してください。")
+            _warn(self,
+                  f"ffprobeが見つかりません ({path})。PATHを確認してください。")
             self._probe_cache[cache_key] = None
             return None
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError,
                 json.JSONDecodeError, ValueError) as e:
-            warnings.warn(f"メディア情報の取得に失敗 ({path}): {e}")
+            _warn(self, f"メディア情報の取得に失敗 ({path}): {e}")
             self._probe_cache[cache_key] = None
             return None
 
@@ -888,6 +937,9 @@ class Project:
                     raise RuntimeError(
                         f"@ に指定されたアンカーが未定義です: '{fixed}'\n"
                         f"定義済みアンカー: {defined}")
+            # until() が尺0に解決されたものを検出する。**収束後にだけ**呼ぶこと
+            # （固定点反復の途中は尺が一時的に0になりうるため、ループ内だと誤検出する）
+            _check_until_zero_duration(self.objects, self._anchors)
 
     def render(self, output_path, *, dry_run=False, timeout=None,
                start=None, end=None, draft=False, alpha=False, strict=False,
@@ -969,9 +1021,14 @@ class Project:
         if dry_run:
             all_extra = self._collect_all_extra_cmds()
             cmd = self._build_ffmpeg_cmd(output_path)
+            # 実行時に _run_ffmpeg が付ける共通の診断フラグ
+            # （-hide_banner / -loglevel / -nostdin）をここでも同じ規則で付ける。
+            # dry_run の戻り値＝実際に実行されるコマンド、を保つための正規化で、
+            # スナップショットが「実行されない形」を守る事故を防ぐ（監査 項目9）。
             # 常に {"main": 最終コマンド, "cache": {出力パス: 生成コマンド}} を返す
             # （cache が空でも形は同じ。呼び出し側の分岐を不要にする）
-            return {"main": cmd, "cache": all_extra}
+            return {"main": _normalize_ffmpeg_cmd(cmd),
+                    "cache": _normalize_extra_cmds(all_extra)}
 
         # 統計（ヒット/ミス）は生成側の各段が _note_planned_artifact で記録する。
         # 以前はここで _collect_* を空回しして数え、その破壊的な副作用を
@@ -987,13 +1044,11 @@ class Project:
             n_chunks = _render_parallel(self, output_path, n_chunks, timeout)
         else:
             cmd = self._build_ffmpeg_cmd(output_path)
-            print("実行コマンド:")
-            print(f"  ffmpeg {' '.join(cmd[1:])}")
-            print()
+            self._print_render_command(cmd, output_path)
             fmt = self._resolve_output_format(output_path)
             if fmt["kind"] == "pngseq":
                 # 連番は単一パスへ原子的に確定できないため従来どおり直接出力する。
-                _run_ffmpeg(cmd, timeout=timeout)
+                self._run_main_ffmpeg(cmd, output_path, timeout)
             else:
                 # 最終単一出力もキャッシュと同じく、同拡張子の一時パスへ書いてから
                 # 原子的に確定する。timeout/Ctrl+C/ffmpeg失敗では一時ファイルだけを
@@ -1006,7 +1061,7 @@ class Project:
                         "render: ffmpegコマンドの最終出力パスを一時パスへ置換できません")
                 run_cmd[-1] = tmp_path
                 try:
-                    _run_ffmpeg(run_cmd, timeout=timeout)
+                    self._run_main_ffmpeg(run_cmd, output_path, timeout)
                     os.replace(tmp_path, final_path)
                 finally:
                     try:
@@ -1045,6 +1100,25 @@ class Project:
         print(f"[統計] {mode} / 総時間 {elapsed:.2f}s / "
               f"キャッシュ ヒット{cache_hits} ミス{cache_misses} / "
               f"生成した中間ファイル {generated}件")
+        self._print_render_warnings()
+
+    def _print_render_warnings(self):
+        """レンダ中に出た警告を出力末尾へまとめて再掲する（監査 項目8）。
+
+        警告0件なら行ごと出さない。ここに出るのは「レンダは完了したが内容に
+        影響する」ものだけ（音声脱落・エンコーダのフォールバック・尺の
+        フォールバック等）で、出力末尾しか読まなくても異常に気付ける。
+        """
+        warns = list(self._sticky_warnings) + [
+            w for w in self._render_warnings if w not in self._sticky_warnings]
+        if not warns:
+            return
+        print(f"[警告] {len(warns)}件 — レンダは完了しましたが内容に影響します:")
+        for message in warns:
+            lines = str(message).splitlines() or [""]
+            print(f"  ⚠ {lines[0]}")
+            for cont in lines[1:]:
+                print(f"    {cont}")
 
     # --- サムネイル/絵コンテ（実装は preview.py。委譲メソッドは manifest 掲載用）---
 
@@ -1119,28 +1193,27 @@ class Project:
         return findings
 
     def _plan_resolve(self):
-        """Plan pass: 固定点反復でアンカーを解決"""
-        converged = False
-        max_iterations = len(self._layer_specs) + 2
-        for iteration in range(max_iterations):
-            old_anchors = dict(self._anchors)
-            self.objects = []
-            self._layers = []
-            self._mode = "plan"
-            for spec in self._layer_specs:
-                # Plan passではレイヤーキャッシュを使わず常に実行
-                self._exec_layer(spec["filename"], spec["priority"])
-            self._resolve_anchors(check_unresolved=False)
-            if self._anchors == old_anchors and iteration > 0:
-                converged = True
-                break
-        # 収束しなかった場合
-        if not converged and self._anchors:
-            raise RuntimeError(
-                f"アンカー解決が{max_iterations}回の反復で収束しませんでした。"
-                f"循環参照の可能性があります。\n"
-                f"定義済みアンカー: {dict(self._anchors)}"
-            )
+        """Plan pass: レイヤーを1回だけ exec し、アンカーを解決する。
+
+        以前はここに「全レイヤー exec → _resolve_anchors」の外側ループがあり、
+        アンカーが1つも無いプロジェクトでも必ず2周していた（Render pass を
+        含めるとレイヤー .py は計3回 exec）。しかしレイヤー exec 経路
+        （_exec_layer_body）は self._anchors を一切読まない（読むのは
+        _resolve_anchors と viz.py だけ）ので、2周目は同じ構造を作り直す
+        だけの空回しだった（監査 項目13）。
+        アンカーの固定点は _resolve_anchors 内部の反復が担う（循環は
+        _detect_start_after_cycles、非収束は同メソッドの RuntimeError で検出）。
+        副次的に _verify_plan_structure の比較対象が
+        「1回目の exec vs Render pass」になり、初回だけ副作用で構造が変わる
+        非決定的レイヤーをより確実に捕まえられる。
+        """
+        self.objects = []
+        self._layers = []
+        self._mode = "plan"
+        for spec in self._layer_specs:
+            # Plan passではレイヤーキャッシュを使わず常に実行
+            self._exec_layer(spec["filename"], spec["priority"])
+        self._resolve_anchors(check_unresolved=False)
         # 未解決のuntilチェック（診断付き）
         unresolved = []
         for item in self.objects:
@@ -1209,6 +1282,11 @@ class Project:
         for plug in _EFFECT_PLUGINS.values():
             src_file = getattr(plug, "source_file", None)
             if not src_file:
+                # 定義元ファイルを持たないプラグイン（REPL / exec(<文字列>) /
+                # zip 同梱）。以前は continue で依存集合から丸ごと外れ、
+                # ビルダーを書き換えてもレイヤーキャッシュが陳腐化しなかった
+                # （監査 項目22b）。バイトコード指紋を鍵として載せる。
+                meta[f"plugin://{plug.name}"] = getattr(plug, "code_ffp", None)
                 continue
             key = str(src_file).replace("\\", "/")
             try:
@@ -1255,9 +1333,10 @@ class Project:
         cache = spec["cache"]
         if cache == "use":
             if not self._layer_cache_is_fresh(spec):
-                warnings.warn(
-                    f"レイヤーキャッシュの素材が更新されています: {spec['filename']}。"
-                    f"cache='make' で再生成してください（cache='use' 指定のため続行します）。")
+                _warn(self,
+                      f"レイヤーキャッシュの素材が更新されています: {spec['filename']}。"
+                      f"cache='make' で再生成してください"
+                      f"（cache='use' 指定のため続行します）。")
             return True
         if cache == "auto":
             webm_path, _ = self._layer_cache_paths_for(spec)
@@ -1331,7 +1410,7 @@ class Project:
         if audio_sources or unknown_audio_sources:
             if using_legacy_audio_info:
                 details = list(audio_sources) + list(unknown_audio_sources)
-                warnings.warn(
+                _warn(self,
                     f"旧形式のレイヤーキャッシュを再生するため音声が脱落する"
                     f"可能性があります (cache='{spec['cache']}', "
                     f"{spec['filename']}): {', '.join(details)}。"
@@ -1339,14 +1418,14 @@ class Project:
                     f"別レイヤーへ分離してください。")
             elif unknown_audio_sources:
                 details = list(audio_sources) + list(unknown_audio_sources)
-                warnings.warn(
+                _warn(self,
                     f"レイヤーキャッシュを再生しますが、ffprobeで音声の有無を"
                     f"確認できない動画があるため音声が脱落する可能性があります "
                     f"(cache='{spec['cache']}', {spec['filename']}): "
                     f"{', '.join(details)}。"
                     f"音声素材を cache='off' の別レイヤーへ分離してください。")
             else:
-                warnings.warn(
+                _warn(self,
                     f"レイヤーキャッシュを再生するため音声が脱落します "
                     f"(cache='{spec['cache']}', {spec['filename']}): "
                     f"{', '.join(audio_sources)}。"
@@ -1503,7 +1582,7 @@ class Project:
         """
         has_term = any(t == "effect" and op.name in _TERMINAL_FRAME_EFFECTS
                        for t, op in bakeable_ops)
-        if has_term and dur is None:
+        if has_term and not dur:   # None も 0 も不可（0はフレーム0枚になる）
             raise ValueError(
                 f"morph_to/explode_to/assemble_from を含むObject ('{source}') には"
                 f"表示時間の指定が必要です。obj.time(秒数) で duration を設定してください。")
@@ -1534,7 +1613,11 @@ class Project:
         # video + duration未指定 → obj.length() で補完
         if dur is None and is_video:
             dur = obj.length()
-        return dur
+        # 尺0はベイク尺として成立しない（clip((t-start)/0,…) がゼロ除算になる）。
+        # ただし None はここで埋めてはいけない: 呼び出し側の
+        # _require_morph_duration が「morph系に time() が無い」を None で判定して
+        # おり、fallback を入れるとその検査をすり抜ける。救うのは 0 だけ。
+        return dur if dur != 0 else self._resolve_obj_duration(obj)
 
     def _plan_object_checkpoints(self, obj):
         """1つのObjectのチェックポイント計画を構築する（純粋計画・実行しない）。
@@ -1766,14 +1849,21 @@ class Project:
         for step in plan["steps"]:
             if resume_idx is not None and step["sp_idx"] <= resume_idx:
                 continue
-            self._execute_checkpoint_step(step)
+            self._execute_checkpoint_step(step, obj)
         self._apply_checkpoint_final_state(obj, plan["final"])
 
-    def _execute_checkpoint_step(self, step):
+    @staticmethod
+    def _step_context(step, obj):
+        """チェックポイント生成失敗時に「どのオブジェクト起因か」を示す文脈。"""
+        who = "" if obj is None else             f"（素材 {obj.source} / start={obj.start_time}s）"
+        return f"{step['label']}{who} → {step['path']}"
+
+    def _execute_checkpoint_step(self, step, obj=None):
         """計画ステップ1件を実行する（実レンダ専用）。
 
         pre_bake/frame_extract は存在チェックのみで再利用、
         checkpoint/morph/particle は policy="force" なら再生成する（従来判定）。
+        obj は失敗時の診断（どのオブジェクト起因か）にのみ使う。
         """
         path = step["path"]
         kind = step["kind"]
@@ -1788,20 +1878,22 @@ class Project:
             cmd = step["build_cmd"]()
             os.makedirs(os.path.dirname(path), exist_ok=True)
             print(f"{step['label']}: {path}")
-            _run_ffmpeg_to_cache(cmd, path, timeout=600)
+            _run_ffmpeg_to_cache(cmd, path, timeout=600,
+                                 context=self._step_context(step, obj))
             return
         need_render = (step["policy"] == "force") or not os.path.exists(path)
         if not need_render:
             return
         if kind in ("morph", "particle"):
-            self._execute_frames_step(step)
+            self._execute_frames_step(step, obj)
             return
         os.makedirs(os.path.dirname(path), exist_ok=True)
         cmd = step["build_cmd"]()
         print(f"{step['label']}: {path}")
-        _run_ffmpeg_to_cache(cmd, path, timeout=600)
+        _run_ffmpeg_to_cache(cmd, path, timeout=600,
+                             context=self._step_context(step, obj))
 
-    def _execute_frames_step(self, step):
+    def _execute_frames_step(self, step, obj=None):
         """morph/particle 共通: 一時dirへPNG連番を生成しffv1中間へエンコードする。
 
         フレーム生成（PIL）は実レンダでのみ行う（dry_runはプレースホルダの
@@ -1836,7 +1928,8 @@ class Project:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             cmd = self._build_morph_webm_cmd(frame_pattern, path, dur, fps)
             print(f"{step['label']}: {path}")
-            _run_ffmpeg_to_cache(cmd, path, timeout=600)
+            _run_ffmpeg_to_cache(cmd, path, timeout=600,
+                                 context=self._step_context(step, obj))
 
     def _find_resume_point(self, original_source, ops, duration, fps, save_points):
         """force地点より左のauto保存点のみresume候補"""
@@ -1944,8 +2037,11 @@ class Project:
                     obj._render_web_frames(self, frames_dir)
                     cmd = obj._build_web_cmd(self, webm_path, frames_dir)
                     os.makedirs(os.path.dirname(webm_path), exist_ok=True)
-                    print(f"  ffmpeg {' '.join(cmd[1:])}")
-                    _run_ffmpeg_to_cache(cmd, webm_path, timeout=600)
+                    if self._verbose():
+                        print(f"  ffmpeg {' '.join(cmd[1:])}")
+                    _run_ffmpeg_to_cache(
+                        cmd, webm_path, timeout=600,
+                        context=f"Webクリップの生成: {obj._web_source}")
                     print(f"  完了: {webm_path}")
                 finally:
                     # フレーム削除（失敗時も中間フレームを残さない）
@@ -2041,7 +2137,7 @@ class Project:
             details = list(audio_sources) + list(unknown_audio_sources)
             status = ("音声はキャッシュ再生時に脱落します" if not unknown_audio_sources
                       else "音声がキャッシュ再生時に脱落する可能性があります")
-            warnings.warn(
+            _warn(self,
                 f"レイヤーキャッシュ ({spec['filename']}) は映像のみ保存します。"
                 f"{status}: {', '.join(details)}\n"
                 f"回避策: 音声を持つ素材は cache を付けない別レイヤーに分離してください"
@@ -2093,8 +2189,11 @@ class Project:
 
         cmd = self._build_layer_cache_cmd(spec_index, webm_path)
         print(f"キャッシュ生成: {webm_path}")
-        print(f"  ffmpeg {' '.join(cmd[1:])}")
-        _run_ffmpeg_to_cache(cmd, webm_path, timeout=600)
+        if self._verbose():
+            print(f"  ffmpeg {' '.join(cmd[1:])}")
+        _run_ffmpeg_to_cache(
+            cmd, webm_path, timeout=600,
+            context=f"レイヤーキャッシュの生成: {spec['filename']}")
         print(f"  完了: {webm_path}")
 
         # anchors.json書き出し（素材FFPも記録してキャッシュ鮮度検証に使う）
@@ -2166,10 +2265,32 @@ class Project:
             # trim/atrim/atempoを反映した加工後長（チェックポイントベイクと同一基準）
             try:
                 length = obj.length()
-            except Exception:
-                return fallback
+            except Exception as e:
+                # 以前はここで全例外を握り潰して 5 秒に落としていた。捨てていたのは
+                # 「メディアの長さを取得できません」「length()にはアクティブな
+                # Projectが必要です」等、原因も対処も明確な例外で、壊れた素材や
+                # ffprobe 不在が警告すら無く「5秒の素材」になっていた（項目8b）。
+                if _is_pending_cache_path(obj.source):
+                    return fallback  # 未生成の予定パス（dry_run の正常系）
+                if self._dry_run:
+                    # dry_run は素材が揃っていなくても構造を返せるべきなので続行
+                    # するが、黙って 5 秒にはせず [警告] へ記録する
+                    _warn(self,
+                          f"素材の尺を取得できないため {fallback} 秒とみなします: "
+                          f"{obj.source}（{e}）")
+                    return fallback
+                raise RuntimeError(
+                    f"尺を解決できません: {obj.source}（start={obj.start_time}）。"
+                    f"time() で明示的な尺を指定するか、素材と ffprobe を"
+                    f"確認してください") from e
             if length:
                 return length
+            if not self._dry_run and not _is_pending_cache_path(obj.source):
+                # probe は成功したが尺が取れない（0/None）。u正規化の分母と
+                # ベイク基準の両方に効くので、黙って 5 秒にはしない
+                _warn(self,
+                      f"素材の尺を取得できないため {fallback} 秒とみなします: "
+                      f"{obj.source}")
         return fallback
 
     # --- 時間分割並列レンダ（実装と設計原理は parallel.py） ---
@@ -2181,10 +2302,14 @@ class Project:
         return _parallel_chunk_bounds(duration, fps, n)
 
     def _resolve_output_format(self, output_path):
-        """出力パスの拡張子・draft/alpha/thumbnail設定から出力形式を決定する。
+        """出力パスの拡張子・draft/alpha/絵コンテ設定から出力形式を決定する。
+
+        "thumb"（サムネイル1枚）はここでは返さない。サムネイルは全尺グラフを
+        組まずチャンク生成器で1フレームだけ作る（preview.py）ため、形式dictは
+        preview 側が直接組み立てて _encode_args へ渡す（監査 項目19）。
 
         戻り値 dict:
-          kind:  "h264" | "gif" | "webp" | "pngseq" | "webm" | "thumb"
+          kind:  "h264" | "gif" | "webp" | "pngseq" | "webm" | "storyboard"
           alpha: 背景を透過にするか
           has_audio: この形式が音声トラックを持てるか
           output_path: 実際にffmpegへ渡す出力パス（連番PNGは %05d 化）
@@ -2192,9 +2317,6 @@ class Project:
         alpha = bool(self._alpha)
         if getattr(self, "_storyboard_frame_indices", None) is not None:
             return {"kind": "storyboard", "alpha": False, "has_audio": False,
-                    "output_path": output_path}
-        if getattr(self, "_thumbnail_at", None) is not None:
-            return {"kind": "thumb", "alpha": False, "has_audio": False,
                     "output_path": output_path}
         ext = os.path.splitext(output_path)[1].lower()
         if ext == ".gif":
@@ -2216,6 +2338,61 @@ class Project:
                     "output_path": output_path}
         return {"kind": "h264", "alpha": alpha, "has_audio": True,
                 "output_path": output_path}
+
+    # --- 本レンダの実行と失敗時の診断（監査 項目9）---
+
+    @staticmethod
+    def _verbose():
+        """SCRIPTVEDIT_VERBOSE=1 のとき True（コマンド全文の表示など）。"""
+        return os.environ.get("SCRIPTVEDIT_VERBOSE", "") not in ("", "0")
+
+    def _print_render_command(self, cmd, output_path):
+        """実行するコマンドの1行サマリを出す（全文は VERBOSE のときだけ）。
+
+        フィルタ込みの全文は数千文字あり、毎回無条件に出すと出力末尾しか
+        読まない利用者・AIの文脈を食い潰す。失敗時は FFmpegError が
+        原因1行を出し、全文は例外の cmd 属性から取れる。
+        """
+        n_inputs = sum(1 for a in cmd if a == "-i")
+        filter_len = 0
+        for i, arg in enumerate(cmd[:-1]):
+            if arg in ("-filter_complex", "-vf", "-af"):
+                filter_len = _builtins.max(filter_len, len(cmd[i + 1]))
+        print(f"実行: ffmpeg 入力{n_inputs}件 / フィルタ{filter_len}文字 "
+              f"→ {output_path}  (全文は SCRIPTVEDIT_VERBOSE=1)")
+        if self._verbose():
+            print(f"  ffmpeg {' '.join(cmd[1:])}")
+        print()
+
+    def _render_input_table(self):
+        """入力番号 → 素材/開始時刻/エフェクト の対応表（失敗時の診断用）。
+
+        フィルタ内のラベルは [fx<入力番号>...] なので、ffmpeg のエラーに
+        出たラベルから素材へ辿れる。
+        """
+        renderable = [o for o in self.objects if isinstance(o, Object)]
+        lines = ["入力の対応表（[fxN] の N が入力番号）:",
+                 "  入力0: 背景キャンバス"]
+        for i, obj in enumerate(sorted(renderable, key=lambda o: o.priority),
+                                start=1):
+            effects = ",".join(e.name for e in obj.effects) or "なし"
+            transforms = ",".join(t.name for t in obj.transforms) or "なし"
+            lines.append(
+                f"  入力{i}: {obj.source} start={obj.start_time}s "
+                f"dur={obj.duration} transform=[{transforms}] "
+                f"effect=[{effects}]")
+        return lines
+
+    def _run_main_ffmpeg(self, cmd, output_path, timeout):
+        """本レンダの ffmpeg を実行し、失敗時は入力の対応表を添える。"""
+        try:
+            _run_ffmpeg(cmd, timeout=timeout,
+                        context=f"本レンダの出力: {output_path}")
+        except FFmpegError:
+            for line in self._render_input_table():
+                print(line)
+            print()
+            raise
 
     def _build_ffmpeg_cmd(self, output_path):
         inputs = []
@@ -2464,12 +2641,6 @@ class Project:
         else:
             cmd.extend(self._encode_args(fmt, use_audio))
 
-        # thumbnail: 単一フレーム抽出（-ss + -frames:v 1、-update で単一画像出力）
-        if fmt["kind"] == "thumb":
-            cmd.extend(["-ss", str(self._thumbnail_at), "-frames:v", "1",
-                        "-update", "1", output_path])
-            return cmd
-
         if fmt["kind"] == "storyboard":
             cmd.extend([
                 "-fps_mode", "vfr", "-frames:v",
@@ -2498,6 +2669,7 @@ class Project:
         draft = bool(getattr(self, "_draft", False))
         args = []
         if kind == "thumb":
+            # preview.py のサムネイル抽出だけが使う（_resolve_output_format は返さない）
             return ["-pix_fmt", "rgba", "-an"]
         if kind == "storyboard":
             return ["-c:v", "png", "-pix_fmt", "rgba", "-an"]
@@ -2557,17 +2729,19 @@ class Project:
 from scriptvedit.audio import _probe_audio_length
 from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _file_fingerprint, _is_bakeable, _is_pending_cache_path, _layer_cache_encode_args, _layer_cache_paths, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _resolve_layer_cache_quality, _split_ops, _validate_morph_position, _web_cache_path
 from scriptvedit.expr import Expr, max, min
-from scriptvedit.ffmpeg import _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
+from scriptvedit.ffmpeg import FFmpegError, _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _normalize_ffmpeg_cmd, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.audio import _build_audio_effect_filters, _build_audio_pre_filters
 from scriptvedit.filters.video import _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _build_video_pre_filters, _get_base_dimensions, _optimize_filter_chain, _visible_window
 from scriptvedit.objects import Object, _web_frames_dir
 from scriptvedit.assets import resolve_layer_path
 from scriptvedit.plugins import _EFFECT_PLUGINS, _autoload_plugins
 from scriptvedit.state import _BAKE_PIX_FMT, _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _PRESETS, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
-from scriptvedit.timeline import Pause, Scene, _AnchorMarker, _ScenePad
+from scriptvedit.timeline import (
+    Pause, Scene, _AnchorMarker, _ScenePad, _check_until_zero_duration)
 from scriptvedit.validate import _require_number, _require_time, _validate_ffmpeg_color
 # 分割サブシステム（audit.py と同じ「project を第1引数に受ける自由関数」方式）
-from scriptvedit.params import param as _param_impl
+from scriptvedit.params import (
+    check_unconsumed_params, param as _param_impl)
 from scriptvedit.chapters import _chapters_metadata_path, _write_chapters_metadata, export_chapters as _export_chapters_impl, export_metadata as _export_metadata_impl, marker as _marker_impl
 from scriptvedit.preview import storyboard as _storyboard_impl, thumbnail as _thumbnail_impl
 from scriptvedit.parallel import _parallel_chunk_bounds, _parallel_chunk_count, _render_parallel

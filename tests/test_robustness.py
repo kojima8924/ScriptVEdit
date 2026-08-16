@@ -682,7 +682,7 @@ def test_run_ffmpeg_to_cache_parallel_no_collision(tmp_path, monkeypatch):
     lock = threading.Lock()
     barrier = threading.Barrier(2, timeout=10)
 
-    def fake_run(cmd, timeout=600):
+    def fake_run(cmd, timeout=600, context=None):
         out = cmd[-1]
         barrier.wait()  # 2スレッドを同時に走らせて固定名なら衝突する状況を作る
         with lock:

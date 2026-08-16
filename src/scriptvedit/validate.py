@@ -129,12 +129,10 @@ def _reject_unknown_keys(func_name, params, valid_keys):
 
 
 def _validate_placement_anchor(func_name, anchor):
-    """move 系 Effect の anchor を検証する（誤記・未実装値を構築時に拒否）。
+    """move 系 Effect の anchor を検証する（誤記を構築時に拒否）。
 
-    anchor は overlay の配置基準点。実装（filters/video.py の
-    _build_move_exprs）は center 以外をすべて topleft として扱うため、
-    未知の綴り（'cetner'）も未実装の値（'right'）も「黙って半オブジェクト分
-    ずれる」という同じ壊れ方をする。どちらもここで明示エラーにする。
+    anchor は overlay の配置基準点。誤記（'cetner'）を既定へ黙って戻すと
+    半オブジェクト分ずれた絵になり、ffmpeg は正常終了するので気付けない。
     呼び出しは Effect 構築の1箇所（objects.py の Effect.__init__）に集約する。
     """
     if not isinstance(anchor, str):
@@ -143,14 +141,7 @@ def _validate_placement_anchor(func_name, anchor):
             f"（有効な値: {', '.join(_PLACEMENT_ANCHORS)}）")
     if anchor in _PLACEMENT_ANCHORS:
         return anchor
-    if anchor in _PLACEMENT_ANCHORS_UNIMPLEMENTED:
-        raise ValueError(
-            f"{func_name}: anchor='{anchor}' は未実装です。"
-            f"指定しても左上基準（topleft）で配置されるため、意図より"
-            f"半オブジェクト分ずれた絵になります。"
-            f"現在使えるのは {', '.join(_PLACEMENT_ANCHORS)} の2つです。"
-            f"端寄せしたい場合は anchor='center' のまま x/y を調整してください。")
-    hint = _suggest_hint(anchor, _PLACEMENT_ANCHORS + _PLACEMENT_ANCHORS_UNIMPLEMENTED)
+    hint = _suggest_hint(anchor, _PLACEMENT_ANCHORS)
     raise ValueError(
         f"{func_name}: 未知の anchor '{anchor}'。{hint}\n"
         f"有効な値: {', '.join(_PLACEMENT_ANCHORS)}")
@@ -173,5 +164,4 @@ def _require_time(func_name, param_name, value, *, lo=None, lo_exclusive=False):
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
 from scriptvedit.expr import Expr
-from scriptvedit.state import (
-    _PLACEMENT_ANCHORS, _PLACEMENT_ANCHORS_UNIMPLEMENTED, _suggest_hint)
+from scriptvedit.state import _PLACEMENT_ANCHORS, _suggest_hint

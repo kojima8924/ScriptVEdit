@@ -814,6 +814,21 @@ def _build_effect_filters(obj, start, dur, base_dims=None, label_prefix="fx"):
     return ctx.filters, ctx.pad_size
 
 
+# anchor（配置基準点）ごとの、指定座標からオブジェクト左上へのオフセット量。
+# overlay の x/y は「合成する左上座標」なので、基準点を左上へ換算する分だけ
+# 引く。値は各軸で "half"（辺の半分）/ "full"（辺の長さ）/ None（引かない）。
+# 語彙は state.py の _PLACEMENT_ANCHORS が正。左右上下は「その辺の中点」を
+# 基準にする（例: right = 右辺の中点＝右端に合わせて縦は中央）。
+_ANCHOR_OFFSETS = {
+    "center":  ("half", "half"),   # 中心
+    "topleft": (None,   None),     # 左上の角
+    "left":    (None,   "half"),   # 左辺の中点
+    "right":   ("full", "half"),   # 右辺の中点
+    "top":     ("half", None),     # 上辺の中点
+    "bottom":  ("half", "full"),   # 下辺の中点
+}
+
+
 def _build_move_exprs(obj, start, dur, pad_size=None):
     """objのeffectsからmoveを探し、overlay用のx_expr/y_exprを返す
     pad_size: (max_w, max_h) padで固定サイズ化済みの場合、定数で位置を計算
@@ -827,9 +842,13 @@ def _build_move_exprs(obj, start, dur, pad_size=None):
     if pad_size:
         half_w = str(pad_size[0] // 2)
         half_h = str(pad_size[1] // 2)
+        full_w = str(pad_size[0])
+        full_h = str(pad_size[1])
     else:
         half_w = "w/2"
         half_h = "h/2"
+        full_w = "w"
+        full_h = "h"
 
     if move_effect is None:
         # move なしでも shake は適用できるよう、中央配置をベースにして続行する
@@ -846,12 +865,16 @@ def _build_move_exprs(obj, start, dur, pad_size=None):
         base_x = f"{x_param.to_ffmpeg(u_expr)}*W"
         base_y = f"{y_param.to_ffmpeg(u_expr)}*H"
 
-        if anchor_val == "center":
-            x_result = f"trunc({base_x}-{half_w})"
-            y_result = f"trunc({base_y}-{half_h})"
-        else:
-            x_result = f"trunc({base_x})"
-            y_result = f"trunc({base_y})"
+        # 未知の anchor は Effect 構築時に弾かれている（validate.py の
+        # _validate_placement_anchor）。ここで KeyError になったら語彙と
+        # 実装がずれた証拠なので、黙って topleft へ落とさず失敗させる。
+        off_x, off_y = _ANCHOR_OFFSETS[anchor_val]
+        sizes_x = {"half": half_w, "full": full_w}
+        sizes_y = {"half": half_h, "full": full_h}
+        x_result = f"trunc({base_x}-{sizes_x[off_x]})" if off_x \
+            else f"trunc({base_x})"
+        y_result = f"trunc({base_y}-{sizes_y[off_y]})" if off_y \
+            else f"trunc({base_y})"
 
     # shake Effect: overlay座標にsin/cosオフセットを加算
     shake_effect = None

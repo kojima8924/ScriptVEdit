@@ -456,6 +456,7 @@ def typewriter(content, *, cps=10, x=0.5, y=0.5, size=48, color="white",
                border=0, border_color="black", shadow=(0, 0),
                shadow_color="black@0.6", alpha=1.0, anchor="left"):
     """textの派生。1文字ずつ表示（n個のdrawtextを各文字の表示時刻でenable）。
+
     cps: 1秒あたりの表示文字数。既定anchorは左上（左揃えで打ち出す）。
     border/border_color/shadow/shadow_color は text() と同じ縁取り・影指定。"""
     if anchor not in _TEXT_ANCHORS:
@@ -512,6 +513,7 @@ def counter(from_, to, *, format="%d", x=0.5, y=0.5, size=48, color="white",
             border=0, border_color="black", shadow=(0, 0),
             shadow_color="black@0.6", alpha=1.0, anchor="center"):
     """数値カウントアップ映像Object。drawtextの%{eif}式で from_→to を補間表示。
+
     format は整数指定(%d, %03d 等)。前後のリテラル文字も表示可能。
     border/border_color/shadow/shadow_color は text() と同じ縁取り・影指定。"""
     if anchor not in _TEXT_ANCHORS:
@@ -541,6 +543,7 @@ def counter(from_, to, *, format="%d", x=0.5, y=0.5, size=48, color="white",
 
 def subtitles(srt_file, *, style=None):
     """SRT字幕ファイルをsubtitlesフィルタで合成する映像Object。
+
     style: ASSのforce_styleスタイル文字列（例 "FontName=Meiryo,FontSize=28"）。
     SRTは自身のタイムコードで表示されるため .time(全体尺) で開始0に配置する想定。"""
     if not isinstance(srt_file, str):

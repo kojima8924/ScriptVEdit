@@ -39,7 +39,7 @@ plugin / project_method / transform。
 - `usage` … 概念・main スクリプト雛形・レイヤー雛形・DSL・Expr・**プラグイン雛形**・CLI
 - `constraints` … 守らないと壊れる制約（severity: error/warning/info）
 - `effects`(40) / `transforms`(7) / `audio_effects`(7) / `factories`(32) /
-  `objects`(15) / `object_methods`(9) / `project_methods`(14) / `expr`(98) / `plugins`(3)
+  `objects`(17) / `object_methods`(9) / `project_methods`(14) / `expr`(98) / `plugins`(3)
   （件数は変動する。正は `describe` の実測で、整合は tests/test_issue17_docs.py が検証する）
 
 各 Effect エントリには `bakeable` フィールドがあり、キャッシュに焼けるかが分かる。
@@ -57,7 +57,8 @@ Effect / Transform / AudioEffect の `respects_fast_hint` は、その op が `~
 ```bash
 pip install -e .[all]      # コアは標準ライブラリのみ。extras: morph/web/beat/tools
 pytest tests/              # 全テスト（約1分）
-python tests/render_all.py # 実レンダリング（重い。出力は tests/output/）
+pytest tests/test_real_render.py --realrender  # 実レンダ回帰（選抜。CIと同じ）
+python tests/render_all.py # 実レンダリング全件（重い。出力は tests/output/）
 python scripts/check_unused_imports.py   # 未使用importの検出（CIでも実行）
 ```
 
@@ -84,7 +85,7 @@ checkpoint 鍵に伝播する環境差は、比較時にその鍵だけを正規
 **スナップショットの限界: dry_run は寸法を予測できない。** `formula()` の数式PNGは
 dry_run 時点で未生成のため `base_dims=None` になり、`scale` の
 pad（SEGVバリア, §4.1）が付かないコマンドになる。**formula + scale の pad 経路は
-実レンダでしかカバーできない** ので `tests/render_all.py` の `test92` で踏む。
+実レンダでしかカバーできない** ので、CI でも回る `pytest tests/test_real_render.py --realrender` の選抜（test92 を含む）で踏む。
 
 ### 罠: 実レンダの後はキャッシュを消してからスナップショットを回す
 
@@ -149,8 +150,9 @@ framesync のタイムベース評価が壊れるため、メイン入力と同�
 
 4000文字以上の `-filter_complex` / `-vf` / `-af` は一時ファイルへ書き出し、
 FFmpeg 8 の `-/filter_complex <path>` 構文に自動で切り替える
-（`ffmpeg.py` の `_FILTER_SCRIPT_THRESHOLD = 4000` と `_externalize_long_filters`、
-`_run_ffmpeg` が finally で一時ファイルを削除）。
+（`ffmpeg.py` の `_FILTER_SCRIPT_THRESHOLD = 4000` と `_externalize_long_filters`）。
+**失敗時は一時ファイルを消さずパスをエラーに出す**（ffmpeg が指した式そのものが
+消えると原因が追えないため）。成功時のみ削除する。
 
 ## 5. 設計規約（コードを変更するときに守ること）
 

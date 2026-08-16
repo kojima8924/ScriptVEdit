@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -30,6 +35,11 @@
   "cache": {
     "__cache__/artifacts/web/slide_test87_slide_showfn_p0/efdcb6468fad730f.webm": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-framerate",
       "30",
@@ -51,6 +61,11 @@
     ],
     "__cache__/artifacts/web/slide_test87_slide_divs_p1/926a22048063800b.webm": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-framerate",
       "30",

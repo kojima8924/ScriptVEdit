@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -28,6 +33,11 @@
   "cache": {
     "__cache__/artifacts/web/diagram_40cf3695/e7a9e0539b48926b.webm": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-framerate",
       "30",
@@ -49,6 +59,11 @@
     ],
     "__cache__/artifacts/checkpoint/ac9b64e5/c8217bfdd0319faa.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-loop",
       "1",

@@ -78,7 +78,7 @@ def _install_fake_morph_module(monkeypatch, captured):
     return fake
 
 
-def _fake_cache_writer(cmd, out, timeout=None):
+def _fake_cache_writer(cmd, out, timeout=None, context=None):
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "wb") as f:
         f.write(b"fake-cache")

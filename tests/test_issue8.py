@@ -365,7 +365,7 @@ def test_cached_layer_replay_warns_when_audio_will_be_lost(tmp_path, monkeypatch
         persisted, "_build_layer_cache_cmd",
         lambda index, out: ["ffmpeg", "-y", out])
 
-    def fake_cache_run(cmd, out, timeout):
+    def fake_cache_run(cmd, out, timeout, context=None):
         os.makedirs(os.path.dirname(out), exist_ok=True)
         with open(out, "wb") as f:
             f.write(b"cache")

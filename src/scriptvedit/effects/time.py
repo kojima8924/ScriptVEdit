@@ -5,8 +5,9 @@
 # --- 時間操作Effect（映像・live） ---
 
 def speed(factor):
-    """再生速度Effect（setpts=PTS/factor）。映像の実効尺は 元尺/factor になる
-    （length()/duration自動決定に反映される）。
+    """再生速度Effect（setpts=PTS/factor）。実効尺は 元尺/factor になる。
+
+    尺の変化は length()/duration の自動決定に反映される。
 
     音声付き動画には <= 適用時に対応する atempo が自動適用される
     （atempo有効範囲0.5〜100を超える場合は多段に自動分解）。
@@ -28,8 +29,9 @@ def reverse():
 
 
 def freeze_frame(at, duration):
-    """フリーズフレームEffect: 時刻 at のフレームで duration 秒静止してから
-    続きを再生する（トータル尺は +duration。length()に反映される）。
+    """フリーズフレームEffect: 時刻 at のフレームで duration 秒だけ静止させる。
+
+    静止のあとは続きを再生する（トータル尺は +duration。length() に反映される）。
 
     trim 3分割 + loop + concat のチェーン内サブグラフで実装。
     音声は変化しません（音声も止めたい場合は別途編集）。

@@ -366,3 +366,121 @@ def test_percent_notation_across_factories():
     assert getattr(o.params["value"], "value", o.params["value"]) == 0.5
     t = text("x", x=50 % P, y=10 % P, size=48, border=3)
     assert t._text_spec["x"].value == 0.5
+
+
+# --- Plan pass のレイヤー実行回数（監査 項目13）---------------------------
+
+# b は前方参照（tail はこの後で定義される）で尺が決まる＝Plan pass が
+# アンカーを解決してから初めて b の尺が確定する、という条件を作っている。
+# tail は b の開始時刻と同じ 1 秒なので、offset=1 を付けて尺を正にする
+# （offset 無しだと尺0になり、監査項目6 のチェックで RuntimeError）。
+_ANCHOR_LAYER = """from scriptvedit import *
+open(COUNTER, 'a', encoding='utf-8').write('x')
+a = text('A', size=40, border=3)
+a.time(1)
+anchor('mid')
+b = text('B', size=40, border=3)
+b.show_until('tail')
+c = text('C', size=40, border=3)
+(a >> c).time(1)
+d = text('D', size=40, border=3)
+d.time(1)
+anchor('tail')
+"""
+
+
+def _counter_layer(tmp_path, name="anchored.py"):
+    counter = tmp_path / "exec_count.txt"
+    layer = tmp_path / name
+    layer.write_text(
+        f"COUNTER = {str(counter)!r}\n" + _ANCHOR_LAYER, encoding="utf-8")
+    return layer, counter
+
+
+def test_plan_pass_executes_each_layer_once(tmp_path):
+    """レイヤーの exec は Plan 1回 + Render 1回の計2回（以前は3回）。
+
+    レイヤー exec 経路は _anchors を読まないため、Plan pass の外側ループは
+    同じ構造を作り直すだけの空回しだった（監査 項目13）。
+    """
+    from scriptvedit import Project as _P
+    layer, counter = _counter_layer(tmp_path)
+    p = _P()
+    p.configure(width=320, height=180, fps=10)
+    p.layer(str(layer))
+    p.render(str(tmp_path / "o.mp4"), dry_run=True)
+    assert counter.read_text(encoding="utf-8") == "xx"
+
+
+def test_layer_exec_never_reads_resolved_anchors(tmp_path):
+    """レイヤー exec 中に _anchors を読まないこと（1パス化の前提を固定する）。
+
+    将来「exec 中に解決済みアンカー時刻を読む API」を足すと、Plan pass を
+    1回にした瞬間に静かに壊れる。読んだら失敗するようにして前提を明示する。
+    """
+    from scriptvedit import Project as _P
+
+    state = {"tracking": False, "reads": []}
+
+    class _TrackedAnchors(dict):
+        """読み出しだけを記録する dict（書き込みは素通し）"""
+
+        def _note(self, how):
+            if state["tracking"]:
+                state["reads"].append(how)
+
+        def __getitem__(self, key):
+            self._note(f"__getitem__({key!r})")
+            return super().__getitem__(key)
+
+        def __contains__(self, key):
+            self._note(f"__contains__({key!r})")
+            return super().__contains__(key)
+
+        def get(self, key, default=None):
+            self._note(f"get({key!r})")
+            return super().get(key, default)
+
+        def items(self):
+            self._note("items()")
+            return super().items()
+
+        def keys(self):
+            self._note("keys()")
+            return super().keys()
+
+        def values(self):
+            self._note("values()")
+            return super().values()
+
+    layer, _counter = _counter_layer(tmp_path, "anchored2.py")
+    p = _P()
+    p.configure(width=320, height=180, fps=10)
+    p.layer(str(layer))
+    original_reset = _P._reset_runtime_state
+    original_exec = _P._exec_layer_body
+
+    def reset_spy(self):
+        # _reset_runtime_state が _anchors を素の dict に戻すので、
+        # そのたびに追跡付きへ差し替える（差し替え忘れると常に空＝空振り）
+        original_reset(self)
+        self._anchors = _TrackedAnchors()
+
+    def exec_spy(self, *args, **kwargs):
+        state["tracking"] = True
+        try:
+            return original_exec(self, *args, **kwargs)
+        finally:
+            state["tracking"] = False
+
+    _P._reset_runtime_state = reset_spy
+    _P._exec_layer_body = exec_spy
+    try:
+        p.render(str(tmp_path / "o2.mp4"), dry_run=True)
+    finally:
+        _P._reset_runtime_state = original_reset
+        _P._exec_layer_body = original_exec
+    assert isinstance(p._anchors, _TrackedAnchors)  # 追跡が効いていること
+    assert p._anchors  # アンカーが実際に登録されている（空振りでない）
+    assert state["reads"] == [], (
+        f"レイヤー exec 中に _anchors を読みました: {state['reads']}")

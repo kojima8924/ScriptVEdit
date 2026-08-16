@@ -59,6 +59,46 @@ class Pause:
         return _link_after(self, other)
 
 
+def _check_until_zero_duration(items, anchors):
+    """until() の解決結果が 0 尺以下になったアイテムを明示エラーにする。
+
+    `until('mark')` は「アンカー時刻まで伸ばす」だが、アンカーが開始時刻以前に
+    あると尺が 0 になる。0 尺はチェックポイント経路の尺基準をすり抜け、最終的に
+    `clip((t-start)/0,0,1)` という式が filtergraph に埋まって ffmpeg が
+    Division by zero / EINVAL で落ちる。利用者に届くのは原因不明の ffmpeg エラー
+    なので、タイムライン解決の時点で「何が悪いか + どう直すか」を出す
+    （監査項目6）。time()/show() は既に 0 を lo_exclusive で弾いている。
+
+    引数はタイムライン解決後の items（Object / Pause 等）と解決済み anchors。
+    _resolve_anchors の収束後（check_unresolved のブロック）で1回だけ呼ぶこと。
+    反復の途中は尺が一時的に 0 になりうるため、収束前に呼んではいけない。
+    """
+    for item in items:
+        until_name = getattr(item, "_until_anchor", None)
+        if not until_name or until_name not in anchors:
+            continue
+        if isinstance(item, Pause):
+            # Pause はタイムライン上の間隔で、フィルタグラフに出ない。
+            # 0 尺でも「間隔なし」になるだけで壊れないため対象外にする
+            # （エラーにすると無害な書き方まで弾いてしまう）
+            continue
+        dur = getattr(item, "duration", None)
+        if dur is None or dur > 0:
+            continue
+        offset = getattr(item, "_until_offset", 0.0)
+        target = anchors[until_name] + offset
+        who = getattr(item, "source", None) or type(item).__name__
+        offset_str = f" + {offset}" if offset else ""
+        raise RuntimeError(
+            f"until('{until_name}'{offset_str}) の解決結果が開始時刻以前のため"
+            f"表示尺が 0 になりました: {who}\n"
+            f"  開始時刻 = {getattr(item, 'start_time', 0)} 秒 / "
+            f"アンカー '{until_name}' = {anchors[until_name]} 秒"
+            f"（オフセット込みの目標時刻 = {target} 秒）\n"
+            f"アンカーをこのアイテムより後ろに定義するか、until() をやめて "
+            f"time(秒) で明示的な尺を指定してください。")
+
+
 class _ScenePad:
     """シーン末尾の遅延パディングマーカー（レンダリングなし）。
 

@@ -25,7 +25,7 @@ def test_render_timeout_is_unlimited_by_default_and_explicit_when_requested(
     temp_output = tmp_path / f"success_{timeout}.tmp.mp4"
     seen = []
 
-    def fake_run(cmd, *, timeout):
+    def fake_run(cmd, *, timeout, context=None):
         seen.append(timeout)
         Path(cmd[-1]).write_bytes(b"complete")
 
@@ -51,7 +51,7 @@ def test_render_removes_partial_mp4_on_timeout_or_keyboard_interrupt(
     if existing:
         output.write_bytes(b"previous complete")
 
-    def interrupted_run(cmd, *, timeout):
+    def interrupted_run(cmd, *, timeout, context=None):
         Path(cmd[-1]).write_bytes(b"partial")
         if interruption == "timeout":
             raise subprocess.TimeoutExpired(cmd, timeout)

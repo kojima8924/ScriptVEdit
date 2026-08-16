@@ -1,6 +1,11 @@
 {
   "main": [
     "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-stats",
+    "-nostdin",
     "-y",
     "-f",
     "lavfi",
@@ -32,6 +37,11 @@
   "cache": {
     "__cache__/artifacts/checkpoint/ac9b64e5/ed6afa9f94901d11.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-loop",
       "1",
@@ -53,6 +63,11 @@
     ],
     "__cache__/artifacts/checkpoint/b00c4c21/5749795c94bd6067.mkv": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-loop",
       "1",
@@ -74,6 +89,11 @@
     ],
     "__cache__/artifacts/checkpoint/ad076f7b/dbfffdfa4b8ba4a4.png": [
       "ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-stats",
+      "-nostdin",
       "-y",
       "-i",
       "assets/images/shape_starburst.png",

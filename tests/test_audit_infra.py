@@ -26,7 +26,7 @@ from scriptvedit.state import _BAKEABLE_EFFECTS  # noqa: E402
 
 def _fake_ffmpeg_writer(monkeypatch):
     """_run_ffmpeg を「出力パスへ書くだけ」の偽物に差し替える"""
-    def fake_run(cmd, timeout=600):
+    def fake_run(cmd, timeout=600, context=None):
         out = cmd[-1]
         os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
         with open(out, "wb") as f:
