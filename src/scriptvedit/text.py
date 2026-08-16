@@ -417,6 +417,22 @@ def _new_text_object(spec):
 # ここは再エクスポートのみ（__init__.py が scriptvedit.text から取り出す）。
 
 
+def _param_key(value):
+    """パラメータを決定的な文字列にする（合成ソースID・キャッシュ鍵用）。
+
+    lambda をそのまま f-string へ入れると `<function <lambda> at 0x...>` の
+    **メモリアドレス**が混ざる。レイヤーは Plan/Render で複数回 exec されるので、
+    アドレスが変わるとテキスト Object の同一性が崩れて
+    「構造が Plan と Render で一致しません」になる（Python 3.13 で実際に発生）。
+    解決済み Expr の to_ffmpeg("u") は同じ式なら必ず同じ文字列を返す。
+    """
+    resolved = _resolve_param(value)
+    to_ffmpeg = getattr(resolved, "to_ffmpeg", None)
+    if to_ffmpeg is not None:
+        return to_ffmpeg("u")
+    return str(resolved)
+
+
 def _text_synthetic_source(spec_key):
     """テキストObject用の合成ソースパス（実体なし・署名/一意化用）"""
     h = hashlib.sha256(spec_key.encode("utf-8")).hexdigest()[:12]
@@ -455,7 +471,8 @@ def text(content, *, x=0.5, y=0.5, size=48, color="white", font=None,
         "anchor": anchor, **deco,
     }
     spec["synthetic_source"] = _text_synthetic_source(
-        f"text|{content}|{x}|{y}|{size}|{color}|{anchor}{deco_key}")
+        f"text|{content}|{_param_key(x)}|{_param_key(y)}"
+        f"|{_param_key(size)}|{color}|{anchor}{deco_key}")
     return _new_text_object(spec)
 
 
@@ -486,7 +503,8 @@ def typewriter(content, *, cps=10, x=0.5, y=0.5, size=48, color="white",
         "anchor": anchor, **deco,
     }
     spec["synthetic_source"] = _text_synthetic_source(
-        f"tw|{content}|{cps}|{x}|{y}|{size}|{color}|{anchor}{deco_key}")
+        f"tw|{content}|{cps}|{_param_key(x)}|{_param_key(y)}"
+        f"|{_param_key(size)}|{color}|{anchor}{deco_key}")
     return _new_text_object(spec)
 
 
@@ -545,7 +563,8 @@ def counter(from_, to, *, format="%d", x=0.5, y=0.5, size=48, color="white",
         "anchor": anchor, **deco,
     }
     spec["synthetic_source"] = _text_synthetic_source(
-        f"counter|{from_}|{to}|{format}|{x}|{y}|{size}|{color}|{anchor}{deco_key}")
+        f"counter|{from_}|{to}|{format}|{_param_key(x)}|{_param_key(y)}"
+        f"|{_param_key(size)}|{color}|{anchor}{deco_key}")
     return _new_text_object(spec)
 
 
