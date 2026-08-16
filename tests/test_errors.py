@@ -20,7 +20,7 @@ from scriptvedit import (
     asset,
     describe, describe_markdown,
     _resolve_param, Project, P, Object, VideoView, AudioView,
-    again, move, fade, resize, rotate, rotate_to, morph_to, AudioEffect, AudioEffectChain,
+    avolume, move, fade, resize, rotate, rotate_to, morph_to, AudioEffect, AudioEffectChain,
     explode_to, assemble_from, move_along, path_bezier, throw, inertia, look_at, perlin,
     group, tile, scene, keyframes,
     subtitle, subtitle_box, bubble, diagram, circle, label,
@@ -271,12 +271,12 @@ def check_view_until_forbidden():
 
 
 def check_video_audio_effect_mismatch():
-    """VideoView <= again() → TypeError"""
+    """VideoView <= avolume() → TypeError"""
     p = Project()
     obj = Object(asset("images/shape_badge.png"))
     vv = VideoView(obj)
     try:
-        vv <= again(0.5)
+        vv <= avolume(0.5)
         return False, "例外が発生しませんでした"
     except TypeError as e:
         msg = str(e)
@@ -4985,6 +4985,254 @@ ALL_TESTS = [
     ("#5 min/max 2引数畳み込み", check_min_max_two_arg_fold),
     ("#6 wipe geq 大文字T", check_wipe_geq_uses_uppercase_T),
     ("#7 color_shift eval=frame", check_color_shift_eq_eval_frame),
+]
+
+
+# --- 監査 項目3: ファクトリの引数検証を「拒否」で統一する -------------------
+#
+# いずれも「引数を渡したのに無言で効かない / 違う意味になる」失敗モード。
+# 誤った呼び出しが確実に例外になることを固定する。
+
+def _expect_raise(fn, exc, must_contain=()):
+    """fn() が exc を投げ、メッセージに must_contain を全部含むこと"""
+    try:
+        fn()
+    except exc as e:
+        msg = str(e)
+        missing = [s for s in must_contain if s not in msg]
+        if missing:
+            return False, f"メッセージに {missing} が無い: {msg}"
+        return True, msg
+    except Exception as e:
+        return False, f"{exc.__name__} ではなく {type(e).__name__}: {e}"
+    return False, "例外が発生しませんでした"
+
+
+def check_resize_pixel_kwargs_rejected():
+    """resize(w=, h=): px 指定の誤用 → TypeError（crop/pad へ誘導）"""
+    return _expect_raise(lambda: resize(w=640, h=360), TypeError,
+                         ("resize", "crop", "pad", "sx"))
+
+
+def check_resize_unknown_kwargs_rejected():
+    """resize(sxx=): 未知キーワード → TypeError（もしかして付き）"""
+    return _expect_raise(lambda: resize(sxx=2), TypeError, ("sxx", "sx"))
+
+
+def check_resize_normal_call_ok():
+    """resize(sx=, sy=): 正しい呼び出しは従来どおり倍率 Transform になる"""
+    t = resize(sx=0.5, sy=0.5)
+    if t.name != "resize" or t.params != {"sx": 0.5, "sy": 0.5}:
+        return False, f"params が想定外: {t.params}"
+    return True, str(t.params)
+
+
+def check_move_unknown_kwargs_rejected():
+    """move(easing=): 未知キーワードが黙って捨てられず TypeError になる"""
+    return _expect_raise(lambda: move(x=0.5, easing=lambda u: u), TypeError,
+                         ("easing", "move"))
+
+
+def check_move_typo_anchor_rejected():
+    """move(anchor='cetner'): 誤記 anchor → ValueError（既定へ黙って戻らない）"""
+    return _expect_raise(lambda: move(x=0.9, anchor="cetner"), ValueError,
+                         ("anchor", "center"))
+
+
+def check_move_unimplemented_anchor_rejected():
+    """move(anchor='right'): 未実装 anchor → ValueError（topleft へ黙って落ちない）"""
+    return _expect_raise(lambda: move(x=0.9, y=0.5, anchor="right"), ValueError,
+                         ("right", "未実装"))
+
+
+def check_path_effects_validate_anchor():
+    """anchor 検証は Effect 構築側の共通関門（move系ファクトリ全部に効く）"""
+    cases = [
+        lambda: move_along([(0, 0), (1, 1)], anchor="cetner"),
+        lambda: path_bezier((0, 0), (0.3, 0.2), (0.6, 0.8), (1, 1), anchor="right"),
+        lambda: throw(0.1, -0.2, anchor="bottom"),
+        lambda: inertia(0.1, 0.1, anchor="topleftt"),
+    ]
+    for fn in cases:
+        ok, msg = _expect_raise(fn, ValueError, ("anchor",))
+        if not ok:
+            return False, msg
+    # 正しい値は従来どおり通る
+    if move_along([(0, 0), (1, 1)]).params["anchor"] != "center":
+        return False, "既定 anchor が center でない"
+    return True, "move系4ファクトリすべてで anchor が検証された"
+
+
+def check_move_normal_call_ok():
+    """move の正しい呼び出しは従来どおり（未指定の引数は params に載らない）"""
+    e = move(x=0.5, y=0.5, anchor="center")
+    if sorted(e.params) != ["anchor", "x", "y"]:
+        return False, f"params が想定外: {sorted(e.params)}"
+    if sorted(move(from_x=0, to_x=1).params) != ["x", "y"]:
+        return False, "from/to 指定で x/y の自動 lerp にならない"
+    return True, "OK"
+
+
+def check_anchor_choices_produce_distinct_exprs():
+    """公称する anchor の値はそれぞれ互いに異なる overlay 座標式を返す
+
+    「6値公称・1値実装」の再発防止。manifest の choices を増やすときは
+    実装（_build_move_exprs）が実際に区別できることをここで担保する。
+    """
+    from scriptvedit.filters.video import _build_move_exprs
+    from scriptvedit.state import _PLACEMENT_ANCHORS
+    _mk_project()
+    exprs = {}
+    for a in _PLACEMENT_ANCHORS:
+        o = Object(asset("images/shape_badge.png"))
+        o <= move(x=0.5, y=0.5, anchor=a)
+        exprs[a] = _build_move_exprs(o, 0, 3)
+    if len(set(map(str, exprs.values()))) != len(exprs):
+        return False, f"互いに同じ式を返す anchor がある: {exprs}"
+    if sorted(exprs) != sorted(describe()["enums"]["anchor"]):
+        return False, "manifest の enums.anchor と実装の語彙がずれている"
+    return True, str(exprs)
+
+
+def check_trim_without_args_rejected():
+    """trim(): 何も切り出さない trim → ValueError（Effect スロットだけ消費する）"""
+    ok, msg = _expect_raise(lambda: trim(), ValueError, ("trim", "duration"))
+    if not ok:
+        return False, msg
+    return _expect_raise(lambda: sv.atrim(), ValueError, ("atrim",))
+
+
+def check_trim_start_is_reachable():
+    """trim(start=, duration=): イン点が公開ファクトリから届く"""
+    e = trim(start=2, duration=3)
+    if e.params.get("start") != 2 or e.params.get("duration") != 3:
+        return False, f"params が想定外: {e.params}"
+    if trim(2).params != {"duration": 2}:
+        return False, f"trim(2) の位置引数が duration でない: {trim(2).params}"
+    a = sv.atrim(start=1, duration=2)
+    if a.params.get("start") != 1:
+        return False, f"atrim の start が届かない: {a.params}"
+    return True, str(e.params)
+
+
+def check_slice_reapply_rejected():
+    """src[0:2] と src[3:5] を同じ Object へ → ValueError（trim 2段重ねを防ぐ）"""
+    _mk_project()
+    src = asset("video/clip_with_audio.mp4")
+
+    def _twice():
+        o = Object(src)
+        o[0:2]
+        o[3:5]
+    ok, msg = _expect_raise(_twice, ValueError, ("obj[a:b]", "Object(src)"))
+    if not ok:
+        return False, msg
+
+    def _mul_twice():
+        o = Object(src)[0:1]
+        o * 2
+        o * 3
+    ok, msg = _expect_raise(_mul_twice, ValueError, ("obj * n",))
+    if not ok:
+        return False, msg
+
+    def _neg_twice():
+        o = Object(src)[0:1]
+        -(-o)
+    return _expect_raise(_neg_twice, ValueError, ("-obj",))
+
+
+def check_slice_compose_still_ok():
+    """異種の糖衣の合成（[0:2] * 3 / -[0:2]）は従来どおり通る"""
+    _mk_project()
+    src = asset("video/clip_with_audio.mp4")
+    names = [e.name for e in (Object(src)[0:2] * 3).effects]
+    if names != ["trim", "repeat"]:
+        return False, f"[0:2]*3 の effects が想定外: {names}"
+    names = [e.name for e in (-Object(src)[0:2]).effects]
+    if names != ["trim", "reverse"]:
+        return False, f"-[0:2] の effects が想定外: {names}"
+    return True, "OK"
+
+
+def check_subtitle_second_positional_is_duration():
+    """subtitle('セリフ', 3): 第2位置引数は duration（who=3 にならない）"""
+    _mk_project()
+    o = subtitle("セリフ", 3, size=(320, 180))
+    if o.duration != 3:
+        return False, f"duration が {o.duration}"
+    if o._web_data["who"] is not None:
+        return False, f"who に位置引数が流れ込んでいる: {o._web_data['who']!r}"
+    o2 = subtitle_box("x", 3, size=(320, 180))
+    o3 = bubble("x", 3, size=(320, 180))
+    if (o2.duration, o3.duration) != (3, 3):
+        return False, f"3兄弟の第2位置引数が揃っていない: {o2.duration}/{o3.duration}"
+    # who はキーワードでは従来どおり届く
+    if subtitle("x", who="Alice", size=(320, 180))._web_data["who"] != "Alice":
+        return False, "who= キーワードが届かない"
+    return True, "OK"
+
+
+# --- 監査 項目16: API 語彙の整理 -------------------------------------------
+
+def check_bubble_tail_validated():
+    """bubble(tail=): 0..1 の (x,y) タプル以外を拒否し、旧 anchor= を誘導する"""
+    _mk_project()
+    ok, msg = _expect_raise(
+        lambda: bubble("x", tail="center", size=(320, 180)), TypeError, ("tail",))
+    if not ok:
+        return False, msg
+    ok, msg = _expect_raise(
+        lambda: bubble("x", tail=(2, 0), size=(320, 180)), ValueError, ("tail",))
+    if not ok:
+        return False, msg
+    ok, msg = _expect_raise(
+        lambda: bubble("x", anchor=(0.6, 0.7), size=(320, 180)), TypeError,
+        ("anchor", "tail"))
+    if not ok:
+        return False, msg
+    o = bubble("x", tail=(0.6, 0.75), size=(320, 180))
+    if o._web_data["anchor"] != {"x": 0.6, "y": 0.75}:
+        return False, f"テンプレートへ渡る JSON が想定外: {o._web_data['anchor']}"
+    return True, "OK"
+
+
+def check_avolume_replaces_again_and_afade():
+    """again/afade は廃止され avolume に一本化されている（フィルタは不変）"""
+    from scriptvedit.filters.audio import _build_audio_effect_filters
+    for gone in ("again", "afade"):
+        if hasattr(sv, gone) or gone in sv.__all__:
+            return False, f"{gone} が残っている"
+    o = Object(asset("audio/bgm_loop.mp3"))
+    o.duration = 5
+    o <= avolume(0.8) & avolume(lambda u: u)
+    filters = _build_audio_effect_filters(o, 5)
+    expected = ["volume=volume='0.8':eval=frame",
+                "volume=volume='clip((t)/5\\,0\\,1)':eval=frame"]
+    if filters != expected:
+        return False, f"volume フィルタが変わった: {filters}"
+    return True, str(filters)
+
+
+ALL_TESTS += [
+    # --- 監査 項目3: ファクトリの引数検証 ---
+    ("resize px誤用拒否", check_resize_pixel_kwargs_rejected),
+    ("resize 未知kwargs拒否", check_resize_unknown_kwargs_rejected),
+    ("resize 正常呼び出し", check_resize_normal_call_ok),
+    ("move 未知kwargs拒否", check_move_unknown_kwargs_rejected),
+    ("move anchor誤記拒否", check_move_typo_anchor_rejected),
+    ("move anchor未実装拒否", check_move_unimplemented_anchor_rejected),
+    ("anchor検証は共通関門", check_path_effects_validate_anchor),
+    ("move 正常呼び出し", check_move_normal_call_ok),
+    ("anchor 各値は別の式", check_anchor_choices_produce_distinct_exprs),
+    ("trim 引数なし拒否", check_trim_without_args_rejected),
+    ("trim start露出", check_trim_start_is_reachable),
+    ("スライス二重適用拒否", check_slice_reapply_rejected),
+    ("スライス合成は従来どおり", check_slice_compose_still_ok),
+    ("subtitle 第2位置引数=duration", check_subtitle_second_positional_is_duration),
+    # --- 監査 項目16: API 語彙の整理 ---
+    ("bubble tail検証", check_bubble_tail_validated),
+    ("avolume 一本化", check_avolume_replaces_again_and_afade),
 ]
 
 

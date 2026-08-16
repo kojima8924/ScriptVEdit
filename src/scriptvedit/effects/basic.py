@@ -4,8 +4,33 @@
 
 # --- Transform関数 ---
 
-def resize(**kwargs):
-    return Transform("resize", **kwargs)
+# resize に px 指定のつもりで渡されやすいキーワード → 誘導先の対応表。
+# crop/pad が px の w/h を取るため `resize(w=640, h=360)` は極めて自然な誤りで、
+# 従来は **kwargs が黙って飲み込み scale=iw*1:ih*1 の完全な no-op になっていた。
+_RESIZE_PIXEL_KEYS = {
+    "w": "幅", "h": "高さ", "width": "幅", "height": "高さ", "size": "サイズ",
+}
+
+
+def resize(*, sx=1, sy=1, **unknown):
+    """リサイズTransform。sx/sy は**倍率**（1.0=等倍）。px 指定ではない。
+
+    px で出力サイズを決めたいときは crop(w=, h=) / pad(w=, h=) を使う。
+    """
+    if unknown:
+        px = sorted(k for k in unknown if k in _RESIZE_PIXEL_KEYS)
+        if px:
+            raise TypeError(
+                f"resize: {', '.join(px)} は px 指定のキーワードですが、resize は"
+                f"倍率（sx/sy）だけを取ります。"
+                f"px で出力サイズを決めるなら crop(x=, y=, w=, h=) で切り出すか、"
+                f"pad(w=, h=) で余白を足してください。"
+                f"倍率で縮小するなら resize(sx=0.5, sy=0.5) と書きます。")
+        hint = _suggest_hint(sorted(unknown)[0], ("sx", "sy"))
+        raise TypeError(
+            f"resize: 未知のキーワード引数 {sorted(unknown)}"
+            f"（有効なキー: sx, sy）。{hint}")
+    return Transform("resize", sx=sx, sy=sy)
 
 
 def rotate(*, deg=None, rad=None, expand=False, fill="0x00000000"):
@@ -63,24 +88,46 @@ def fade(alpha=1.0):
     return Effect("fade", alpha=_resolve_param(alpha))
 
 
-def move(**kwargs):
+def move(*, x=None, y=None, from_x=None, from_y=None, to_x=None, to_y=None,
+         anchor=None, **unknown):
+    """配置・移動Effect（overlay座標）。x/y は 0..1 の画面比率（Expr/lambda可）。
+
+    from_*/to_* を指定すると u による自動 lerp になる。anchor は座標の基準点
+    （既定 'center'。有効値は state.py の _PLACEMENT_ANCHORS）。
+    イージングを掛けたいときは x=lambda u: lerp(0.2, 0.8, ease_out_quad(u))
+    のように x/y の式で書く（move は easing 引数を取らない）。
+    """
+    if unknown:
+        # 従来は **kwargs が未知キーを黙って捨てていた（easing= が消えて等速移動に
+        # なる等）。タイポも含めて構築時に拒否する。
+        valid = ("x", "y", "from_x", "from_y", "to_x", "to_y", "anchor")
+        hint = _suggest_hint(sorted(unknown)[0], valid)
+        extra = ""
+        if "easing" in unknown:
+            extra = ("\nmove に easing はありません。"
+                     "x=lambda u: lerp(0.2, 0.8, ease_out_quad(u)) のように"
+                     "座標式へイージングを掛けてください。")
+        raise TypeError(
+            f"move: 未知のキーワード引数 {sorted(unknown)}"
+            f"（有効なキー: {', '.join(valid)}）。{hint}{extra}")
     resolved = {}
     # from/to アニメーション → lerp Exprに自動変換
-    has_anim = "from_x" in kwargs or "from_y" in kwargs or "to_x" in kwargs or "to_y" in kwargs
+    has_anim = any(v is not None for v in (from_x, from_y, to_x, to_y))
     if has_anim:
-        fx = kwargs.get("from_x", kwargs.get("x", 0.5))
-        fy = kwargs.get("from_y", kwargs.get("y", 0.5))
-        tx = kwargs.get("to_x", kwargs.get("x", 0.5))
-        ty = kwargs.get("to_y", kwargs.get("y", 0.5))
+        fx = from_x if from_x is not None else (x if x is not None else 0.5)
+        fy = from_y if from_y is not None else (y if y is not None else 0.5)
+        tx = to_x if to_x is not None else (x if x is not None else 0.5)
+        ty = to_y if to_y is not None else (y if y is not None else 0.5)
         resolved["x"] = _resolve_param(lambda u: lerp(fx, tx, u))
         resolved["y"] = _resolve_param(lambda u: lerp(fy, ty, u))
     else:
-        if "x" in kwargs:
-            resolved["x"] = _resolve_param(kwargs["x"])
-        if "y" in kwargs:
-            resolved["y"] = _resolve_param(kwargs["y"])
-    if "anchor" in kwargs:
-        resolved["anchor"] = kwargs["anchor"]
+        if x is not None:
+            resolved["x"] = _resolve_param(x)
+        if y is not None:
+            resolved["y"] = _resolve_param(y)
+    if anchor is not None:
+        # 検証は Effect.__init__（objects.py）の共通関門で行う
+        resolved["anchor"] = anchor
     return Effect("move", **resolved)
 
 
@@ -159,14 +206,13 @@ def shake(amplitude=0.02, frequency=10):
 
 # --- 音声エフェクト関数 ---
 
-def again(value=1.0):
-    """音量倍率"""
-    return AudioEffect("again", value=_resolve_param(value))
+def avolume(value=1.0):
+    """音量倍率（定数なら固定音量、Expr/lambda ならフェード等の時間変化）。
 
-
-def afade(alpha=1.0):
-    """音量フェード"""
-    return AudioEffect("afade", alpha=_resolve_param(alpha))
+    volume フィルタ1段に落ちるため、フェードも音量調整もこの1つで書く
+    （sfx(volume=) / voice(volume=) / narrate(volume=) と同じ語彙）。
+    """
+    return AudioEffect("avolume", value=_resolve_param(value))
 
 
 def adelete():
@@ -179,14 +225,43 @@ def delete():
     return Effect("delete")
 
 
-def trim(duration=None):
-    """映像トリム（時間影響あり）"""
-    return Effect("trim", duration=duration)
+def _trim_params(func_name, duration, start):
+    """trim/atrim 共通の引数検証と params 構築。
+
+    start は「素材のイン点（秒）」、duration は「出力する最大尺（秒）」。
+    start=2, duration=3 なら素材の 2〜5 秒。両方省略した trim は何もしないのに
+    Effect スロットを消費し、以後の Transform を一律禁止するだけなので拒否する。
+    """
+    _require_time(func_name, "start", start, lo=0)
+    if duration is not None:
+        _require_time(func_name, "duration", duration, lo=0, lo_exclusive=True)
+    if duration is None and not start:
+        raise ValueError(
+            f"{func_name}(): start も duration も指定されていません。"
+            f"何も切り出さない {func_name}() は Effect スロットを消費して以後の"
+            f"Transform を禁止するだけなので受理しません。"
+            f"尺を切るなら {func_name}(3)、イン点を指定するなら "
+            f"{func_name}(start=2, duration=3) と書いてください"
+            f"（素材時間の切り出しは obj[2:5] でも書けます）。")
+    # start=0 のときは params に載せない（従来の鍵・コマンドと同一に保つ）
+    params = {"duration": duration}
+    if start:
+        params["start"] = start
+    return params
 
 
-def atrim(duration=None):
-    """音声トリム（時間影響あり）"""
-    return AudioEffect("atrim", duration=duration)
+def trim(duration=None, *, start=0):
+    """映像トリム（時間影響あり）。duration=出力尺(秒), start=イン点(秒)。
+
+    start はキーワード専用。既存の `trim(2)` が「イン点2秒」へ黙って意味替え
+    するのを防ぐため、位置引数は従来どおり duration のまま据え置く。
+    """
+    return Effect("trim", **_trim_params("trim", duration, start))
+
+
+def atrim(duration=None, *, start=0):
+    """音声トリム（時間影響あり）。duration=出力尺(秒), start=イン点(秒)。"""
+    return AudioEffect("atrim", **_trim_params("atrim", duration, start))
 
 
 def atempo(rate=1.0):
@@ -198,4 +273,5 @@ def atempo(rate=1.0):
 from scriptvedit.effects.paths import look_at
 from scriptvedit.expr import Const, Expr, _resolve_param, _to_expr, deg2rad, lerp
 from scriptvedit.objects import AudioEffect, Effect, Transform
-from scriptvedit.validate import _validate_ffmpeg_color
+from scriptvedit.state import _suggest_hint
+from scriptvedit.validate import _require_time, _validate_ffmpeg_color

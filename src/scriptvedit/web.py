@@ -39,9 +39,14 @@ def _resolve_size(size):
     return (proj.width, proj.height)
 
 
-def subtitle(text, who=None, duration=2.5, *, style=None, size=None,
+def subtitle(text, duration=2.5, *, who=None, style=None, size=None,
              name=None, debug_frames=False, deps=None):
-    """字幕テンプレートObjectを生成"""
+    """字幕テンプレートObjectを生成。第2位置引数は duration（秒）。
+
+    who（話者ラベル）はキーワード専用。`subtitle('セリフ', 3)` を
+    who=3 と解釈して話者名に「3」を描画してしまうのを防ぐため、
+    subtitle / subtitle_box / bubble の第2位置引数は duration に統一する。
+    """
     size = _resolve_size(size)
     tpl = _template_path("subtitle.html")
     data = {"text": text, "who": who, "style": style or {}}
@@ -56,7 +61,7 @@ def subtitle(text, who=None, duration=2.5, *, style=None, size=None,
 
 def subtitle_box(text, duration=2.5, *, style=None, size=None,
                  name=None, debug_frames=False, deps=None):
-    """ボックス型字幕テンプレートObjectを生成"""
+    """ボックス型字幕テンプレートObjectを生成。第2位置引数は duration（秒）。"""
     size = _resolve_size(size)
     tpl = _template_path("subtitle_box.html")
     data = {"text": text, "style": style or {}}
@@ -69,13 +74,52 @@ def subtitle_box(text, duration=2.5, *, style=None, size=None,
     return Object(tpl, **kw)
 
 
-def bubble(text, duration=2.5, *, anchor=None, pos=None, box=None,
-           style=None, size=None, name=None, debug_frames=False, deps=None):
-    """吹き出しテンプレートObjectを生成"""
+def _validate_xy_ratio(func, param, value):
+    """(x, y) の 0..1 比率タプルを検証する（文字列や3要素を黙って通さない）"""
+    def _is_num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    if (not isinstance(value, (tuple, list)) or len(value) != 2
+            or not all(_is_num(v) for v in value)):
+        raise TypeError(
+            f"{func}: {param} は (x, y) の2要素タプル（0..1 の画面比率）です: "
+            f"{value!r}。例: {param}=(0.6, 0.75)")
+    for axis, v in zip("xy", value):
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(
+                f"{func}: {param} の {axis} は 0〜1 の画面比率で指定してください: {v!r}")
+    # 値は変換せずそのまま載せる（int→float の書き換えで data ハッシュ＝
+    # web キャッシュ鍵が揺れるのを防ぐ）
+    return {"x": value[0], "y": value[1]}
+
+
+def bubble(text, duration=2.5, *, tail=None, pos=None, box=None,
+           style=None, size=None, name=None, debug_frames=False,
+           deps=None, **unknown):
+    """吹き出しテンプレートObjectを生成。第2位置引数は duration（秒）。
+
+    tail: 吹き出しの尻尾が指す位置 (x, y)（0..1 の画面比率）。
+      旧名 anchor は move の anchor（基準点の列挙値）と型も意味も違う同名
+      だったため改名した。pos は吹き出し本体の位置、box は本体のサイズ。
+    """
+    if unknown:
+        if "anchor" in unknown:
+            raise TypeError(
+                "bubble: anchor は tail へ改名しました"
+                "（move の anchor＝基準点の列挙値と型も意味も違う同名だったため）。"
+                "尻尾が指す位置は tail=(0.6, 0.75) のように 0..1 の比率タプルで"
+                "指定してください。")
+        raise TypeError(
+            f"bubble: 未知のキーワード引数 {sorted(unknown)}"
+            f"（有効なキー: tail, pos, box, style, size, name, "
+            f"debug_frames, deps）")
     size = _resolve_size(size)
     tpl = _template_path("bubble.html")
-    anch = {"x": anchor[0], "y": anchor[1]} if anchor else {"x": 0.2, "y": 0.7}
-    p = {"x": pos[0], "y": pos[1]} if pos else {"x": 0.25, "y": 0.3}
+    # JSON のキー名 "anch" はテンプレート bubble.html が読む契約なので据え置く
+    # （変えると web キャッシュが全再生成される）
+    anch = (_validate_xy_ratio("bubble", "tail", tail) if tail is not None
+            else {"x": 0.2, "y": 0.7})
+    p = (_validate_xy_ratio("bubble", "pos", pos) if pos is not None
+         else {"x": 0.25, "y": 0.3})
     sz = {"w": box[0], "h": box[1]} if box else {"w": 0.45, "h": 0.2}
     data = {"text": text, "anchor": anch, "pos": p, "size": sz,
             "style": style or {}}

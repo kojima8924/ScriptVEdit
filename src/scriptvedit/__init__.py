@@ -50,7 +50,7 @@ __all__ = [
     "blur_background_fill", "progress_bar",
     # 時間操作（映像）
     "speed", "reverse", "freeze_frame",
-    "again", "afade", "adelete", "delete", "trim", "atrim", "atempo",
+    "avolume", "adelete", "delete", "trim", "atrim", "atempo",
     # テキスト・字幕（drawtext/subtitlesベース）
     "text", "typewriter", "counter", "subtitles", "karaoke",
     # オーディオ系
@@ -185,7 +185,7 @@ from scriptvedit.project import (  # noqa: F401
     Project,
 )
 from scriptvedit.effects.basic import (  # noqa: F401
-    adelete, afade, again, atempo, atrim, blur, color_shift, crop, delete, eq, fade, move, pad,
+    adelete, atempo, atrim, avolume, blur, color_shift, crop, delete, eq, fade, move, pad,
     resize, rotate, rotate_to, scale, shake, trim, wipe, zoom,
 )
 from scriptvedit.effects.paths import (  # noqa: F401

@@ -99,7 +99,7 @@ def _write_audio_only_layer(tmp_path, wav_path):
     layer.write_text(
         "from scriptvedit import *\n"
         f"o = Object(r\"{wav_path}\")\n"
-        "o.time(1) <= again(0.5)\n",
+        "o.time(1) <= avolume(0.5)\n",
         encoding="utf-8")
     return layer
 

@@ -1021,6 +1021,23 @@ class Project:
         generated = _GEN_COUNTER[0] - self._generated
         cache_hits = sum(1 for existed in self._render_planned.values() if existed)
         cache_misses = len(self._render_planned) - cache_hits
+        # strict でなくても audit を回して1行サマリを出す（既定の render が
+        # 品質lintを一切実行しないと、出力末尾しか読まない利用者・AIに
+        # 「文字が画面外」「尺外に配置」等の沈黙する失敗が届かないため）。
+        # サマリは補助機能なので、audit 自体の失敗で本レンダを失敗させない。
+        audit_line = None
+        try:
+            from importlib import import_module as _import_module
+            _findings = _import_module("scriptvedit.audit").audit_project(self)
+            if _findings:
+                _w = sum(1 for f in _findings if f["severity"] == "warning")
+                _i = sum(1 for f in _findings if f["severity"] == "info")
+                audit_line = (f"[audit] warning {_w} / info {_i}"
+                              " — 詳細は p.audit()")
+        except Exception:
+            audit_line = None  # 品質lintの失敗はレンダ結果に影響しない
+        if audit_line:
+            print(audit_line)
         print(f"\n完了: {output_path}")
         mode = "ドラフト" if draft else "本番"
         if n_chunks >= 2:
@@ -2282,7 +2299,7 @@ class Project:
                     lt = self._loop_trim_duration(obj, loop_effect)
                     a_pre = [f"atrim=duration={lt}", "asetpts=PTS-STARTPTS"] + a_pre
                 a_filters.extend(a_pre)
-                # 音声エフェクト（again/afade）
+                # 音声エフェクト（avolume 等）
                 a_filters.extend(_build_audio_effect_filters(obj, dur))
                 # adelay（タイミングシフト）: all=1 で全チャンネルに適用（2ch前提を排除）
                 delay_ms = int(start * 1000)

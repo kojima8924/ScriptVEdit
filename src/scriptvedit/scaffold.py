@@ -79,7 +79,8 @@ import os
 bgm_path = asset("audio/bgm.mp3", must_exist=False)
 if os.path.exists(bgm_path):
     bgm = Object(asset("audio/bgm.mp3"))
-    bgm.time(7) <= loop() & again(0.5) & afade(lambda u: clip(u * 8, 0, 1))
+    # avolume は定数なら固定音量、式ならフェード（音量とフェードは同じ1段）
+    bgm.time(7) <= loop() & avolume(lambda u: 0.5 * clip(u * 8, 0, 1))
 '''
 
 _README = '''# {name}

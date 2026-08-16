@@ -19,7 +19,7 @@ from scriptvedit import (
     Object, Project, asset, assemble_from, blend_mode, color_shift,
     freeze_frame, inertia, ken_burns, look_at, lut, mask, mask_wipe, morph_to,
     move_along, opacity, path_bezier, perspective_warp,
-    rotate_to, rounded, speed, throw, zoom,
+    rotate_to, rounded, speed, throw, trim, zoom,
 )
 from scriptvedit.filters.video import (
     _FX_BUILDERS, _FX_HANDLED_ELSEWHERE, _build_effect_filters)
@@ -55,6 +55,8 @@ _FIXTURES = {
     "rounded": lambda: rounded(8),
     "speed": lambda: speed(2.0),
     "throw": lambda: throw(0.1, -0.2),
+    # trim() は「何もしない trim」を拒否するので必ず尺を渡す
+    "trim": lambda: trim(2),
     "zoom": lambda: zoom(1.5),
 }
 

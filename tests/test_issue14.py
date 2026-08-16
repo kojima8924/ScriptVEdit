@@ -122,7 +122,7 @@ class TestComputeReuse:
         p._mode = "plan"  # plan pass 相当（実生成なしで source 差し替えのみ）
         o = sv.Object(VID)
         o <= sv.resize(sx=0.5, sy=0.5)
-        o <= sv.again(0.5)
+        o <= sv.avolume(0.5)
         o._has_audio = True  # 音声付き動画を模擬
         o.compute(duration=2)
         assert o.audio_effects == []

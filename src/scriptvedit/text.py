@@ -405,7 +405,8 @@ def _new_text_object(spec):
 
 # --- テキスト系ファクトリ（映像Object, drawtext/subtitlesベース） ---
 
-_TEXT_ANCHORS = ("center", "left")
+# anchor の語彙は state.py に一本化（move 系の _PLACEMENT_ANCHORS と併記）。
+# ここは再エクスポートのみ（__init__.py が scriptvedit.text から取り出す）。
 
 
 def _text_synthetic_source(spec_key):
@@ -747,5 +748,5 @@ from scriptvedit.ffmpeg import _atomic_write_text
 from scriptvedit.filters.video import _u_expr
 from scriptvedit.objects import Object
 from scriptvedit.project import Project
-from scriptvedit.state import _ARTIFACT_DIR
+from scriptvedit.state import _ARTIFACT_DIR, _TEXT_ANCHORS
 from scriptvedit.validate import _require_number, _validate_ffmpeg_color

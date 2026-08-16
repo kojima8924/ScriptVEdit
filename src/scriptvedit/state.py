@@ -136,6 +136,24 @@ _TIME_LIVE_EFFECTS = {"speed", "reverse", "freeze_frame", "repeat"}
 _REVERSE_MAX_SEC = 30.0
 
 
+# --- 配置基準点（anchor）の語彙 ---------------------------------------------
+# move 系 Effect（move / move_along / path_bezier / throw / inertia / pip）の
+# anchor。座標式を分岐するのは filters/video.py の _build_move_exprs だけで、
+# 現在そこが区別できるのは center（中心合わせ）と topleft（左上合わせ）のみ。
+# ファクトリが複数あるため検証は Effect 構築側（objects.py の Effect.__init__）に
+# 置く。ファクトリ単位で書くと必ず抜ける。
+_PLACEMENT_ANCHORS = ("center", "topleft")
+
+# 語彙としては提案されているが _build_move_exprs が未実装の基準点。
+# 指定を黙って topleft 扱いにすると半オブジェクト分ずれた絵になるため、
+# 受理せず明示エラーで拒否する（実装したら _PLACEMENT_ANCHORS へ移すこと）。
+_PLACEMENT_ANCHORS_UNIMPLEMENTED = ("left", "right", "top", "bottom")
+
+# text / typewriter / counter の anchor（drawtext の x 起点）。
+# overlay 配置の _PLACEMENT_ANCHORS とは別軸の語彙なので値も別に持つ。
+_TEXT_ANCHORS = ("center", "left")
+
+
 # --- パッケージ名前空間（プラグイン注入・describe のイントロスペクション用）---
 # 旧単一ファイル版の globals() / __all__ に相当。分割後は公開名前空間である
 # scriptvedit パッケージ本体を指す（プラグインのファクトリはここへ注入される）。

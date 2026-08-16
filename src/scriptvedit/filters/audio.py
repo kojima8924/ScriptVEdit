@@ -60,18 +60,17 @@ def _build_audio_pre_filters(obj):
 
 
 def _build_audio_effect_filters(obj, dur):
-    """音声エフェクトフィルタを生成（again/afade）"""
+    """音声エフェクトフィルタを生成（avolume）。
+
+    旧 again / afade は引数名（value / alpha）が違うだけの同一実装だったため
+    avolume に一本化した（定数なら固定音量、Expr ならフェード）。
+    """
     filters = []
     for e in obj.audio_effects:
-        if e.name == "again":
+        if e.name == "avolume":
             value_expr = e.params.get("value", Const(1))
             u_expr = f"clip((t)/{dur}\\,0\\,1)"
             ffmpeg_str = value_expr.to_ffmpeg(u_expr)
-            filters.append(f"volume=volume='{ffmpeg_str}':eval=frame")
-        elif e.name == "afade":
-            alpha_expr = e.params.get("alpha", Const(1.0))
-            u_expr = f"clip((t)/{dur}\\,0\\,1)"
-            ffmpeg_str = alpha_expr.to_ffmpeg(u_expr)
             filters.append(f"volume=volume='{ffmpeg_str}':eval=frame")
     return filters
 

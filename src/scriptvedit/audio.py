@@ -78,19 +78,19 @@ def audio_sequence(*objs, crossfade=1.0):
                 raise ValueError(
                     f"audio_sequence: '{o.source}' に Effect が適用されています。\n"
                     f"連結時は素のObjectを渡し、効果は連結後の生成Objectに付けてください"
-                    f"（例: seq <= again(0.5)）。")
+                    f"（例: seq <= avolume(0.5)）。")
             input_volume = 1.0
             if o.audio_effects:
-                # narrate(volume=...) は voice() が音声Objectへ again(Const) を
+                # narrate(volume=...) は voice() が音声Objectへ avolume(Const) を
                 # 付けて表現する。Narrationを直接受け取る公開APIなのに、この標準
                 # オプションまで「加工済み」として拒否しないよう、定数音量だけを
                 # 連結前の各入力へ移植する。それ以外は従来どおり明示拒否する。
                 if narration is None or any(
-                        effect.name != "again" for effect in o.audio_effects):
+                        effect.name != "avolume" for effect in o.audio_effects):
                     raise ValueError(
                         f"audio_sequence: '{o.source}' に AudioEffect が適用されています。\n"
                         f"Narrationの volume 以外の効果は連結後の生成Objectに付けてください"
-                        f"（例: seq <= again(0.5)）。")
+                        f"（例: seq <= avolume(0.5)）。")
                 for effect in o.audio_effects:
                     value = getattr(effect.params.get("value"), "value", None)
                     if (isinstance(value, bool)
@@ -270,7 +270,7 @@ def voice(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0, volume=1.0,
     obj.duration = dur
     if volume != 1.0:
         _require_number("voice", "volume", volume, 0, None)
-        obj.audio_effects.append(again(volume))
+        obj.audio_effects.append(avolume(volume))
     return obj
 
 
@@ -550,7 +550,7 @@ def narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
     audio_obj.duration = dur
     if volume != 1.0:
         _require_number("narrate", "volume", volume, 0, None)
-        audio_obj.audio_effects.append(again(volume))
+        audio_obj.audio_effects.append(avolume(volume))
 
     return Narration(audio_obj, text_obj)
 
@@ -654,7 +654,7 @@ def beat_sync(audio_source, *, min_bpm=60, max_bpm=200):
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
 from scriptvedit.cache import _sig_key, _src_signature
-from scriptvedit.effects.basic import again
+from scriptvedit.effects.basic import avolume
 from scriptvedit.ffmpeg import _atomic_write_text
 from scriptvedit.media import _finalize_generated_object
 from scriptvedit.objects import AudioEffect, Object

@@ -262,8 +262,8 @@ def test_duck_under_and_loop_can_coexist():
     bgm = sv.Object("bgm.wav")
     bgm <= sv.loop()
     bgm <= sv.duck_under(a)
-    bgm <= sv.again(0.5)
-    assert [e.name for e in bgm.audio_effects] == ["loop", "duck_under", "again"]
+    bgm <= sv.avolume(0.5)
+    assert [e.name for e in bgm.audio_effects] == ["loop", "duck_under", "avolume"]
 
 
 # ---------------------------------------------------------------------------

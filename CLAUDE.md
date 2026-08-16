@@ -38,7 +38,7 @@ plugin / project_method / transform。
 
 - `usage` … 概念・main スクリプト雛形・レイヤー雛形・DSL・Expr・**プラグイン雛形**・CLI
 - `constraints` … 守らないと壊れる制約（severity: error/warning/info）
-- `effects`(40) / `transforms`(7) / `audio_effects`(8) / `factories`(32) /
+- `effects`(40) / `transforms`(7) / `audio_effects`(7) / `factories`(32) /
   `objects`(15) / `object_methods`(9) / `project_methods`(14) / `expr`(98) / `plugins`(3)
   （件数は変動する。正は `describe` の実測で、整合は tests/test_issue17_docs.py が検証する）
 

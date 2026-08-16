@@ -139,7 +139,7 @@ python -m scriptvedit watch main.py          # ファイル変更を監視して
 
 ```python
 clip.time() <= trim(3)                # duration=3（加工後の長さ）
-bgm.time() <= atrim(2) & again(0.6)   # duration=2
+bgm.time() <= atrim(2) & avolume(0.6)   # duration=2
 img.time()                            # TypeError（画像は「素材の長さ」を持たない）
 ```
 
@@ -320,7 +320,7 @@ move(x=50%P, y=75%P)  # x=0.5, y=0.75
   - `wipe(direction)` ... ワイプ表示（"left"/"right"/"up"/"down"。"top"/"bottom" は up/down の別名）
   - `color_shift(hue, saturation, brightness)` ... 色相/彩度/明度シフト
   - `shake(amplitude, frequency)` ... 振動（live、overlay座標変調）
-  - `trim(duration)` ... 先頭からduration秒にカット（時間影響あり）
+  - `trim(duration, *, start=0)` ... 素材を切り出す（時間影響あり。`start` はイン点）
   - `delete()` ... 映像をレンダリングから除外（音声のみ残す）
   - `morph_to(target_obj)` ... 画像→画像モーフィング（bakeable、重い。bakeable opsの末尾に配置必須）
 
@@ -385,9 +385,8 @@ shake は overlay 座標の変調として実装されており live 分類。�
 動画・音声ファイルの音声トラックを制御する。`&` で連結可能。`~` は品質ヒントで、
 軽い代替を持たない AudioEffect では通常と同じ処理をする。音声削除は `adelete()`。
 
-- `again(value)` ... 音量倍率（デフォルト 1.0）
-- `afade(alpha)` ... 音量フェード
-- `atrim(duration)` ... 音声トリム（時間影響あり）
+- `avolume(value)` ... 音量倍率（デフォルト 1.0。lambda(u) でフェードも書ける）
+- `atrim(duration, *, start=0)` ... 音声を切り出す（時間影響あり。`start` はイン点）
 - `atempo(rate)` ... テンポ変更（時間影響あり）
 - `adelete()` ... 音声をミックスから除外
 
@@ -395,7 +394,7 @@ shake は overlay 座標の変調として実装されており live 分類。�
 clip = Object("video.mp4")
 clip.time(5) <= move(x=0.5, y=0.5, anchor="center") \
               & fade(lambda u: u) \
-              & again(0.6) \
+              & avolume(0.6) \
               & atrim(3)
 ```
 
@@ -407,7 +406,7 @@ clip.time(5) <= move(x=0.5, y=0.5, anchor="center") \
 clip = Object("video.mp4")
 v, a = clip.split()
 v <= resize(sx=0.5, sy=0.5)     # 映像のみ変換
-a <= again(0.3)                  # 音声のみ音量調整
+a <= avolume(0.3)                # 音声のみ音量調整
 clip.time(5) <= move(x=0.5, y=0.5, anchor="center")
 ```
 
@@ -783,7 +782,7 @@ s = subtitle("こんにちは！", who="Alice", duration=2.5)
 sb = subtitle_box("タイトルテキスト", duration=3.0)
 
 # 吹き出し
-b = bubble("ここがポイント！", duration=1.0, anchor=(0.6, 0.75))
+b = bubble("ここがポイント！", duration=1.0, tail=(0.6, 0.75))
 
 # 図解
 d = diagram([

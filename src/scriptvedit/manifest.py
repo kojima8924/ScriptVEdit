@@ -43,7 +43,7 @@ _MANIFEST_CATEGORY_MEMBERS = {
     "テキスト・字幕": ["text", "typewriter", "counter", "subtitles", "karaoke",
                        "subtitle", "subtitle_box", "bubble", "diagram"],
     "数式": ["formula", "formula_lines"],
-    "オーディオ": ["again", "afade", "duck_under", "loop", "audio_sequence",
+    "オーディオ": ["avolume", "duck_under", "loop", "audio_sequence",
                    "sfx", "audio_viz", "voice", "narrate", "normalize_audio"],
     "シーケンス生成": ["slideshow", "transition", "video_sequence", "slide"],
     "同期・タイムライン": ["anchor", "pause", "scene", "beat_sync", "marker"],
@@ -102,9 +102,27 @@ _MANIFEST_PARAM_META = {
     ("move", "from_y"): {"type": "number", "default": None, "desc": "開始Y（to_y と併用で自動 lerp）"},
     ("move", "to_x"): {"type": "number", "default": None, "desc": "終了X"},
     ("move", "to_y"): {"type": "number", "default": None, "desc": "終了Y"},
+    # choices は実装（filters/video.py の _build_move_exprs）が実際に区別できる
+    # 値だけを載せる。left/right/top/bottom は未実装で、指定すると構築時に
+    # ValueError になる（state.py の _PLACEMENT_ANCHORS_UNIMPLEMENTED）
     ("move", "anchor"): {"type": "choice", "default": "center",
-                         "choices": ["center", "topleft", "left", "right", "top", "bottom"],
-                         "desc": "座標の基準点"},
+                         "choices": None,   # → state.py の _PLACEMENT_ANCHORS
+                         "desc": "座標の基準点（center=中心 / topleft=左上）"},
+    # trim/atrim は「素材時間の切り出し」。start=2, duration=3 なら素材の 2〜5 秒
+    ("trim", "duration"): {"type": "number", "default": None, "min": 0,
+                           "desc": "出力する尺（秒。省略時は素材末尾まで）"},
+    ("trim", "start"): {"type": "number", "default": 0, "min": 0,
+                        "desc": "素材のイン点（秒。キーワード専用）"},
+    ("atrim", "duration"): {"type": "number", "default": None, "min": 0,
+                            "desc": "出力する尺（秒。省略時は素材末尾まで）"},
+    ("atrim", "start"): {"type": "number", "default": 0, "min": 0,
+                         "desc": "素材のイン点（秒。キーワード専用）"},
+    ("subtitle", "duration"): {"type": "number", "default": 2.5, "min": 0,
+                               "desc": "表示尺（秒）。第2位置引数はこれ"},
+    ("subtitle", "who"): {"type": "string", "default": None,
+                          "desc": "話者ラベル（キーワード専用）"},
+    ("bubble", "tail"): {"type": "any", "default": None,
+                         "desc": "尻尾が指す位置 (x, y)（0..1 の画面比率。旧名 anchor）"},
     ("grid", "cols"): {"type": "int", "default": None, "required": True, "desc": "列数"},
     ("grid", "rows"): {"type": "int", "default": None, "required": True, "desc": "行数"},
     ("grid", "gap"): {"type": "int", "default": 0, "desc": "セル間の余白px"},
@@ -290,7 +308,7 @@ _MANIFEST_EXAMPLES = {
     "slideshow": "slideshow(['a.png', 'b.png', 'c.png'], each=3.0, transition='fade')",
     "transition": "transition(obj_a, obj_b, kind='wipeleft', duration=1.0)",
     "keyframes": "img <= scale(keyframes((0, 1.0), (0.5, 1.5), (1, 1.0), easing=ease_in_out_sine))",
-    "again": "bgm <= again(0.3)",
+    "avolume": "bgm <= avolume(0.3)",
     "duck_under": "bgm <= duck_under(voice_obj, ratio=8)",
     "sfx": "sfx('効果音.mp3', at=2.5, volume=0.8)",
     "narrate": ("n = narrate('長い読み上げ原稿', speaker=1, subtitle_text='短い字幕', "
@@ -386,6 +404,18 @@ _MANIFEST_CONSTRAINTS = [
                 "bakeable な ops の末尾に1つだけ置ける（後ろに別の bakeable Effect を続けられない）。",
     },
     {
+        "id": "slice_is_destructive",
+        "topic": "時間操作",
+        "severity": "error",
+        "applies_to": ["Object"],
+        "text": "obj[a:b]（スライス）/ obj * n（リピート）/ -obj（逆再生）は"
+                "Object を破壊的に変更して同じ Object を返す。新しいクリップは"
+                "作られないので、`a = src[0:2]` と `b = src[3:5]` は同じ Object を"
+                "指し trim が2段重なる。別区間は Object(src) から作り直すこと"
+                "（例: a = Object(src)[0:2]; b = Object(src)[3:5]）。"
+                "同じ op の二重適用は ValueError で拒否される。",
+    },
+    {
         "id": "rotate_static_only",
         "topic": "変形",
         "severity": "error",
@@ -453,7 +483,7 @@ _MANIFEST_USAGE = {
         "Object: 素材（画像/動画/音声/HTML）。レイヤー .py の中で作ると Project に自動登録される",
         "Transform: 静的変形（resize/crop/rotate 等。時間非依存）",
         "Effect: 時間依存エフェクト（fade/move/scale 等。u=0..1 の進行度で変化）",
-        "AudioEffect: 音声への効果（again/afade/atempo 等）",
+        "AudioEffect: 音声への効果（avolume/atempo 等）",
         "<= 演算子で Object に Transform/Effect/AudioEffect を適用する"
         "（実行順は記述順ではなく「全Transform→全Effect」のカテゴリ順。"
         "Effect 適用後に Transform を適用しようとすると ValueError。"
@@ -609,6 +639,9 @@ def _manifest_choices(fn_name, pname, meta):
             return sorted(_BLEND_MODES)
         if pname in ("transition", "kind"):
             return sorted(_XFADE_TRANSITIONS)
+        if pname == "anchor":
+            # 実装が実際に区別できる基準点だけを公称する（state.py が正）
+            return list(_PLACEMENT_ANCHORS)
     return None
 
 
@@ -638,7 +671,13 @@ def _manifest_params(fn, fn_name):
     for pname, p in ordered:
         meta = _MANIFEST_PARAM_META.get((fn_name, pname), {})
         has_default = p.default is not p.empty
-        default = p.default if has_default else meta.get("default")
+        # 補助テーブルが default を宣言していればそちらを優先する。
+        # move(x=None, ...) のように「未指定を表す番兵 None」をシグネチャに
+        # 置く関数では、実効既定値（x=0.5 / anchor='center'）は宣言側にしかない。
+        if "default" in meta:
+            default = meta["default"]
+        else:
+            default = p.default if has_default else None
         entry = {
             "type": _manifest_param_type(default, pname, src, meta),
             "default": default if _manifest_jsonable(default) else repr(default),
@@ -860,7 +899,9 @@ def _manifest_enums():
         "preset": sorted(_PRESETS),
         "encoder": sorted(_ENCODER_MAP),
         "wipe_direction": ["left", "right", "up", "down"],
-        "anchor": ["center", "topleft", "left", "right", "top", "bottom"],
+        # 実装が区別できる基準点（state.py の _PLACEMENT_ANCHORS が正）。
+        # left/right/top/bottom は未実装で構築時に ValueError になる
+        "anchor": list(_PLACEMENT_ANCHORS),
         # Project.layer(cache=...) の検証タプル（project.py）と一致させること。
         # 整合は tests/test_issue17_docs.py が実装側の許可値と突き合わせて検証する
         "layer_cache": ["off", "auto", "use", "make"],
@@ -1214,4 +1255,4 @@ from scriptvedit.media import _XFADE_TRANSITIONS
 from scriptvedit.objects import Object
 from scriptvedit.plugins import _EFFECT_PLUGINS, _PLUGIN_PARAM_TYPES
 from scriptvedit.project import Project
-from scriptvedit.state import _BAKEABLE_EFFECTS, _ENCODER_MAP, _PRESETS, _pkg_all, _pkg_ns, _suggest_hint
+from scriptvedit.state import _BAKEABLE_EFFECTS, _ENCODER_MAP, _PLACEMENT_ANCHORS, _PRESETS, _pkg_all, _pkg_ns, _suggest_hint

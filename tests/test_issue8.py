@@ -32,16 +32,16 @@ def test_tilde_is_quality_hint_for_audio_and_never_deletes_content():
 
     normal = sv.Object("normal.wav")
     hinted = sv.Object("hinted.wav")
-    chain = sv.again(0.5) & sv.afade(lambda u: u)
+    chain = sv.avolume(0.5) & sv.avolume(lambda u: u)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         normal <= chain
         hinted <= ~chain
     assert caught == []
-    assert [e.name for e in hinted.audio_effects] == ["again", "afade"]
+    assert [e.name for e in hinted.audio_effects] == ["avolume", "avolume"]
     assert all(e.quality == "fast" for e in hinted.audio_effects)
     assert _build_audio_effect_filters(normal, 2) == _build_audio_effect_filters(hinted, 2)
-    assert (~~sv.again(0.5)).quality == "fast"
+    assert (~~sv.avolume(0.5)).quality == "fast"
 
     audio_clip = sv.Object("clip.wav")
     audio_clip <= ~sv.adelete()

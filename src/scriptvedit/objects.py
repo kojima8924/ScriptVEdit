@@ -83,7 +83,7 @@ class EffectChain:
 
 
 class AudioEffect:
-    """音声エフェクト（again, afade, adelete, atrim, atempo等）"""
+    """音声エフェクト（avolume, adelete, atrim, atempo等）"""
     def __init__(self, name, *, quality="final", **params):
         self.name = name
         self.params = params
@@ -174,6 +174,11 @@ class Effect:
         self.params = params
         self.policy = policy
         self.quality = quality
+        # anchor を持つ move Effect のファクトリは move / move_along /
+        # path_bezier / throw / inertia / pip と複数あるため、検証はここ
+        # （Effect 構築という単一の関門）で行う。ファクトリ側に書くと必ず抜ける。
+        if name == "move" and "anchor" in params:
+            _validate_placement_anchor("move", params["anchor"])
 
     def _copy(self, **overrides):
         """属性をコピーした新Effectを返す"""
@@ -454,6 +459,25 @@ class Object:
 
     # --- DSL糖衣: タイムライン3点セット（スライス / @ / >>）------------------
 
+    def _reject_time_op_reapply(self, syntax, video_name, audio_name):
+        """破壊的な時間操作糖衣の二重適用を拒否する。
+
+        `obj[2:5]` / `obj * 3` / `-obj` はいずれも self を破壊的に変更して
+        self を返す（新しいクリップは作らない）。そのため
+        `a = src[0:2]` / `b = src[3:5]` と書くと a is b になり trim が2段
+        重なって片方しか出ない。同じ op が既に積まれていたら拒否する。
+        """
+        applied = [e.name for e in self.effects if e.name == video_name]
+        applied += [e.name for e in self.audio_effects if e.name == audio_name]
+        if applied:
+            raise ValueError(
+                f"{syntax} は既にこの Object へ適用済みです"
+                f"（{', '.join(sorted(set(applied)))} が積まれています）: {self.source}\n"
+                f"{syntax} は Object を破壊的に変更して同じ Object を返します"
+                f"（新しいクリップは作られません）。別の区間・回数が欲しいときは "
+                f"Object(src) で作り直してから書いてください"
+                f"（例: a = Object(src)[0:2]; b = Object(src)[3:5]）。")
+
     def __getitem__(self, key):
         """`obj[2:5]`: 素材時間の切り出し（イン点2秒〜アウト点5秒）。
 
@@ -462,6 +486,7 @@ class Object:
         表示尺は切り出し長（end-start）が既定になる（time()で上書き可）。
         負値は素材末尾からの相対（length()で解決。probe可能な素材のみ）。
         step（`obj[::2]`）は「2倍速」と「間引き」で曖昧なため不可（speed(2)を使う）。
+        **破壊的**: self を変更して self を返すので、同じ Object へ2回は使えない。
         """
         if not isinstance(key, slice):
             raise TypeError(
@@ -475,6 +500,7 @@ class Object:
             raise TypeError(
                 f"{self.media_type} には素材時間がないためスライスできません。"
                 f"表示尺は time(seconds) で指定してください。")
+        self._reject_time_op_reapply("obj[a:b]", "trim", "atrim")
         start = 0.0 if key.start is None else float(key.start)
         end = None if key.stop is None else float(key.stop)
         # 負値は素材末尾からの相対（probe が必要）
@@ -530,11 +556,12 @@ class Object:
         表示尺は「現時点の実効尺 × 回数」になる。繰り返す区間の尺は
         この時点で確定させて効果に焼き込む（後から time() で上書きしても
         繰り返し境界は変わらない）。
+        **破壊的**: self を変更して self を返すので、同じ Object へ2回は使えない。
         """
         if isinstance(count, bool) or not isinstance(count, int):
             raise TypeError(
                 f"* の右辺は繰り返し回数（2以上の整数）です: {count!r}"
-                f"（音量なら again(), 速度なら speed() を使ってください）")
+                f"（音量なら avolume(), 速度なら speed() を使ってください）")
         if count < 1:
             raise ValueError(f"* の繰り返し回数は1以上が必要です: {count}")
         if count == 1:
@@ -543,6 +570,7 @@ class Object:
             raise TypeError(
                 f"{self.media_type} には素材尺がないため * は使えません。"
                 f"time(seconds) で表示尺を指定してください。")
+        self._reject_time_op_reapply("obj * n", "repeat", "arepeat")
         segment = self.length()  # 繰り返す区間の実尺（この時点で確定）
         if self._has_video is not False and not self._video_deleted:
             self._append_effect(
@@ -557,7 +585,12 @@ class Object:
     __rmul__ = __mul__
 
     def __neg__(self):
-        """`-obj`: 逆再生（reverse() の糖衣。音声は反転されない）"""
+        """`-obj`: 逆再生（reverse() の糖衣。音声は反転されない）。
+
+        **破壊的**: self を変更して self を返すので、同じ Object へ2回は使えない
+        （`--obj` は元に戻るのではなく reverse が2段重なる）。
+        """
+        self._reject_time_op_reapply("-obj", "reverse", "reverse")
         self._append_effect(Effect("reverse"))
         return self
 
@@ -1294,4 +1327,4 @@ from scriptvedit.plugins import _EFFECT_PLUGINS
 from scriptvedit.project import Project
 from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIX_FMT, _BAKE_PIXFMT_VER, _CACHE_DIR, _ENGINE_VER, _GEN_COUNTER, _GEN_COUNTER_LOCK, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
 from scriptvedit.timeline import _link_after, _register_anchor_owner, pause
-from scriptvedit.validate import _require_time
+from scriptvedit.validate import _require_time, _validate_placement_anchor

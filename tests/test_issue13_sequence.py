@@ -7,7 +7,7 @@
 """
 import os
 import pytest
-from scriptvedit import Project, Object, asset, again, audio_sequence, video_sequence
+from scriptvedit import Project, Object, asset, avolume, audio_sequence, video_sequence
 
 
 def _require_asset(relpath):
@@ -67,7 +67,7 @@ def test_audio_sequence_rejects_effected_object():
     audio_src = _require_asset("audio/bgm_loop.mp3")
     p = _mk_project()
     o1 = Object(audio_src)
-    o1 <= again(0.5)
+    o1 <= avolume(0.5)
     o2 = Object(audio_src)
     with pytest.raises(ValueError, match="連結後"):
         audio_sequence(o1, o2)
