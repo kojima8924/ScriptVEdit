@@ -8,17 +8,28 @@
 import os
 import sys
 
-# 進捗表示は日本語のため、コンソールが日本語を符号化できないロケール
-# （英語版Windowsのcp1252等）では print が UnicodeEncodeError で
-# レンダ自体が落ちる。エンコーディングは変えず、符号化不能文字だけ
-# 置換して継続する（cp932/UTF-8環境には影響しない）。issue #13 CI で実測。
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        enc = (getattr(_stream, "encoding", None) or "").lower().replace("-", "")
-        if enc and enc != "utf8":
-            _stream.reconfigure(errors="replace")
-    except Exception:
-        pass  # リダイレクト先やIDE組込コンソール等、reconfigure非対応は無視
+def _fix_console_encoding():
+    """符号化不能文字で print が落ちないようコンソールを replace 化する。
+
+    進捗表示は日本語のため、コンソールが日本語を符号化できないロケール
+    （英語版Windowsのcp1252等）では print が UnicodeEncodeError で
+    レンダ自体が落ちる。エンコーディングは変えず、符号化不能文字だけ
+    置換して継続する（cp932/UTF-8環境には影響しない）。issue #13 CI で実測。
+
+    関数に包むのはループ変数・作業変数をモジュール名前空間へ残さないため
+    （以前は scriptvedit.enc / scriptvedit._stream が dir() の公開名に
+    混ざっていた。監査 項目15c）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+            if enc and enc != "utf8":
+                stream.reconfigure(errors="replace")
+        except Exception:
+            pass  # リダイレクト先やIDE組込コンソール等、reconfigure非対応は無視
+
+
+_fix_console_encoding()
 
 __all__ = [
     # コアクラス
@@ -106,7 +117,7 @@ from scriptvedit.assets import (  # noqa: F401
     asset, assets_dir, here, resolve_layer_path,
 )
 from scriptvedit.state import (  # noqa: F401
-    _ACTIVE_QUALITY, _ARTIFACT_DIR, _AUDIO_EXTS, _AVAILABLE_ENCODERS, _BAKEABLE_EFFECTS,
+    _ARTIFACT_DIR, _AUDIO_EXTS, _AVAILABLE_ENCODERS, _BAKEABLE_EFFECTS,
     _CACHE_DIR, _CONFIGURE_KEYS, _ENCODER_MAP, _ENGINE_VER, _GEN_COUNTER,
     _GEN_COUNTER_LOCK, _IMAGE_EXTS, _PRESETS, _REVERSE_MAX_SEC, _TERMINAL_FRAME_EFFECTS,
     _TIME_LIVE_EFFECTS, _VIDEO_EXTS, _WEB_EXTS, _detect_media_type, _suggest_hint,

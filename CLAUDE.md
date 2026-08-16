@@ -214,6 +214,12 @@ Effect は2種類ある。
 キャッシュとして残り、次回以降ずっと使われてしまう）。コマンド中に cache_path が
 現れなければ `ValueError` で即失敗する（置換漏れの検出）。
 
+**`__cache__` 配下は ffmpeg 出力だけでなくテキストも必ず `_atomic_write_*` 経由**
+（`text.py` の `_ensure_textfile`、`chapters.py` の `_write_chapters_metadata` 等）。
+ファイル名が内容ハッシュなので、切り詰められた残骸が一度でも残ると以後どのレンダでも
+再生成されず黙って使われ続ける。「存在すればスキップ」ガードも置かない
+（残骸を永久に温存する）。
+
 ### pad でキャンバスを広げたら `pad_size` を更新する
 
 overlay の中央配置は `(W-pad_size[0])/2` で計算される
@@ -280,7 +286,12 @@ overlay の中央配置は `(W-pad_size[0])/2` で計算される
    映像 Effect の実処理は `filters/video.py` に `_fx_<名前>(e, eff_idx, ctx)` を
    足し、`_FX_BUILDERS` に登録する（`ctx` は `_FxCtx`: `filters` へ append し、
    キャンバスを広げるなら `ctx.pad_size` を更新する。プラグインと同じ契約）。
-   フィルタ生成以外の段で処理する Effect は `_FX_SKIP` へ入れる。
+   フィルタ生成以外の段で処理する Effect は `_FX_HANDLED_ELSEWHERE`（overlay 合成 /
+   前処理 / 終端フレーム生成など「他の段で処理される Effect」の全集合）へ入れる。
+   **どちらの表にも無い名前は `ValueError`** になる（黙って捨てると、フィルタの
+   出ない空コマンドがそのままスナップショットに焼かれ以後永久に緑になるため）。
+   網羅性は `tests/test_fx_dispatch.py` が manifest の全 Effect を実構築した
+   内部 Effect 名で検証する。
    必ず `tests/` にスナップショット + エラーケースを追加する
    （`tests/layers/testNN_*.py` にレイヤーを置き、`test_snapshot.py` / `test_errors.py` に登録）。
 4. **マニフェストへの掲載は自動。** 網羅性テストが載せ忘れを検出するので、

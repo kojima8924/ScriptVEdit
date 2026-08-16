@@ -2456,17 +2456,36 @@ def check_draft_key_separation():
 
     以前は draft 時に鍵へ rq=draft を混ぜて分離していたが、生成される中間物の
     内容は draft/本番で同一のため、分離すると本番↔draft で全キャッシュミスに
-    なり無駄な再生成が起きる。よって鍵は共有されるのが正しい。"""
-    from scriptvedit import _checkpoint_cache_path, _ACTIVE_QUALITY, resize
-    ops = [("transform", resize(sx=0.5, sy=0.5))]
-    _ACTIVE_QUALITY[0] = ""
-    final_path = _checkpoint_cache_path(asset("images/shape_badge.png"), ops)
-    _ACTIVE_QUALITY[0] = "draft"
-    draft_path = _checkpoint_cache_path(asset("images/shape_badge.png"), ops)
-    _ACTIVE_QUALITY[0] = ""
-    if final_path == draft_path:
+    なり無駄な再生成が起きる。よって鍵は共有されるのが正しい。
+
+    鍵分離用のグローバル _ACTIVE_QUALITY は「書き込みだけで読み出しが無い
+    死んだ状態」だったため撤去済み（監査 項目15a）。ここでは実際のレンダ経路
+    （draft=True / draft=False）が同じチェックポイントパスを指すことを見る。"""
+    import tempfile
+    from scriptvedit import Project
+
+    layer_dir = tempfile.mkdtemp()
+    layer_path = os.path.join(layer_dir, "draftkey.py")
+    src = asset("images/shape_badge.png").replace("\\", "/")
+    with open(layer_path, "w", encoding="utf-8") as f:
+        f.write("from scriptvedit import *\n"
+                f"Object({src!r}).time(1) <= resize(sx=0.5, sy=0.5)\n")
+
+    def _checkpoints(draft):
+        p = Project()
+        p.configure(width=64, height=36, fps=10)
+        p.layer(layer_path)
+        result = p.render(os.path.join(layer_dir, "o.mp4"),
+                          dry_run=True, draft=draft)
+        return sorted(k for k in result["cache"] if "checkpoint" in k)
+
+    final_paths = _checkpoints(False)
+    draft_paths = _checkpoints(True)
+    if not final_paths:
+        return False, "チェックポイントが計画されていない（テストの前提崩れ）"
+    if final_paths == draft_paths:
         return True, "draft/final鍵共有OK（無駄な再生成なし）"
-    return False, "鍵が分離している（rqが残存）"
+    return False, f"鍵が分離している: {final_paths} != {draft_paths}"
 
 
 def check_voice_without_tts_module():

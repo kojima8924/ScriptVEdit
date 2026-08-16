@@ -213,6 +213,15 @@ class _FuncCall(Expr):
 
     @classmethod
     def _get_eval_funcs(cls):
+        """定数畳み込み / eval_at 用の評価関数表。
+
+        ここは ffmpeg (libavutil/eval.c) の意味論をミラーする。Python の同名関数と
+        意味が違う場合は必ず ffmpeg 側に合わせること（例: round は C の round =
+        絶対値方向で、Python の偶数丸めではない）。ずれていると
+        「定数畳み込みでは 2、実行時の ffmpeg では 3」のように、
+        同じ式が定数か動的かで結果が変わる。
+        また、ffmpeg に存在しない関数名をここへ足さないこと
+        （`_make_func` してよい名前と誤解される）。"""
         if cls._EVAL_FUNCS is None:
             cls._EVAL_FUNCS = {
                 'sin': _math.sin, 'cos': _math.cos, 'tan': _math.tan,
@@ -220,7 +229,11 @@ class _FuncCall(Expr):
                 'atan2': _math.atan2, 'sinh': _math.sinh, 'cosh': _math.cosh,
                 'tanh': _math.tanh, 'exp': _math.exp, 'log': _math.log,
                 'sqrt': _math.sqrt, 'floor': _math.floor, 'ceil': _math.ceil,
-                'trunc': _math.trunc, 'round': _builtins.round,
+                'trunc': _math.trunc,
+                # C の round と同じ「絶対値方向（half away from zero）」。
+                # Python の round は偶数丸めなので使わない
+                'round': lambda x: (_math.floor(x + 0.5) if x >= 0
+                                    else _math.ceil(x - 0.5)),
                 'abs': _builtins.abs, 'pow': _builtins.pow,
                 'min': _builtins.min, 'max': _builtins.max,
                 'mod': lambda a, b: a % b,
@@ -235,12 +248,10 @@ class _FuncCall(Expr):
                 # 論理AND/ORは and_()/or_() が gt/abs の組み合わせへ変換する。
                 'not': lambda a: 1.0 if a == 0 else 0.0,
                 'between': lambda x, lo, hi: 1.0 if lo <= x <= hi else 0.0,
-                'sign': lambda x: (1.0 if x > 0 else (-1.0 if x < 0 else 0.0)),
+                # 注意: sign/log10/cbrt は ffmpeg の式評価器に存在しない関数なので
+                # ここには置かない（公開の sign()/log10()/cbrt() は if/gt・log・pow の
+                # 組み合わせへ展開されるため、この表を引くことは無い）
                 'random': lambda seed: 0.5,  # eval_at用ダミー（ffmpegランタイムで評価）
-                'log10': lambda x: _math.log10(x),
-                'cbrt': lambda x: (
-                    (1.0 if x > 0 else (-1.0 if x < 0 else 0.0))
-                    * _builtins.pow(_builtins.abs(x), 1/3)),
             }
         return cls._EVAL_FUNCS
 

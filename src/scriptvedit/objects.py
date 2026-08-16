@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import os
-import hashlib
 import math as _math
 import builtins as _builtins
 import shutil as _shutil
@@ -284,6 +283,13 @@ def _web_frame_count(duration, fps):
 
 
 class Object:
+    # 生成元のレイヤーファイル名（Project._stamp_layer_origin が刻む）。
+    # None のままレンダに入ったアイテムは「レイヤーファイルの外で作られた」＝
+    # render() のレイヤー再実行で無言破棄される、という意味なので
+    # Project._begin_render_pass が ValueError で弾く。
+    # text() 等 __new__ 経由で組み立てるファクトリのためにクラス属性で既定を持つ。
+    _defined_in_layer = None
+
     def __init__(self, source, **kwargs):
         self.source = source
         self.transforms = []
@@ -822,10 +828,12 @@ class Object:
         """compute用キャッシュパスを計算"""
         ops = _build_unified_ops(self)
         sigs = []
-        try:
-            sigs.append(f"ffp={_file_fingerprint(self.source)}")
-        except OSError:
-            sigs.append(f"src={self.source.replace(chr(92), '/')}")
+        # 署名は _src_signature に一本化する（キャッシュ生成物＝パス署名 /
+        # 素材＝内容指紋）。生の _file_fingerprint だと self.source が
+        # __cache__ 配下の生成物（2段目の compute、from_project の subproject
+        # webm）のとき、dry_run では未生成で OSError→パス署名、実レンダでは
+        # 内容指紋、と鍵が食い違う（CLAUDE.md §5 が潰した罠）。
+        sigs.append(_src_signature(self.source))
         sigs.append(_op_prefix_fingerprint(ops))
         quality = _ops_effective_quality(ops)
         sigs.append(f"q={quality}")
@@ -845,8 +853,9 @@ class Object:
             # 中間ベイクのpix_fmt世代（.mkvを焼く動画computeのみ。静止画PNGは無関係）
             sigs.append(f"bpf={_BAKE_PIXFMT_VER}")
         key = _sig_key(sigs)
-        src_hash = hashlib.sha256(
-            self.source.replace("\\", "/").encode()).hexdigest()[:8]
+        # バケットも _src_bucket に統一（生パス由来だとリポジトリを移動しただけで
+        # compute キャッシュが全ミスする＝移植性が壊れる）
+        src_hash = _src_bucket(self.source)
         ext = ".mkv" if duration is not None else ".png"
         return os.path.join(_ARTIFACT_DIR, "compute", src_hash, f"{key}{ext}")
 
@@ -1278,7 +1287,7 @@ def group(*objects):
 
 
 # --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---
-from scriptvedit.cache import _build_unified_ops, _file_fingerprint, _fold_time_effects, _op_prefix_fingerprint, _ops_effective_quality, _sig_key, _src_signature, _web_cache_path
+from scriptvedit.cache import _build_unified_ops, _fold_time_effects, _op_prefix_fingerprint, _ops_effective_quality, _sig_key, _src_bucket, _src_signature, _web_cache_path
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions
 from scriptvedit.plugins import _EFFECT_PLUGINS

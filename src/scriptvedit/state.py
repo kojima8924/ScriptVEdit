@@ -73,9 +73,6 @@ _GEN_COUNTER = [0]
 import threading as _threading
 _GEN_COUNTER_LOCK = _threading.Lock()
 
-# 有効な出力品質サフィックス（draft時にチェックポイント鍵へ混ぜ本番と分離）
-_ACTIVE_QUALITY = [""]
-
 # ffmpeg 利用可能エンコーダ集合のキャッシュ（None=未取得）
 _AVAILABLE_ENCODERS = [None]
 

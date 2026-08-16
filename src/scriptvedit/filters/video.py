@@ -711,12 +711,19 @@ def _fx_plugin(e, eff_idx, ctx):
     ctx.pad_size = pad_state[0]
 
 
-# _build_effect_filters が扱わない Effect（他の段で処理される）。
-# blend_mode は overlay合成段（_build_video_overlay_parts）、
-# speed/reverse/freeze_frame は前処理（_build_video_pre_filters）で処理
-_FX_SKIP = frozenset({
-    "move", "trim", "delete", "morph_to", "shake",
-    "blend_mode", "speed", "reverse", "freeze_frame",
+# _build_effect_filters が扱わない Effect = 「他の段で処理される Effect」の全集合。
+# _FX_BUILDERS との和が、実行時に現れうる Effect 名を過不足なく覆っていなければならない
+# （tests/test_fx_dispatch.py のメタテストが manifest 由来の実構築名で検証する）。
+#   move / shake        … overlay 座標の変調（_build_move_exprs）
+#   trim / speed / reverse / freeze_frame / repeat … 前処理（_build_video_pre_filters）
+#   delete              … 入力段で映像ごと捨てる
+#   blend_mode          … overlay 合成段（_build_video_overlay_parts）
+#   morph_to / explode_to / assemble_from … 終端フレーム生成（effects/terminal.py、
+#                          project.py の checkpoint 段で素材そのものを差し替える）
+_FX_HANDLED_ELSEWHERE = frozenset({
+    "move", "trim", "delete", "shake",
+    "blend_mode", "speed", "reverse", "freeze_frame", "repeat",
+    "morph_to", "explode_to", "assemble_from",
 })
 
 # effect名 → ビルダー関数のディスパッチテーブル（プラグインは _EFFECT_PLUGINS 参照）
@@ -758,13 +765,20 @@ def _build_effect_filters(obj, start, dur, base_dims=None, label_prefix="fx"):
     """
     ctx = _FxCtx(obj, start, dur, base_dims, label_prefix)
     for eff_idx, e in enumerate(obj.effects):
-        if e.name in _FX_SKIP:
+        if e.name in _FX_HANDLED_ELSEWHERE:
             continue
         builder = _FX_BUILDERS.get(e.name)
         if builder is not None:
             builder(e, eff_idx, ctx)
         elif e.name in _EFFECT_PLUGINS:
             _fx_plugin(e, eff_idx, ctx)
+        else:
+            # 未登録名を黙って捨てると「フィルタが出ないコマンド」がそのまま
+            # スナップショットに焼かれ、以後永久に緑のまま絵だけが消える。
+            # プラグイン未ロードの場合も同様に落とす（黙って消えるより明示的に失敗させる）
+            raise ValueError(
+                f"未登録の Effect 名です: {e.name}"
+                f"（_FX_BUILDERS か _FX_HANDLED_ELSEWHERE へ登録してください）")
     return ctx.filters, ctx.pad_size
 
 

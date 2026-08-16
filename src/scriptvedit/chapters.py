@@ -152,8 +152,7 @@ def _write_chapters_metadata(project, path):
         lines.append(f"START={start_ms}")
         lines.append(f"END={end_ms}")
         lines.append(f"title={safe}")
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    # 書き込み先は __cache__ 配下の content-addressed なパス（_chapters_metadata_path）。
+    # 直書きすると中断時に切り詰められた残骸がそのまま「生成済み」と見なされるため、
+    # 必ず tmp→os.replace の原子的書き込み経由にする（並列レンダからの同時到達も無害化）
+    _atomic_write_text(path, "\n".join(lines) + "\n")

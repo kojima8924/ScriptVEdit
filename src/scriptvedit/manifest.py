@@ -373,7 +373,9 @@ _MANIFEST_CONSTRAINTS = [
         "text": "1ファイル = 1レイヤー。レイヤー .py の先頭は必ず "
                 "`from scriptvedit import *`。レイヤー内で作った Object は exec 中に "
                 "Project へ自動登録されるので、p.objects.append() の手動追加はしない"
-                "（render 時のレイヤー再実行で消える）。",
+                "（render 時のレイヤー再実行で消える）。"
+                "main.py 等レイヤーファイルの外で Object を作ると同じ理由で"
+                "破棄されるため、render() が ValueError で検出して停止する。",
     },
     {
         "id": "terminal_frame_effect_last",

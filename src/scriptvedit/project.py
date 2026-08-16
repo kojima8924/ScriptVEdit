@@ -82,7 +82,21 @@ class Project:
         self._render_quality = "final"
         self._thumbnail_at = None   # thumbnail()実行中のみ非None
         self._storyboard_frame_indices = None  # storyboard一括抽出中のframe番号
-        Project._current = self
+        # --- レンダパス中にだけ意味を持つフラグ（_begin_render_pass が上書きする）---
+        # 「常に存在する属性」と「レンダ中にしか存在しない属性」の境界を
+        # コードから読めるよう、既定値をここで明示する（getattr 防御を減らす）。
+        self._dry_run = False           # dry_run（コマンド収集のみ）
+        self._alpha = False             # 透過出力（from_project のサブレンダ等）
+        self._audio_only_render = False  # 並列レンダの音声専用パス
+        self._pending_compute_cmds = {}  # dry_run 中の compute 生成コマンド
+        self._plan_structure = None     # Plan pass のレイヤー構造署名
+        self._generated = 0             # レンダ開始時の生成カウンタ基準値
+        self._render_planned = {}       # 中間生成物パス → レンダ開始前に存在したか
+        # レイヤー実行中に作られた Project は _current を奪わない。
+        # 奪うと `sub = Project()` 以降のレイヤー内 Object がサブへ吸われ、
+        # 親のタイムラインから無言で消える（監査 項目2）。
+        if not Project._exec_stack:
+            Project._current = self
 
     def configure(self, **kwargs):
         unknown = set(kwargs.keys()) - _CONFIGURE_KEYS
@@ -325,7 +339,12 @@ class Project:
         return out
 
     def _reset_runtime_state(self):
-        """render()用の実行時状態をリセット"""
+        """レンダ間で持ち越さない「構造状態」をリセットする。
+
+        タイムライン（objects/layers/anchors）とレイヤー exec で再構築される
+        メタ情報が対象。レンダパスごとのフラグ（_dry_run 等）は
+        _begin_render_pass の担当で、ここでは触らない。
+        """
         self.duration = self._configured_duration
         self.objects = []
         self._layers = []
@@ -338,22 +357,94 @@ class Project:
         self._layer_audio_sources = {}
         self._layer_unknown_audio_sources = {}
         self._layer_params = {}
+        self._plan_structure = None
+
+    @staticmethod
+    def _describe_timeline_item(item):
+        """診断メッセージ用に、タイムラインアイテムを短い呼び出し形で表す。"""
+        spec = getattr(item, "_text_spec", None)
+        if spec:
+            body = str(spec.get("content", ""))
+            if len(body) > 20:
+                body = body[:20] + "…"
+            return f"{spec.get('kind', 'text')}('{body}')"
+        kind = type(item).__name__
+        if kind == "_AnchorMarker":
+            return f"anchor('{getattr(item, 'name', '')}')"
+        if kind == "Pause":
+            return "pause"
+        if kind == "_ScenePad":
+            return f"scene('{getattr(item, 'scene_name', '')}')"
+        source = getattr(item, "source", None)
+        if source is not None:
+            return f"Object('{source}')"
+        return type(item).__name__
+
+    def _check_layer_defined_objects(self):
+        """レイヤーファイルの外で作られたアイテムを検出して拒否する。
+
+        render() は Plan/Render の各パスでレイヤー .py を再実行し、その前に
+        objects を空へ戻す（_reset_runtime_state）。したがって main.py 等
+        レイヤー exec の外で作った Object は無言で破棄され、ffmpeg は正常
+        終了して「完了」とだけ表示される。CLAUDE.md §1 の中核契約
+        （レイヤー内 Object の自動登録）が静かに破れる唯一の経路なので、
+        レンダ開始前に明示エラーへ変える。
+
+        前回レンダの残骸は _stamp_layer_origin 済み（_defined_in_layer が
+        非 None）なので、2回目以降の render() は誤検出しない。
+        """
+        stray = [o for o in self.objects
+                 if getattr(o, "_defined_in_layer", None) is None]
+        if not stray:
+            return
+        shown = ", ".join(self._describe_timeline_item(o) for o in stray[:5])
+        if len(stray) > 5:
+            shown += f" ほか{len(stray) - 5}件"
+        raise ValueError(
+            f"Object がレイヤーファイルの外（main.py 等）で作られています: "
+            f"{shown}。\n"
+            f"render() はレイヤー .py を再実行する前にタイムラインを空へ戻すため、"
+            f"これらは破棄され動画に出ません。\n"
+            f"p.layer('xxx.py') に登録した .py の中へ移してください。")
+
+    def _note_planned_artifact(self, path):
+        """このレンダが必要とする中間生成物を統計へ記録する（生成する前に呼ぶ）。
+
+        値は「このレンダを始める前から存在したか」＝キャッシュヒット。
+        複数のObjectが同じ生成物を共有する場合は最初の観測（＝生成前の状態）を
+        残すため、二重計上も生成後の誤ヒットも起きない。
+        """
+        if path not in self._render_planned:
+            self._render_planned[path] = os.path.exists(path)
+
+    def _stamp_layer_origin(self, start_idx, end_idx, filename):
+        """レイヤー由来のアイテムに生成元レイヤーファイル名を刻む。
+
+        構築側（Object/text()/pause/anchor/scene）ではなくレイヤー実行側で
+        一括して刻むことで、登録経路が増えても刻み漏れが起きない。
+        """
+        for item in self.objects[start_idx:end_idx]:
+            item._defined_in_layer = filename
 
     def _begin_render_pass(self, *, dry_run=False, draft=False, alpha=False):
         """render/thumbnail 共通のレンダ状態初期化（preview.py と共有）。
 
-        実行時状態のリセット・各種フラグ・保留computeコマンド・部分レンダ窓を
-        既定へ設定する。draft時はチェックポイント/morph鍵を本番と分離する
-        （_ACTIVE_QUALITY）。
+        1回のレンダパスに固有のフラグ（dry_run/draft/alpha/部分レンダ窓・
+        保留 compute コマンド）を既定へ設定し、構造状態は
+        _reset_runtime_state に委ねる。
+        中間生成物の内容は draft でも本番でも同一なのでキャッシュ鍵は共有する
+        （cache.py の方針と同じ。draft で鍵を分離すると同じ絵を二度焼く）。
         """
+        # objects を捨てる前に、レイヤー外で作られたアイテムを検出する
+        self._check_layer_defined_objects()
         self._reset_runtime_state()
         self._dry_run = dry_run
         self._draft = bool(draft)
         self._alpha = bool(alpha)
         self._render_quality = "draft" if self._draft else "final"
-        _ACTIVE_QUALITY[0] = "draft" if self._draft else ""
         self._pending_compute_cmds = {}
         self._render_window = None
+        self._render_planned = {}
 
     def _resolve_plan_duration(self):
         """Plan pass（アンカー解決。cache模擬、objects破棄）→総尺確定。
@@ -524,6 +615,7 @@ class Project:
             Project._current = self
         end_idx = len(self.objects)
         self._layers.append((start_idx, end_idx, priority))
+        self._stamp_layer_origin(start_idx, end_idx, filename)
         for obj in self.objects[start_idx:end_idx]:
             override = getattr(obj, '_priority_override', None)
             obj.priority = override if override is not None else priority
@@ -623,7 +715,7 @@ class Project:
 
         キャッシュ再生されたレイヤーは構造が変わって当然なので比較しない。
         """
-        plan = getattr(self, "_plan_structure", None)
+        plan = self._plan_structure
         if plan is None:
             return
         current = self._layer_structure_signature()
@@ -800,20 +892,9 @@ class Project:
     def render(self, output_path, *, dry_run=False, timeout=None,
                start=None, end=None, draft=False, alpha=False, strict=False,
                parallel=None):
-        # _ACTIVE_QUALITY を try/finally で復元（draft レンダ後に "draft" が
-        # 残留して別レンダの鍵に混入するのを防ぐ。dry_run早期returnや例外時も復元）
-        _prev_active_quality = _ACTIVE_QUALITY[0]
-        try:
-            return self._render_impl(
-                output_path, dry_run=dry_run, timeout=timeout,
-                start=start, end=end, draft=draft, alpha=alpha, strict=strict,
-                parallel=parallel)
-        finally:
-            _ACTIVE_QUALITY[0] = _prev_active_quality
-
-    def _render_impl(self, output_path, *, dry_run=False, timeout=None,
-                     start=None, end=None, draft=False, alpha=False,
-                     strict=False, parallel=None):
+        # 以前はここに _ACTIVE_QUALITY の退避/復元だけを行う薄いラッパがあったが、
+        # そのグローバルは書き込み専用（読み出しが存在しない＝効かないつまみ）
+        # だったため撤去し、実装をこのメソッドへ統合した（監査 項目15a）。
         # 時間分割並列レンダのチャンク数。configure(parallel=N)は「キャッシュ
         # 並列生成のワーカ数」で別物（キャッシュ側の意味は従来どおり維持）
         if parallel is not None and (
@@ -836,7 +917,8 @@ class Project:
                 f"configure() で幅・高さを偶数にするか、"
                 f"pngシーケンス（.png）や .gif など奇数解像度を扱える形式で"
                 f"出力してください。")
-        _GEN_COUNTER[0] = 0
+        # 生成数はこのレンダ開始時点を基準にした増分で数える（0リセットしない）
+        self._generated = _GEN_COUNTER[0]
         _t0 = _time.perf_counter()
         # 部分レンダの時間窓を検証・保持（式のt基準は保ちつつ窓外を出力しない）
         if start is not None or end is not None:
@@ -885,52 +967,20 @@ class Project:
         self._prune_window_invisible_web_objects()
 
         if dry_run:
-            web_cmds = self._collect_web_cmds()
-            # web Objectのsourceを予定webmパスに仮差し替え
-            # （layer cache / checkpoint収集より前。-i xxx.html の混入を防ぐ）
-            for obj in self.objects:
-                if isinstance(obj, Object) and obj.media_type == "web":
-                    obj.source = _web_cache_path(obj, self)
-                    obj.media_type = "video"
-            cache_cmds = self._collect_cache_cmds()
-            checkpoint_cmds = self._collect_checkpoint_cmds()
+            all_extra = self._collect_all_extra_cmds()
             cmd = self._build_ffmpeg_cmd(output_path)
-            all_extra = {}
-            if cache_cmds:
-                all_extra.update(cache_cmds)
-            if web_cmds:
-                all_extra.update(web_cmds)
-            if checkpoint_cmds:
-                all_extra.update(checkpoint_cmds)
-            if self._pending_compute_cmds:
-                all_extra.update(self._pending_compute_cmds)
             # 常に {"main": 最終コマンド, "cache": {出力パス: 生成コマンド}} を返す
             # （cache が空でも形は同じ。呼び出し側の分岐を不要にする）
             return {"main": cmd, "cache": all_extra}
 
+        # 統計（ヒット/ミス）は生成側の各段が _note_planned_artifact で記録する。
+        # 以前はここで _collect_* を空回しして数え、その破壊的な副作用を
+        # 手動スナップショットで巻き戻していたが、巻き戻し漏れが起きると
+        # Object が壊れたまま本レンダへ進む脆い構造だった（監査 項目14）。
         self._ensure_formula_objects()
         self._ensure_web_objects()
-        # 統計: このレンダが参照する中間生成物のうち既存(ヒット)/未生成(ミス)を数える
-        # 注意: _collect_* はdry_run用でobj.source等を予測パスへ破壊的に差し替えるため、
-        #       状態をスナップショットして復元してから実生成へ進む
-        planned = set()
-        _snap = [(o, o.source, o.media_type, list(o.transforms), list(o.effects),
-                  getattr(o, "_resolved_length", None))
-                 for o in self.objects if isinstance(o, Object)]
-        try:
-            planned |= set(self._collect_checkpoint_cmds().keys())
-            planned |= set(self._collect_cache_cmds().keys())
-            planned |= set(self._collect_web_cmds().keys())
-            planned |= set(self._pending_compute_cmds.keys())
-        except Exception:
-            planned = set()
-        finally:
-            for o, src, mt, tr, ef, rl in _snap:
-                o.source, o.media_type = src, mt
-                o.transforms, o.effects = tr, ef
-                o._resolved_length = rl
-        cache_hits = sum(1 for p in planned if os.path.exists(p))
-        cache_misses = len(planned) - cache_hits
+        for path in self._pending_compute_cmds:
+            self._note_planned_artifact(path)
         self._ensure_checkpoints()
         n_chunks = _parallel_chunk_count(self, parallel, output_path)
         if n_chunks >= 2:
@@ -965,7 +1015,12 @@ class Project:
                         pass
         self._generate_pending_caches()
         elapsed = _time.perf_counter() - _t0
-        generated = _GEN_COUNTER[0]
+        # ネストrender（from_project）は同じグローバルカウンタを共有するため、
+        # 0へリセットせず「このレンダ開始時からの増分」を数える
+        # （リセットするとネストより前に親が生成した分が消える。監査 項目15d）
+        generated = _GEN_COUNTER[0] - self._generated
+        cache_hits = sum(1 for existed in self._render_planned.values() if existed)
+        cache_misses = len(self._render_planned) - cache_hits
         print(f"\n完了: {output_path}")
         mode = "ドラフト" if draft else "本番"
         if n_chunks >= 2:
@@ -1282,6 +1337,7 @@ class Project:
         self.objects.append(cached_obj)
         end_idx = len(self.objects)
         self._layers.append((start_idx, end_idx, spec["priority"]))
+        self._stamp_layer_origin(start_idx, end_idx, spec["filename"])
 
     def _get_layer_data(self, spec_index):
         """指定レイヤーのオブジェクト群とアンカー群を取得"""
@@ -1311,8 +1367,36 @@ class Project:
                 current_time += item.duration
         return objects, anchors
 
+    def _collect_all_extra_cmds(self):
+        """中間生成物（web/checkpoint/レイヤーキャッシュ/compute）の生成コマンド辞書。
+
+        収集順は実レンダの実行順に一致させる:
+        _ensure_web_objects → _ensure_checkpoints → _generate_pending_caches。
+        _collect_checkpoint_cmds は obj.source をチェックポイント成果物へ
+        破壊的に差し替えるため、cache を先に集めると「実レンダでは走らない
+        コマンド」（素材を直接入力にしたレイヤーキャッシュ）を返してしまう。
+        収集順は必ずこの1箇所に閉じ込めること。
+        """
+        extra = {}
+        extra.update(self._collect_web_cmds())
+        # web Objectのsourceを予定webmパスに仮差し替え
+        # （layer cache / checkpoint収集より前。-i xxx.html の混入を防ぐ）
+        for obj in self.objects:
+            if isinstance(obj, Object) and obj.media_type == "web":
+                obj.source = _web_cache_path(obj, self)
+                obj.media_type = "video"
+        extra.update(self._collect_checkpoint_cmds())
+        extra.update(self._collect_cache_cmds())
+        extra.update(self._pending_compute_cmds)
+        return extra
+
     def _collect_cache_cmds(self):
-        """dry_run用のキャッシュ生成コマンド辞書構築"""
+        """dry_run用のキャッシュ生成コマンド辞書構築。
+
+        必ず _collect_checkpoint_cmds の後に呼ぶこと（実レンダの
+        _generate_pending_caches と同じオブジェクト状態＝チェックポイント
+        適用後を見るため）。順序は _collect_all_extra_cmds が保証する。
+        """
         cache_cmds = {}
         for i, spec in enumerate(self._layer_specs):
             # "make" は常に生成（"auto" はキャッシュ有無に関わらず生成コマンドを持たない）
@@ -1655,6 +1739,9 @@ class Project:
         plan = self._plan_object_checkpoints(obj)
         if plan is None:
             return
+        # 統計は実行の前に記録する（実行後だと自分で作った物をヒットと数える）
+        for step in plan["steps"]:
+            self._note_planned_artifact(step["path"])
         # 復元点チェック（bakeable_opsベース）: 復元点以前のステップは既存
         # キャッシュを使うため実行しない（後続が参照する入力パスは計画が
         # 同一規則で解決済みなので、実行の有無でコマンドは変わらない）
@@ -1825,6 +1912,10 @@ class Project:
             if not obj._web_capture_spec(self)["visible"]:
                 continue
             webm_path = _web_cache_path(obj, self)
+            # 旧実装は _ensure_web_objects の後で _collect_web_cmds を呼んでおり
+            # （media_type が既に "video" なので常に空）、Webクリップだけが
+            # 統計に一度も計上されていなかった（監査 項目14）
+            self._note_planned_artifact(webm_path)
 
             if not os.path.exists(webm_path):
                 print(f"Webクリップ生成: {obj.source}")
@@ -1886,6 +1977,9 @@ class Project:
                    if spec["cache"] == "make"]
         if not pending:
             return
+        for i in pending:
+            self._note_planned_artifact(
+                self._layer_cache_paths_for(self._layer_specs[i])[0])
         workers = _builtins.min(self._parallel_workers(), len(pending))
         if workers <= 1 or len(pending) == 1:
             for i in pending:
@@ -2077,7 +2171,7 @@ class Project:
           has_audio: この形式が音声トラックを持てるか
           output_path: 実際にffmpegへ渡す出力パス（連番PNGは %05d 化）
         """
-        alpha = bool(getattr(self, "_alpha", False))
+        alpha = bool(self._alpha)
         if getattr(self, "_storyboard_frame_indices", None) is not None:
             return {"kind": "storyboard", "alpha": False, "has_audio": False,
                     "output_path": output_path}
@@ -2113,7 +2207,7 @@ class Project:
 
         # 音声レグ（並列レンダ）: 映像は-mapしないため、全尺キャンバスの
         # 生成コストを避けてダミーの極小入力に差し替える（入力indexは維持）
-        audio_only = bool(getattr(self, "_audio_only_render", False))
+        audio_only = bool(self._audio_only_render)
 
         # 背景入力（alpha出力時は透明キャンバス）
         if audio_only:
@@ -2323,7 +2417,7 @@ class Project:
         emit_meta = bool(self._markers) and fmt["has_audio"] and not audio_only
         if emit_meta:
             meta_path = _chapters_metadata_path(self)
-            if not getattr(self, "_dry_run", False):
+            if not self._dry_run:
                 _write_chapters_metadata(self, meta_path)
             # メタ入力のストリーム index = 既存 -i 個数（color 1 + オブジェクト入力数）
             meta_idx = 1 + len(sorted_objects)
@@ -2408,7 +2502,7 @@ class Project:
                 args.append("-an")
             return args
         # h264 / 指定エンコーダ（yuv420p固定・透過非対応コンテナ）
-        if getattr(self, "_alpha", False):
+        if self._alpha:
             raise ValueError(
                 f"alpha=True は透過対応の出力(.webm/.webp/.png)でのみ有効です。\n"
                 f"現在の出力形式({kind})では yuv420p 固定のため透明背景が黒潰れします。\n"
@@ -2450,7 +2544,7 @@ from scriptvedit.filters.video import _build_effect_filters, _build_input_args, 
 from scriptvedit.objects import Object, _web_frames_dir
 from scriptvedit.assets import resolve_layer_path
 from scriptvedit.plugins import _EFFECT_PLUGINS, _autoload_plugins
-from scriptvedit.state import _ACTIVE_QUALITY, _BAKE_PIX_FMT, _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _PRESETS, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
+from scriptvedit.state import _BAKE_PIX_FMT, _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _PRESETS, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
 from scriptvedit.timeline import Pause, Scene, _AnchorMarker, _ScenePad
 from scriptvedit.validate import _require_number, _require_time, _validate_ffmpeg_color
 # 分割サブシステム（audit.py と同じ「project を第1引数に受ける自由関数」方式）
