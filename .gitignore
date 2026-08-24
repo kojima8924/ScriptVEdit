@@ -1,6 +1,8 @@
 # Python
 __pycache__/
 .pytest_cache/
+.coverage
+htmlcov/
 
 # scriptvedit キャッシュ
 __cache__/
