@@ -1,6 +1,6 @@
 # scriptvedit ショーケース動画（ポートフォリオ用）
 #
-# fresh clone では slides/watermark.png 等の生成物が無い（gitignore 対象）ため、
+# fresh clone では slides/watermark.png（gitignore 対象の生成物）が無いため、
 # レンダ前に showcase_generate.py を自動実行して決定論的に生成する。
 import importlib.util
 import os
@@ -21,7 +21,7 @@ def ensure_generated():
         import PIL  # noqa: F401
     except ImportError:
         raise SystemExit(
-            "スライド生成物（slides/watermark.png 等）が無く、生成には Pillow が必要です。\n"
+            "生成物（slides/watermark.png）が無く、生成には Pillow が必要です。\n"
             "  pip install Pillow\n"
             "を実行してから再度レンダしてください（showcase_generate.py が生成します）。"
         )

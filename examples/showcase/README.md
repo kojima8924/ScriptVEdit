@@ -5,7 +5,7 @@
 ## 依存
 
 - `pip install -e .[all]`（リポジトリルートで実行。ffmpeg / ffprobe が PATH に必要）
-- **Pillow**（スライド画像・ウォーターマークの生成に必要）: `pip install Pillow`
+- **Pillow**（ウォーターマーク画像の生成に必要）: `pip install Pillow`
 - **Playwright + Chromium**（HTML スライドのレンダリングに必要）:
   `pip install playwright && playwright install chromium`
 - 任意: BGM 用の音声ファイル（後述）
@@ -17,7 +17,7 @@ cd examples/showcase
 python render_showcase.py
 ```
 
-`slides/watermark.png` 等の生成物（gitignore 対象）が無ければ、
+`slides/watermark.png`（gitignore 対象の生成物）が無ければ、
 `showcase_generate.py` が自動実行されて決定論的に生成される。
 手動で再生成したい場合は次を実行する。
 
@@ -32,7 +32,7 @@ python showcase_generate.py
 | ファイル | 役割 |
 |---|---|
 | `render_showcase.py` | main。構成（レイヤー順・出力）だけを持つ |
-| `showcase_generate.py` | スライド PNG / ウォーターマーク PNG を PIL で生成 |
+| `showcase_generate.py` | ウォーターマーク PNG（`slides/watermark.png`）を PIL で生成 |
 | `showcase_slides.py` | HTML スライド4枚のレイヤー（`slides/*.html` は追跡済み） |
 | `showcase_objects.py` | 移動・イージングのデモオブジェクト |
 | `showcase_watermark.py` | ウォーターマーク（`slides/watermark.png` を参照） |
