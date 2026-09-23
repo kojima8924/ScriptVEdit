@@ -39,13 +39,16 @@ jobs:
       #     この2ステップを書き換えること(監査 issue #17 の方針):
       #       gh api "repos/BtbN/FFmpeg-Builds/releases?per_page=3" \
       #         --jq '.[] | {tag: .tag_name, assets: [.assets[] | select(.name | contains("gpl-8")) | {name, digest}]}'
+      #     同じリリースに 9.0 系も並んでいるので、必ず名前が "gpl-8" で終わる方を選ぶ。
+      #     digest は GitHub が算出した値なので、190MB を落とさずそのまま使える。
+      #     (2026-09-21 に実際にピンが 404 になり、autobuild-2026-09-20-13-11 へ張り替えた)
       # ---------------------------------------------------------------------
       - name: FFmpeg を導入 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ffUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-15-13-02/ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip"
-          $ffSha = "0e7829b6e1ba867e37bbad17153de258bd3bffaa3b745626a6424df0ea113970"
+          $ffUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-20-13-11/ffmpeg-n8.1.2-267-gb2f422d306-win64-gpl-8.1.zip"
+          $ffSha = "66945d35abe59eafba7ebe20c1340adee816302820d89dfe64b739e8d9a8157b"
           curl.exe -fsSL -o "$env:RUNNER_TEMP\ffmpeg.zip" $ffUrl
           $actual = (Get-FileHash "$env:RUNNER_TEMP\ffmpeg.zip" -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $ffSha) { Write-Error "SHA-256 不一致: $actual"; exit 1 }
@@ -56,8 +59,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
-          FF_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-15-13-02/ffmpeg-n8.1.2-44-g7c533d0f86-linux64-gpl-8.1.tar.xz"
-          FF_SHA256="01f4a27f58acbea7c484232a62a7381f716ddf000e8f311b791f8bfc7c8912aa"
+          FF_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-20-13-11/ffmpeg-n8.1.2-267-gb2f422d306-linux64-gpl-8.1.tar.xz"
+          FF_SHA256="9575ed910aeca8e34427409c6c1c5c774e741cadad6c85f2c4b5e7fc3cd8f72e"
           curl -fsSL -o /tmp/ffmpeg.tar.xz "$FF_URL"
           echo "$FF_SHA256  /tmp/ffmpeg.tar.xz" | sha256sum -c -
           mkdir -p /tmp/ffdist && tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ffdist --strip-components=1
