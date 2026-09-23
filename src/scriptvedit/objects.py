@@ -305,6 +305,13 @@ class Object:
     # text() 等 __new__ 経由で組み立てるファクトリのためにクラス属性で既定を持つ。
     _defined_in_layer = None
 
+    # 音声を取り出す素材パス（None なら source と同じ）。チェックポイントは
+    # 映像専用（-an）なので、source が中間物へ差し替わった Object の音声は
+    # ここが指す元素材から取る（Project._apply_checkpoint_final_state が刻む）。
+    # __new__ 経由で組み立てる経路（text / from_project / レイヤーキャッシュ）
+    # にも既定を行き渡らせるためクラス属性で持つ。
+    _audio_source = None
+
     def __init__(self, source, **kwargs):
         self.source = source
         self.transforms = []
@@ -389,13 +396,28 @@ class Object:
         return self._has_video if self._has_video is not None else True
 
     @property
+    def audio_source(self):
+        """音声を取り出す素材パス（差し替えが無ければ source と同じ）。
+
+        チェックポイントの中間物は映像専用（-an）なので、source が中間物へ
+        差し替わった後も音声は元素材から取る。
+        """
+        return self._audio_source or self.source
+
+    @property
     def has_audio(self):
         if self._audio_deleted:
             return False
         if self._has_audio is None:
             proj = current_project()
             if proj:
-                info = proj._probe_media(self.source)
+                # probe 先は source ではなく audio_source（＝元素材）。
+                # source を見ると、チェックポイント未生成(cold)では
+                # _is_pending_cache_path により probe が None を返して
+                # 「音声なし」、生成済み(warm)では probe が成功して
+                # 「音声あり」となり、キャッシュの有無で dry_run と実レンダの
+                # コマンドが食い違っていた。
+                info = proj._probe_media(self.audio_source)
                 if info:
                     self._has_audio = info.get("has_audio", False)
                     return self._has_audio
@@ -730,16 +752,21 @@ class Object:
         # plan pass: source差し替えのみ
         if proj is not None and proj._mode == "plan":
             return self._apply_compute_result(cache_path)
-        # キャッシュ存在チェック
-        if os.path.exists(cache_path):
+        dry = bool(proj is not None and getattr(proj, '_dry_run', False))
+        # キャッシュ存在チェック（dry_run では行わない。理由は下の dry_run 分岐）
+        if not dry and os.path.exists(cache_path):
             return self._apply_compute_result(cache_path)
         # 生成コマンド構築
         if duration is None:
             cmd = self._build_compute_image_cmd(cache_path)
         else:
             cmd = self._build_compute_video_cmd(cache_path, duration)
-        # dry_run: コマンドを記録して生成スキップ
-        if proj is not None and getattr(proj, '_dry_run', False):
+        # dry_run: コマンドを記録して生成スキップ。
+        # dry_run は「キャッシュが空の状態で何を実行するか」を返す契約なので、
+        # 存在チェックで早期 return してはいけない（実レンダで生成物が実体化した
+        # 途端に cache dict からコマンドが消え、スナップショットが落ちる）。
+        # media.py の _finalize_generated_object と同じ方針。
+        if dry:
             proj._pending_compute_cmds[cache_path] = cmd
             return self._apply_compute_result(cache_path)
         # 実生成
@@ -828,15 +855,19 @@ class Object:
         parent_dry = bool(getattr(parent, "_dry_run", False)) if parent else False
         if parent is not None and parent_mode == "plan":
             pass  # plan pass: 生成スキップ（尺解決のみ）
-        elif cache == "auto" and os.path.exists(cache_path):
-            pass  # キャッシュ命中
         elif parent_dry:
-            # dry_run: サブProjectの生成コマンド（dict/list）をpendingに記録
+            # dry_run: サブProjectの生成コマンド（dict/list）をpendingに記録。
+            # dry_run は「キャッシュが空の状態で何を実行するか」を返す契約なので、
+            # 存在チェックより**先**に置く（逆順だと実レンダで webm が実体化した
+            # 途端に cache dict からコマンドが消え、スナップショットが落ちる）。
+            # media.py の _finalize_generated_object と同じ方針。
             try:
                 sub_cmd = sub_project.render(cache_path, dry_run=True, alpha=True)
             finally:
                 activate(parent)
             parent._pending_compute_cmds[cache_path] = sub_cmd
+        elif cache == "auto" and os.path.exists(cache_path):
+            pass  # キャッシュ命中（実レンダのみ。dry_run は上で処理済み）
         else:
             # 実生成: 一時パスへレンダし成功時のみ確定（アトミック書き込み）。
             # 一時パスは pid+uuid でユニーク化（固定 .tmp だと同一鍵の並列生成で
@@ -918,7 +949,7 @@ class Object:
         return cmd
 
     def _build_compute_video_cmd(self, cache_path, duration):
-        """compute動画: Transform+Effect適用→WebM VP9 alpha"""
+        """compute動画: Transform+Effect適用→FFV1(bgra) mkv（映像専用）"""
         proj = current_project()
         fps = proj.fps if proj else 30
         temp = Object.__new__(Object)
@@ -940,6 +971,10 @@ class Object:
             "-c:v", "ffv1", "-level", "3",
             # 色変換を挟まない中間形式（理由と実測値は state.py の _BAKE_PIX_FMT）
             "-pix_fmt", _BAKE_PIX_FMT,
+            # 中間生成物は映像専用。_apply_compute_result が _has_audio=False /
+            # audio_effects=[] を立てて音声を一切 map しないため、音声を
+            # 格納しても使われずサイズだけ増える。checkpoint と同じ方針。
+            "-an",
             "-t", str(duration), cache_path,
         ])
         return cmd
@@ -963,9 +998,10 @@ class Object:
         # 映像側・音声側の実効尺を別々に畳み込み、有効な stream の最大を返す。
         # delete()/adelete() で消した側や存在しない stream は計算から除外する
         # （音声だけ atrim(1) しても未編集の映像尺が縮まない）。
-        # 音声有無は今回の probe 結果をその場で使う。has_audio プロパティ経由で
-        # _has_audio をキャッシュすると、checkpoint 差し替え後（音声なし中間
-        # ファイル）にも True が残り、実体のない [1:a] を map してしまう。
+        # 音声有無は「確定済みの _has_audio があればそれ、無ければ今回の probe
+        # 結果」。has_audio プロパティを呼ばないのは、ここで欲しいのが
+        # self.source（映像側の尺基準）の probe 結果であり、プロパティ経由だと
+        # audio_source（元素材）を probe して余分な ffprobe が走るため。
         if self._audio_deleted:
             audio_active = False
         elif self._has_audio is not None:

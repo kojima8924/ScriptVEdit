@@ -225,3 +225,104 @@ def test_normalize_audio_rejects_sample_rate_unsupported_by_aac(tmp_path):
 
     with pytest.raises(ValueError, match="AAC出力で未対応"):
         p.render(str(tmp_path / "normalized.mp4"), dry_run=True)
+
+
+def _aloop_sizes(cmd):
+    """dry_run のコマンドから aloop の size を全部拾う"""
+    return [int(m) for m in re.findall(r"aloop=loop=[-\d]+:size=(\d+)", " ".join(cmd))]
+
+
+def test_arepeat_aloop_size_uses_real_sample_rate(tmp_path):
+    """obj * n の aloop size を実サンプルレートで見積もる（過小だと各周回の末尾が欠ける）。
+
+    aloop の size は「ループ対象としてバッファするサンプル数」で、過大は無害だが
+    過小だと毎周ぶん末尾が黙って落ちる。48kHz 素材に 44100 固定で見積もると
+    約8%不足するので、sample_rate は必ず probe した実値を使う
+    （probe 不能時のフォールバックも 44100 ではなく 192000）。
+    """
+    src = os.path.abspath(_asset("video/clip_with_audio.mp4"))  # 48kHz
+    layer = _write_layer(
+        tmp_path,
+        "from scriptvedit import Object\n"
+        f"clip = Object({src!r})[0:2]\n"
+        "clip * 3\n"
+        "clip.time(6)\n",
+    )
+    p = _project()
+    p.layer(layer)
+    sizes = _aloop_sizes(p.render(str(tmp_path / "rep.mp4"), dry_run=True)["main"])
+
+    assert sizes, "arepeat の aloop が生成されていない"
+    # segment=2秒 × 48000Hz。44100 固定だと 88200 になり実サンプル数に足りない
+    assert sizes[0] >= 2 * 48000, (
+        f"aloop size {sizes[0]} が実サンプル数 {2 * 48000} を下回っている"
+        "（44100 固定へ戻すとこうなる）")
+
+
+def test_arepeat_aloop_size_fallback_is_192k_and_ceils(monkeypatch):
+    """sample_rate を probe できないときは 192kHz 相当で切り上げること。
+
+    aloop の size は過小だと各周回の末尾が黙って欠ける（過大は無害）ので、
+    見積もりは必ず安全側へ倒す。44100 固定へ戻すと 48kHz 素材で約8%不足し、
+    round へ戻すと1サンプル足りない場合が出る。
+    どちらも「音が僅かに途切れる」だけなので実レンダでは気付けない。
+    """
+    from scriptvedit.filters.audio import _build_audio_pre_filters
+    from scriptvedit.objects import AudioEffect, Object
+
+    # probe が必ず失敗する状況を作る（Project 未活性＝current_project() が None）
+    import scriptvedit.context as _ctx
+    monkeypatch.setattr(_ctx, "_current", None)
+    monkeypatch.setattr(_ctx, "_exec_stack", [])
+
+    obj = Object.__new__(Object)
+    obj.source = "dummy.mp4"
+    obj._audio_source = None
+    # 0.7777 秒 * 192000 = 149318.4 → ceil なら 149319、round なら 149318
+    obj.audio_effects = [AudioEffect("arepeat", count=3, segment=0.7777)]
+
+    filters = _build_audio_pre_filters(obj)
+    sizes = [int(m) for f in filters
+             for m in re.findall(r"aloop=loop=\d+:size=(\d+)", f)]
+    assert sizes == [149319], (
+        f"{sizes}: 192000 相当での切り上げになっていない"
+        "（44100 固定なら 34291、round なら 149318）")
+
+
+def test_loop_aloop_size_is_independent_of_cache_state(tmp_path):
+    """loop() の aloop size がチェックポイントの有無で変わらないこと。
+
+    音声は常に元素材（Object.audio_source）から取るので、size の見積もりも
+    元素材を probe しなければならない。obj.source を見ると checkpoint で
+    `-an` の映像専用中間物へ差し替わったときに sample_rate が取れなくなり、
+    cold（未生成）と warm（実体化済み）で dry_run の出力が変わってしまう。
+    """
+    src = os.path.abspath(_asset("video/clip_with_audio.mp4"))  # 48kHz / 5.545s
+    layer = _write_layer(
+        tmp_path,
+        "from scriptvedit import Object, resize, loop, avolume\n"
+        f"v = Object({src!r})\n"
+        "v.time(12) <= resize(sx=0.5, sy=0.5)\n"   # bakeable → checkpoint が挟まる
+        "v <= loop() & avolume(0.5)\n",
+    )
+
+    def dry():
+        p = _project()
+        p.configure(duration=12)
+        p.layer(layer)
+        return _aloop_sizes(p.render(str(tmp_path / "loop.mp4"), dry_run=True)["main"])
+
+    cold = dry()
+    assert cold, "loop() の aloop が生成されていない"
+    # チェックポイントを実体化してから同じ dry_run を取り直す
+    p = _project()
+    p.configure(duration=12)
+    p.layer(layer)
+    p.render(str(tmp_path / "loop.mp4"), timeout=180)
+    warm = dry()
+
+    assert cold == warm, (
+        f"aloop size がキャッシュの有無で変わった: cold={cold} warm={warm}"
+        "（obj.source ではなく obj.audio_source を probe すること）")
+    # 元素材（48kHz / 5.545s）基準の値であること。映像専用中間物を見ていたら外れる
+    assert cold[0] >= 5.5 * 48000

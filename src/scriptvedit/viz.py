@@ -12,9 +12,13 @@
 
 どちらも render 前（レイヤー未実行）の Project ではレイヤー登録情報のみを、
 render / dry_run 実行後は全オブジェクト情報を表示する。
-Project の属性は getattr でフォールバックする（未実行 Project でも壊れないため）が、
-scriptvedit 本体の内部ヘルパーは**実体モジュールから直接 import する**。
-getattr で握り潰すと、ヘルパーを改名したときにキャッシュ予測欄が静かに空になる。
+Project の「値」属性は getattr でフォールバックする（未実行 Project でも壊れないため）が、
+scriptvedit 本体の**規則**（チェックポイント計画・キャッシュパス）は
+viz 側で再実装せず、本体のヘルパー／Project メソッドをそのまま呼ぶ。
+規則を手で真似ると本体だけが直ったときに予測が静かに嘘になる
+（実例: text Object のベイク除外が viz 側に無く、実在しない checkpoint を
+予告していた）。呼び先が改名されたときは AttributeError が
+_COLLECT_ERRORS で警告として表に出る（getattr で握り潰して静かに空にしない）。
 """
 
 import os
@@ -23,11 +27,8 @@ import numbers
 import unicodedata
 import warnings
 
-from scriptvedit.cache import (
-    _build_unified_ops, _checkpoint_cache_path, _compute_save_points,
-    _is_cache_artifact_path, _layer_cache_paths, _split_ops,
-)
-from scriptvedit.state import _detect_media_type
+from scriptvedit.cache import _is_cache_artifact_path
+from scriptvedit.timeline import Pause, _AnchorMarker, _ScenePad
 
 __all__ = ["render_timeline", "report_text"]
 
@@ -87,59 +88,71 @@ _MEDIA_LABELS = {
 
 # --- データ収集 ---
 
+# 計画ステップの種別 → 予想キャッシュ欄に添える補足。
+# "checkpoint" は保存点そのものなので op 名だけでよい（補足なし）。
+_STEP_KIND_SUFFIX = {
+    "pre_bake": "（前処理）",
+    "frame_extract": "（入力フレーム抽出）",
+    "morph": "（morphキャッシュ）",
+    "particle": "（粒子キャッシュ）",
+}
+
+
 def _save_point_info(project, obj):
     """Object のチェックポイント保存点と予想キャッシュパスを取得
 
     戻り値: (save_ops, predictions)
       save_ops:    [(op_index, op_name), ...]
-      predictions: [(op_name, cache_path, exists), ...]（計算不可なら空）
+      predictions: [(表示名, cache_path, exists), ...]（計算不可なら空）
+
+    規則は本体の Project._plan_object_checkpoints() をそのまま呼んで得る。
+    以前はここで _build_unified_ops / _split_ops / _compute_save_points /
+    _checkpoint_cache_path を組み直していたが、本体だけが持つ規則が落ちて
+    予測が嘘になっていた（実測で確認したずれ）:
+      - text Object は実体ファイルを持たずベイク対象外なのに checkpoint を予告
+      - morph_to / explode_to / assemble_from の保存点は _checkpoint_cache_path
+        ではなく morph / 粒子専用パスに出る
+      - morph 前処理ベイク・入力フレーム抽出の中間生成物が一切出ない
+    計画関数は純粋（build_cmd を呼ばない限り ffmpeg も走らない）なので
+    検査から呼んで安全。
     """
     try:
-        bakeable, _live = _split_ops(_build_unified_ops(obj))
-        if not bakeable:
+        plan = project._plan_object_checkpoints(obj)
+        if plan is None:
+            # text / bakeable op 無し / 全 policy="off" / 保存点無し
             return [], []
-        # 全op policy="off" は本体側と同様にスキップ
-        if all(getattr(op, "policy", "auto") == "off" for _, op in bakeable):
-            return [], []
-        sps = sorted(_compute_save_points(bakeable))
-        save_ops = [(i, getattr(bakeable[i][1], "name", "?")) for i in sps]
+        _src, bakeable, _dur, _fps, save_points = plan["resume_args"]
+        save_ops = [(i, getattr(bakeable[i][1], "name", "?"))
+                    for i in sorted(save_points)]
+        predictions = []
+        for step in plan["steps"]:
+            name = getattr(bakeable[step["sp_idx"]][1], "name", "?")
+            path = step["path"]
+            predictions.append((name + _STEP_KIND_SUFFIX.get(step["kind"], ""),
+                                path, os.path.exists(path)))
     except _COLLECT_ERRORS as e:
-        warnings.warn(f"チェックポイント保存点を計算できませんでした"
+        warnings.warn(f"チェックポイント計画を取得できませんでした"
                       f"（{getattr(obj, 'source', '?')}）: {type(e).__name__}: {e}")
         return [], []
-    # 予想キャッシュパス（_process_checkpoints と同じ規則を再現。失敗しても保存点情報は返す）
-    predictions = []
-    try:
-        source = getattr(obj, "source", None)
-        dur = getattr(obj, "duration", None)
-        fps = getattr(project, "fps", 30)
-        is_video = _detect_media_type(source) == "video"
-        for i in sps:
-            segment = bakeable[: i + 1]
-            has_effects = any(t == "effect" for t, _ in segment)
-            cp_dur = dur if (has_effects or is_video) else None
-            cp_fps = fps if cp_dur is not None else None
-            quality = getattr(segment[-1][1], "quality", "final")
-            path = _checkpoint_cache_path(source, segment, cp_dur, cp_fps, quality)
-            predictions.append(
-                (getattr(segment[-1][1], "name", "?"), path, os.path.exists(path)))
-    except _COLLECT_ERRORS as e:
-        warnings.warn(f"チェックポイントの予想キャッシュパスを計算できませんでした"
-                      f"（{getattr(obj, 'source', '?')}）: {type(e).__name__}: {e}")
-        predictions = []
     return save_ops, predictions
 
 
 def _classify_item(item):
-    """タイムラインアイテムの種別判定: 'object' / 'pause' / 'anchor'"""
-    cls = type(item).__name__
-    if cls == "_AnchorMarker":
+    """タイムラインアイテムの種別判定: 'object' / 'pause' / 'scene_pad' / 'anchor'
+
+    判定は本体（project.py / timeline.py）と同じ isinstance で行う。以前は
+    type(item).__name__ の文字列比較と「source がある／name があって transforms が
+    無い」というダックタイピングで拾っており、クラスを改名すると静かに誤分類する
+    形だった。加えて _ScenePad（シーン末尾の遅延パディング）が分類表から漏れ、
+    pause と区別できずに紛れ込んでいた。
+    """
+    if isinstance(item, _AnchorMarker):
         return "anchor"
-    if getattr(item, "source", None) is not None:
-        return "object"
-    if getattr(item, "name", None) is not None and not hasattr(item, "transforms"):
-        return "anchor"
-    return "pause"
+    if isinstance(item, _ScenePad):
+        return "scene_pad"
+    if isinstance(item, Pause):
+        return "pause"
+    return "object"
 
 
 def _item_row(item, project):
@@ -149,10 +162,14 @@ def _item_row(item, project):
         return None
     start = getattr(item, "start_time", 0) or 0
     duration = getattr(item, "duration", None)
-    if kind == "pause":
+    if kind in ("pause", "scene_pad"):
+        # どちらも「描画されず時間だけ占有する」アイテム。_ScenePad は
+        # scene() が張る末尾パディングなので、pause.time() と取り違えないよう
+        # ラベルでシーン名を出す。
         return {
-            "kind": "pause",
-            "label": "pause",
+            "kind": kind,
+            "label": ("pause" if kind == "pause"
+                      else f"scene:{getattr(item, 'scene_name', '?')} パディング"),
             "source": None,
             "media_type": "pause",
             "start": start,
@@ -171,9 +188,13 @@ def _item_row(item, project):
     try:
         from_cache = _is_cache_artifact_path(src)
     except (OSError, TypeError, ValueError):
-        from_cache = False  # source が実パスでない合成ソース等
-    if not from_cache:
-        from_cache = "__cache__" in str(src).replace("\\", "/")
+        # source が実パスでない合成ソース等。_is_cache_artifact_path の
+        # os.path.abspath は非文字列で TypeError、NUL 混入で ValueError、
+        # cwd が失われていれば OSError を投げる。判定不能なので「不明」＝
+        # キャッシュ由来とは主張しない側へ倒す。`"__cache__" in path` のような
+        # ゆるい二本目の規則は置かない（本体 cache.py の abspath 比較とは
+        # 別物で、__cache__ という語を含むだけのユーザーパスを誤判定するため）。
+        from_cache = False
     save_ops, cp_preds = _save_point_info(project, item)
     return {
         "kind": "object",
@@ -203,7 +224,10 @@ def _layer_cache_info(project, spec):
     if spec.get("cache", "off") == "off":
         return None
     try:
-        webm_path, json_path = _layer_cache_paths(spec["filename"], project)
+        # spec の cache_quality を落とさないため本体の _layer_cache_paths_for を通す。
+        # 品質は鍵と拡張子の両方に効くので、直に _layer_cache_paths(filename, project)
+        # を呼ぶと cache_quality 指定レイヤーで別物のパスを予告してしまう。
+        webm_path, json_path = project._layer_cache_paths_for(spec)
     except _COLLECT_ERRORS as e:
         warnings.warn(f"レイヤーキャッシュの予定パスを計算できませんでした"
                       f"（{spec.get('filename', '?')}）: {type(e).__name__}: {e}")
@@ -309,6 +333,9 @@ def _collect(project):
             for row in layer["rows"]:
                 if isinstance(row["duration"], numbers.Real):
                     max_end = max(max_end, (row["start"] or 0) + row["duration"])
+        # 5.0 は本体 Project._resolve_obj_duration の fallback=5 /
+        # _calc_total_duration の「else 5」と同じ値。project.py は誰からも
+        # import されない sink なので定数を共有できない。**片方だけ変えないこと。**
         total = max_end if max_end > 0 else 5.0
     total = float(total)
 
@@ -606,8 +633,9 @@ def _tick_step(total):
 def _bar_tooltip(row):
     """バーのツールチップ本文（プレーンテキスト、改行区切り）"""
     lines = []
-    if row["kind"] == "pause":
-        lines.append("pause（非描画・時間のみ占有）")
+    if row["kind"] in ("pause", "scene_pad"):
+        lines.append("pause（非描画・時間のみ占有）" if row["kind"] == "pause"
+                     else f"{row['label']}（非描画・シーン末尾の自動パディング）")
     else:
         lines.append(f"ソース: {row['source']}")
         type_label = _MEDIA_LABELS.get(row["media_type"], row["media_type"])
@@ -655,7 +683,7 @@ def _bar_html(row, total):
     else:
         width = max(0.4, float(row["duration"]) / total * 100.0)
         width = min(width, 100.0 - left)
-    cls = "pause" if row["kind"] == "pause" else row["media_type"]
+    cls = "pause" if row["kind"] in ("pause", "scene_pad") else row["media_type"]
     if row["kind"] == "object" and row["from_cache"]:
         cls = "cachelayer"
     classes = f"bar {_esc(cls)}" + (" unknown" if unknown else "")

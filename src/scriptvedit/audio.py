@@ -194,21 +194,20 @@ def audio_sequence(*objs, crossfade=1.0):
     obj.duration = total
     # Narration字幕は入力audioがタイムラインから消費されても順次時刻を
     # 失わないよう、連結後Objectからの相対offsetへ固定する。
-    timeline_links = []
     offset = 0.0
     for subtitle, length in zip(linked_subtitles, lengths):
         if subtitle is not None:
             # 絶対時刻へ固定せず、sequenceの実開始（順次/@/アンカー解決後）
             # からの相対配置としてProject resolverへ渡す。
+            # 連結の記録はこの字幕側の (_timeline_owner, _timeline_offset) が
+            # 単一の正（Project._resolve_anchors が読む）。生成Object側に
+            # 一覧を持たせても読み手がいないので持たせない。
             subtitle._timeline_owner = obj
             subtitle._timeline_offset = offset
             subtitle._fixed_start = None
             subtitle._start_after = None
             subtitle._advance = False
-            timeline_links.append((subtitle, offset))
         offset += length - crossfade
-    if timeline_links:
-        obj._timeline_links = tuple(timeline_links)
     return obj
 
 
@@ -577,7 +576,9 @@ def narrate(text_content, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
 def audio_viz(source, *, kind="waves", color="white", size=None, duration=None):
     """音声を showwaves/showspectrum/showcqt で可視化した映像Objectを生成（キャッシュ生成物）。
 
-    kind: 'waves' | 'spectrum' | 'cqt'。"""
+    kind: 'waves' | 'spectrum' | 'cqt'。
+    color は kind='waves' の描画色にのみ作用する（spectrum/cqt 側のフィルタは
+    ffmpeg カラーを受け取る色指定を持たないため、指定しても出力は変わらない）。"""
     _validate_audio_source("audio_viz", source)
     color = _validate_ffmpeg_color("audio_viz", color)
     if kind not in _AUDIO_VIZ_KINDS:
@@ -605,9 +606,17 @@ def audio_viz(source, *, kind="waves", color="white", size=None, duration=None):
     else:
         viz = f"showcqt=s={w}x{h}:fps={fps}"
 
-    sigs = ["audio_viz", _src_signature(source),
-            f"kind={kind}", f"color={color}", f"size={w}x{h}",
-            f"fps={fps}", f"dur={dur}", f"ev={_ENGINE_VER}"]
+    # color を鍵へ混ぜるのは、実際に出力へ現れる waves のときだけ。
+    # showspectrum の color はカラーマップ名の列挙（channel/intensity/rainbow…）、
+    # showcqt は cscheme（6係数の文字列）しか持たず、どちらも 'white' や
+    # '#ff0000@0.5' 形式の ffmpeg カラーを受け取れない（FFmpeg 8.1 の
+    # `-h filter=showspectrum` / `showcqt` で実測）。反映しようがない値を
+    # 鍵に入れると、同一出力なのにキャッシュだけ分裂する（cache.py の方針違反）。
+    sigs = ["audio_viz", _src_signature(source), f"kind={kind}"]
+    if kind == "waves":
+        sigs.append(f"color={color}")
+    sigs.extend([f"size={w}x{h}", f"fps={fps}", f"dur={dur}",
+                 f"ev={_ENGINE_VER}"])
     key = _sig_key(sigs)
     cache_path = os.path.join(_ARTIFACT_DIR, "aviz", f"{key}.mkv")
 

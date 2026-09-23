@@ -2,10 +2,9 @@
 
 import math as _math
 
-from scriptvedit.expr import Expr
-
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.expr import Const, Var, _to_expr, clip, exp, if_, lerp, lt, sin
+from scriptvedit.expr import (Const, Expr, Var, _to_expr, clip, exp, if_,
+                              lerp, lt, sin)
 from scriptvedit.objects import Effect
 from scriptvedit.validate import _validate_ffmpeg_color
 

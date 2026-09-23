@@ -226,7 +226,7 @@ _SPECS = [
                 assets=("audio/効果音.mp3",)),
     ProjectSpec("test17", ["test17_video_split.py", "test17_audio.py"],
                 configure=_cfg(background_color="darkgreen"),
-                doc="AV split: 音声なし動画 + 音声のみ"),
+                doc="AV split: 音声つき動画の映像だけ加工（音声は amix へ）+ 音声のみ素材"),
     ProjectSpec("test18", ["test18_length.py"],
                 configure=_cfg(background_color="gray"),
                 doc="length(): ffprobe で取得した長さを使用"),
@@ -392,6 +392,12 @@ _SPECS = [
                 doc="formula: KaTeX数式の透過PNG化（fade/moveがそのまま効く）"),
     ProjectSpec("test94", ["test94_anchors.py"],
                 doc="anchor 6値: 同じ x/y でも基準点ごとに overlay 座標が変わる"),
+    ProjectSpec("test96", ["test96_audio_pre.py"],
+                doc="音声前処理: atrim(duration) / atrim(start=,duration=) / "
+                    "atempo（0.5未満は多段分解）。明示atrimがあるとauto atrimが付かない"),
+    ProjectSpec("test97", ["test97_live_fx.py"],
+                doc="live Effect: shake / inertia / repeat+arepeat（obj*n の loop/aloop）/ "
+                    "delete（映像だけ除外）+ compute() 素材化と show_until() のアンカー解決"),
     # --- 以下は実レンダ専用（dry_run では踏めない経路） ---
     ProjectSpec("test92", ["test92_formula_scale.py"], snapshot=False,
                 configure=_cfg(width=640, height=360, fps=15), needs=("web",),

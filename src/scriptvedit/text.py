@@ -211,7 +211,7 @@ def _text_deco_spec(func, border, border_color, shadow, shadow_color):
     return frag, f"|bd{b}|{border_color}|sh{sh[0]},{sh[1]}|{shadow_color}"
 
 
-def _text_size_opt(size_expr, u_expr):
+def _text_size_opt(size_expr):
     """fontsize オプション文字列を返す（size は定数のみ・_validate_text_size で担保）"""
     return f"fontsize={int(size_expr.value)}"
 
@@ -263,7 +263,7 @@ def _build_drawtext_filter(spec, text_opt, start, dur, *, enable=None):
         safe_area=spec.get("safe_area"), safe_padding=safe_padding)
     opts = [f"fontfile={font}"]
     opts.append(text_opt)
-    opts.append(_text_size_opt(spec["size"], u_expr))
+    opts.append(_text_size_opt(spec["size"]))
     opts.append(f"fontcolor={spec['color']}")
     opts.append(x_opt)
     opts.append(y_opt)
@@ -393,6 +393,12 @@ def _new_text_object(spec):
     obj._until_offset = 0.0
     obj._anchor_name = None
     obj._advance = True
+    # `obj @ t` / `a >> b` の配置属性。Object.__init__ が設定するものと
+    # 同じ初期値を必ず置く（ここだけ欠けていると、Project 側が getattr(...,
+    # None) をやめて直接参照した瞬間に text / progress_bar だけ AttributeError
+    # になる。__new__ で手組みしている以上、__init__ との差分は作らない）。
+    obj._fixed_start = None
+    obj._start_after = None
     obj._priority_override = None
     obj._video_deleted = False
     obj._audio_deleted = False
@@ -585,7 +591,9 @@ def subtitles(srt_file, *, style=None):
         "kind": "subtitles",
         "srt": srt_file,
         "style": style,
-        # drawtext系オプションは未使用だが _new_text_object の一貫性のため保持
+        # subtitlesフィルタは drawtext 系オプションを使わないが、_text_spec を
+        # 種別を問わず .get() で読む側（audit の文字サイズ検査、project.py の
+        # フォント依存収集など）が None/既定値を受け取れるよう形だけ揃えておく。
         "x": Const(0.5), "y": Const(0.5), "size": Const(48), "alpha": Const(1.0),
         "color": "white", "font": None, "box": False,
         "box_color": "black@0.5", "box_border": 10, "anchor": "center",
@@ -763,10 +771,12 @@ def karaoke(lines, *, style=None):
 
     key = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
     ass_path = os.path.join(_ARTIFACT_DIR, "karaoke", f"{key}.ass")
-    if not os.path.exists(ass_path):
-        # 原子的書き込み（一時パスは pid+uuid でユニーク化。同一内容の並列生成でも
-        # 相互に壊さず、os.replace の後勝ちでも成果物は等価。issue #13 P2-15）
-        _atomic_write_text(ass_path, content)
+    # 原子的書き込み（一時パスは pid+uuid でユニーク化。同一内容の並列生成でも
+    # 相互に壊さず、os.replace の後勝ちでも成果物は等価。issue #13 P2-15）。
+    # 「存在すればスキップ」ガードは置かない — ファイル名が内容ハッシュなので、
+    # 切り詰められた残骸が一度でも残ると以後どのレンダでも再生成されず、
+    # 壊れた ASS が黙って使われ続ける（_ensure_textfile と同じ規約）。
+    _atomic_write_text(ass_path, content)
 
     return subtitles(ass_path)
 

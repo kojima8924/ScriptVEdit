@@ -79,6 +79,11 @@ myvideo/
 - `scriptvedit new myvideo --template explainer` … 解説動画向けの雛形（数式・字幕・BGM 入り）
 - `scriptvedit new myvideo --force` … 生成先が空でなくても生成する
 
+生成される雛形は、そのまま `p.audit()` の warning がゼロになるよう作ってある
+（文字には縁取りが付き、文字サイズと縁取り幅は `--width` / `--height` に比例する。基準は 1280x720）。
+explainer 雛形はレイヤーをまたぐ時間合わせを `time(name=...)` + `pause.until("名前.end")` で
+書いており、**カーソルがレイヤーごとに0秒へ戻る**ことを前提にした正しい書き方の手本になっている。
+
 ### 2. 何が書いてあるのか
 
 **main.py** は「動画の設定と、レイヤーをどの順で重ねるか」だけを書く:
@@ -212,7 +217,14 @@ export SCRIPTVEDIT_ASSETS=/srv/media/video-assets:/mnt/stock
 - **コピーは dry_run でも常に行う**。`asset()` の戻り値は ffmpeg コマンドに埋まるため、dry_run と本レンダでパスが食い違うとスナップショットが壊れるため（一貫性が最優先）。コピーはアトミック（一時ファイル → `os.replace`）で、実行時に `素材をコピーしました: assets/_imported/bgm/xxx.mp3 (3.4MB)` とログを出す。
 - **キャッシュ鍵は内容ハッシュ**なので、コピーでパスが変わっても**再レンダは起きない**（`_src_signature` / `_src_bucket` はファイル内容の指紋を使う）。
 - 取り込み済みのコピーと共有ライブラリ側の内容が食い違う場合は、**警告して取り込み済みを使う**（黙って上書きするとレンダ結果が勝手に変わるため）。更新したいときは `assets/_imported/` の当該ファイルを削除して再実行する。
-- `must_exist=False` は存在チェックをスキップし、コピーもしない（`<project>/assets/<relpath>` を返す）。
+- `must_exist=False` は存在チェックをスキップし、コピーもしない（`<project>/assets/<relpath>` を返す）。**共有ライブラリの探索も行わない**ので、「素材があれば使う」という分岐には**使ってはいけない**（共有ライブラリにしか無い素材が永久に見つからない）。その用途は既定で呼んで `FileNotFoundError` を捕まえる:
+
+  ```python
+  try:
+      bgm = Object(asset("audio/bgm.mp3"))
+  except FileNotFoundError:
+      bgm = None   # BGM 無しで続行
+  ```
 
 `<project>/assets` 自体の発見順（**利用者プロジェクト優先**。環境変数による上書きは無い）:
 
@@ -455,7 +467,7 @@ lambda内で `u` に直接適用するか、`apply_easing` で値範囲付きlam
 - `ease_in_*` / `ease_out_*` / `ease_in_out_*` × `quad` / `cubic` / `quart` / `quint` / `sine` / `expo` / `circ` / `back` / `elastic` / `bounce`
 - ジェネレータ（イージング関数を返す）:
   - `ease_cubic_bezier(x1, y1, x2, y2, segments=16)` ... CSS cubic-bezier互換
-  - `ease_spring(stiffness=3, damping=4)` ... バネ（オーバーシュートして1.0に収束）
+  - `ease_spring(stiffness=3, damping=4)` ... バネ（途中でオーバーシュートしつつ、`t=0→0.0` / `t=1→1.0` を厳密に満たす。終端は正規化済みなので alpha や scale の最終値が規定を超えない）
   - `steps(n, jump="end")` ... CSS steps()互換ステップ関数（jump: "start"/"end"）
 - `apply_easing(easing_func, from_val, to_val)` ... イージングを値範囲に適用するlambdaを返す
 
@@ -635,7 +647,7 @@ p.layer("maku.py", cache="off")    # キャッシュしない（デフォルト�
 - キャッシュに保存されるのは映像のみ。音声を含むレイヤーは生成時と再生時の両方で警告し、
   再生時には音声が脱落する。音声素材は `cache="off"` の別レイヤーへ分離する
 - 素材の鮮度検証: キャッシュ生成時に素材の内容ハッシュを anchors.json に記録し、素材が更新された場合は
-  - `auto` ... 古いキャッシュを使わずレイヤーを再実行（再生成）
+  - `auto` ... 古いキャッシュを使わずレイヤーを再実行する。**キャッシュの再生成はしない**（生成するのは `make` だけ）
   - `use` ... 警告を出して古いキャッシュのまま続行（`cache="make"` での再生成を促す）
 
 #### 中間ファイルの品質（cache_quality）
@@ -842,6 +854,20 @@ HTML内で `window.renderFrame(state)` 関数を定義する。
 各レイヤーは0秒から独立したタイムラインを持つ。
 動画全体のdurationは全レイヤーの最大値から自動算出される。
 
+**順次配置のカーソルはレイヤーごとに0秒へ戻る。** 同じレイヤー内の `a.time(3); b.time(3)`
+は 0-3秒 / 3-6秒 と順に並ぶが、**別レイヤーの先頭はまた0秒から始まる**
+（レイヤー内は順次・レイヤー間は並行）。別レイヤーのものを後ろに置きたいときは:
+
+| 手段 | 使いどころ |
+|---|---|
+| `pause.time(6)` | レイヤー先頭を固定秒だけ空ける |
+| `obj @ 6` | タイムラインの絶対時刻へ置く |
+| `a >> b` | 同一レイヤー内で直後に連結する |
+| `time(name="intro")` + `pause.until("intro.end")` | **別レイヤーの尺に自動追従させる**（推奨） |
+
+最後のアンカー方式だけが、先行レイヤーの尺を変えたときに後続が自動で追従する。
+`describe` の constraints にも `layer_timeline_independent` として載っている。
+
 ### priority による z-order 制御
 
 `p.layer(filename, priority=N)` の `priority` で重ね順を制御する。
@@ -1021,7 +1047,7 @@ viz = audio_viz("bgm.mp3", kind="waves", color="cyan") # 波形/スペクトル�
 - `loop(until=None)`: 省略時は Project.duration までループ
 - `audio_sequence` は連結後の実尺を返却Objectの`duration`へ自動設定する。`Narration`を直接渡すと字幕もcrossfade込みで並び、返却Objectの数値`@`配置へ追従する。追加の`.time(total)`は不要
 - `normalize_audio(target=-14, *, true_peak=-1.5, lra=11, limiter=True, sample_rate=48000)` は最終音声へloudnorm、サンプルレート確定、任意のピークリミッターを順に適用する。`true_peak`は最終lossy出力の目標で、AAC/Opus再上昇向けに内部で0.5dBの余裕を確保する。WebM/Opusの出力レートは48kHz固定
-- `audio_sequence` / `sfx` / `audio_viz` はキャッシュ生成物（音声/映像Objectを返す）。`audio_viz` の `kind` は `"waves"` / `"spectrum"` / `"cqt"`
+- `audio_sequence` / `sfx` / `audio_viz` はキャッシュ生成物（音声/映像Objectを返す）。`audio_viz` の `kind` は `"waves"` / `"spectrum"` / `"cqt"`。**`color` が効くのは `kind="waves"` のときだけ**（`showspectrum` / `showcqt` は ffmpeg カラー形式の色指定を持たないため）
 
 ### パーティクル（explode / assemble）
 
@@ -1035,6 +1061,7 @@ img.time(3) <= assemble_from(Object("logo.png"))      # source の粒子が集�
 - パーティクルパラメータ（`**particle_params`）: `max_pixels`, `speed`, `gravity`, `spread`, `swirl`, `particle_size`, `seed`, `dissolve`, `expand`
 - `assemble_from(source)` の `source` は集合アニメに消費され、Project のタイムラインから自動除外される
 - 生成エンジンは `scriptvedit.morph`（`generate_explode_frames` / `generate_assemble_frames`）
+- `python -m scriptvedit.morph a.png b.png -o out.mp4` という CLI もあるが（実体は `morph_cli.py`）、こちらは **scriptvedit の ffmpeg パイプラインを通らない**（OpenCV が mp4v で直接書き出す＝アルファ無し・品質指定不可）。プレビュー用途で、本番は `morph_to()` を使う
 
 ### タイムライン構成
 
@@ -1422,30 +1449,33 @@ result = p.render("output.mp4", dry_run=True)
 
 ### ディレクトリ構成
 
-本体は `src/scriptvedit/` の42モジュール（合計約20,500行）のパッケージ。
+本体は `src/scriptvedit/` の47モジュール（合計約21,200行）のパッケージ。
 
 ```
 ScriptVEdit/
-├── src/scriptvedit/     パッケージ本体（42モジュール）
-│   ├── project.py       Project / render / チェックポイント
+├── src/scriptvedit/     パッケージ本体（47モジュール）
+│   ├── project.py       Project / render / ffmpegコマンド構築
+│   ├── checkpoint.py    チェックポイント計画・ベイク（project から抽出した自由関数）
+│   ├── layercache.py    レイヤーキャッシュの鮮度判定・生成・再生
 │   ├── parallel.py preview.py  時間分割並列レンダ / thumbnail・storyboard
 │   ├── chapters.py params.py   マーカー・チャプター出力 / テンプレート変数
 │   ├── objects.py       Object / Transform / Effect
 │   ├── timeline.py      anchor / pause / scene / group
 │   ├── context.py      レンダ中の Project の参照（依存ゼロの葉。循環 import を防ぐ）
+│   ├── warn.py         レンダ警告の集約（同じく依存ゼロの葉）
 │   ├── effects/         basic / visual / composite / paths / time / terminal
 │   ├── filters/         video / audio フィルタ生成
 │   ├── expr.py easing.py  Expr式ビルダー・イージング
 │   ├── cache.py ffmpeg.py media.py  キャッシュ鍵・ffmpeg実行・probe
 │   ├── formula.py       数式レンダ（formula / formula_lines、KaTeX同梱）
 │   ├── text.py audio.py web.py      テキスト / オーディオ / web Object・テンプレート
-│   ├── morph.py         モーフィング・パーティクル生成（morph_to / explode_to）
+│   ├── morph.py morph_cli.py  モーフィング・パーティクル生成 / その CLI 入口
 │   ├── tts.py           音声合成（voice / narrate。VOICEVOX / edge-tts / SAPI）
 │   ├── beat.py          ビート検出（beat_sync）
 │   ├── viz.py           タイムライン検査・可視化（Project.inspect）
 │   ├── testkit.py       SSIM によるレンダ結果の視覚検証
 │   ├── plugins.py       プラグイン機構（@effect_plugin）
-│   ├── manifest.py cli.py  describe（機械可読マニフェスト）/ CLI
+│   ├── manifest.py manifest_data.py cli.py  describe の導出エンジン / 手書き補助テーブル / CLI
 │   ├── scaffold.py      プロジェクト雛形生成（scriptvedit new）
 │   ├── assets.py        素材パス解決（asset / here / layer、共有ライブラリ取り込み）
 │   └── templates/       テンプレートHTML + vendor/katex（同梱、CDN参照なし）
@@ -1492,11 +1522,9 @@ python tests/render_all.py test01 test75  # 指定のみ
 CRLF に固定、`templates/vendor/**` は無変換）で防いでいる。外部HTMLのWeb cacheは
 LF/CRLFだけの違いをCRLFへ正規化してハッシュするため、改行変更だけでは再生成しない。
 
-スナップショットを再生成したら、`scripts/tools_baseline.py` で「パス以外は変わっていない」ことを検証できる。
-
-```
-python scripts/tools_baseline.py verify baseline_snapshots.json
-```
+`render(dry_run=True)` が返すのは「**キャッシュが空の状態で何を実行するか**」で、
+`__cache__` の中身には依存しない。したがって実レンダの後にキャッシュを消さずに
+スナップショットを回してよい（以前は消す必要があった）。
 
 ## ライセンス
 

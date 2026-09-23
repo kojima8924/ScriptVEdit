@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import builtins as _builtins
+import math as _math
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.effects.paths import _MAX_PATH_POINTS, _piecewise_scalar_expr
@@ -91,14 +92,20 @@ def ease_in_out_expo(t):
            if_(lt(Const(0.999), t), Const(1), inner))
 
 # Circular (円)
+# sqrt の中身は t が [0, 1] を外れると負になる。u は通常 _u_expr で 0..1 へ
+# 正規化されるが、phase()/repeat() 等を通さず素の値を渡したり eval_at() で
+# 範囲外を評価したりすると、Python 側は math domain error、ffmpeg 側は nan に
+# なって「原因の分からない失敗」になる。ease_in_out_circ だけに入っていた
+# clip(..., 0, 1) を3本すべてに入れて挙動を揃える（[0,1] 内では恒等なので
+# 正常域の値は変わらない）。
 def ease_in_circ(t):
     t = _to_expr(t)
-    return Const(1) - sqrt(Const(1) - t * t)
+    return Const(1) - sqrt(clip(Const(1) - t * t, 0, 1))
 
 def ease_out_circ(t):
     t = _to_expr(t)
     inv = t - Const(1)
-    return sqrt(Const(1) - inv * inv)
+    return sqrt(clip(Const(1) - inv * inv, 0, 1))
 
 def ease_in_out_circ(t):
     t = _to_expr(t)
@@ -212,12 +219,32 @@ def ease_cubic_bezier(x1, y1, x2, y2, segments=16):
 
 # スプリング (バネ)
 def ease_spring(stiffness=3, damping=4):
-    """バネイージング: オーバーシュートしながら1.0に収束"""
+    """バネイージング: 途中でオーバーシュートしつつ t=0→0.0 / t=1→1.0 を厳密に満たす
+
+    生の減衰振動 1 - e^(-damping*t) * cos(stiffness*PI*t) は t=1 でちょうど 1.0 に
+    ならない（既定値で実測 1.0183156388887342）。alpha や scale の終端に使うと
+    規定値をわずかに超えたまま終わるため、終端誤差を t に比例して足し戻し、
+    両端点を厳密にする。途中のオーバーシュート（この関数の狙い）は残る。
+    """
+    # raw(t) = 1 - e^(-damping*t) * cos(stiffness*PI*t) とおくと
+    # end_error = 1 - raw(1) = e^(-damping) * cos(stiffness*PI)。
+    # f(t) = raw(t) + end_error * t が f(0)=0 / f(1)=1 を厳密に満たす。
+    # 係数は Python 側で定数として求める（Expr に畳み込ませると式が無駄に伸びる）。
+    bad_params_msg = (
+        "ease_spring: stiffness/damping は有限の数値が必要です"
+        f"（stiffness={stiffness!r}, damping={damping!r}）")
+    try:
+        end_error = _math.exp(-damping) * _math.cos(stiffness * _EASE_PI)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(bad_params_msg) from exc
+    if not _math.isfinite(end_error):
+        raise ValueError(bad_params_msg)
+
     def _easing(t):
         t = _to_expr(t)
         decay = pow(Const(E), Const(-damping) * t)
         osc = cos(t * Const(stiffness) * Const(_EASE_PI))
-        return Const(1) - decay * osc
+        return Const(1) - decay * osc + Const(end_error) * t
     return _easing
 
 # ステップ関数

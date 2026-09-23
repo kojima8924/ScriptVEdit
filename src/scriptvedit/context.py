@@ -86,10 +86,3 @@ def is_project(obj):
     project.py 側からクラスを登録してもらう向きにしている。
     """
     return _project_class is not None and isinstance(obj, _project_class)
-
-
-def reset():
-    """現在の Project とレイヤースタックを初期化する（主にテスト用）。"""
-    global _current
-    _current = None
-    _exec_stack.clear()

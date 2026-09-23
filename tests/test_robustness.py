@@ -9,6 +9,7 @@
   6. cache --clear/--gc の任意ディレクトリ削除ガード
   7. scriptvedit new --force の既存ファイル .bak 退避
 """
+import json
 import os
 import shutil
 import subprocess
@@ -262,6 +263,120 @@ def test_layer_data_anchor_matches_resolver_with_show(tmp_path):
     assert meta_anchors.get("A") == canonical, (
         f"キャッシュ用メタのanchorが正規リゾルバとずれている: "
         f"meta={meta_anchors.get('A')}, canonical={canonical}")
+
+
+# --- P0-4: レイヤーキャッシュが time(name=) のアンカーを落とさないこと -------
+
+def _anchor_cache_layers(tmp_path):
+    """time(name='A') を持つレイヤーと、その A.end を until するレイヤーを作る。
+
+    素材は text（実体ファイル不要）にして ffmpeg/ffprobe 非依存にする。
+    """
+    layer_a = tmp_path / "anchor_owner_layer.py"
+    layer_a.write_text(
+        "from scriptvedit import *\n"
+        "t = text('A', x=0.5, y=0.5, size=40)\n"
+        "t.time(2, name='A')\n",
+        encoding="utf-8")
+    layer_b = tmp_path / "anchor_user_layer.py"
+    layer_b.write_text(
+        "from scriptvedit import *\n"
+        "u = text('B', x=0.5, y=0.8, size=40)\n"
+        "u.until('A.end')\n",
+        encoding="utf-8")
+    return str(layer_a), str(layer_b)
+
+
+def _anchor_cache_project(layer_a, layer_b, cache):
+    from scriptvedit import Project
+
+    p = Project()
+    p.configure(width=160, height=90, fps=10)
+    p.layer(layer_a, cache=cache)
+    p.layer(layer_b, priority=1)
+    return p
+
+
+def test_layer_data_keeps_generated_anchors(tmp_path):
+    """time(name=) が生む X.start / X.end がキャッシュ用メタに載る
+
+    旧実装の _get_layer_data は _AnchorMarker / _ScenePad / _advance しか
+    解釈せず、正規リゾルバが {'A.start': 0, 'A.end': 2} を出す構成でも
+    空の辞書を anchors.json へ書いていた。
+    """
+    layer_a, layer_b = _anchor_cache_layers(tmp_path)
+    p = _anchor_cache_project(layer_a, layer_b, "make")
+    p.render(str(tmp_path / "out.mp4"), dry_run=True)
+
+    _objs, meta_anchors = p._get_layer_data(0)
+    assert meta_anchors == {"A.start": 0, "A.end": 2}, meta_anchors
+    assert p._anchors["A.end"] == meta_anchors["A.end"]
+    # 他レイヤーのアンカーを混ぜない（レイヤー1はアンカーを定義しない）
+    _objs_b, meta_anchors_b = p._get_layer_data(1)
+    assert meta_anchors_b == {}, meta_anchors_b
+
+
+def test_cached_layer_restores_generated_anchors(tmp_path, monkeypatch):
+    """cache='make' で保存した X.start / X.end が再生側で復元される
+
+    ffmpeg は呼ばず、実書き込み経路（_render_layer_to_cache）で anchors.json を
+    作り、実読み出し経路（_load_cached_layer）で戻す往復を検証する。
+
+    注意: 通常の render() では Plan pass が**必ずレイヤーを live 実行する**ため、
+    anchors.json が空でも Plan 由来の値が self._anchors に残り、この欠陥は
+    end-to-end では覆い隠される。覆いが外れるのは cache='use' で古い成果物を
+    再生する場合（メタの時刻＝実際の映像の時刻が正）なので、往復そのものを
+    直接検証する。
+    """
+    import scriptvedit.project as _svp
+    from scriptvedit import Project
+
+    layer_a, layer_b = _anchor_cache_layers(tmp_path)
+    p = _anchor_cache_project(layer_a, layer_b, "make")
+    p.render(str(tmp_path / "out.mp4"), dry_run=True)
+    cache_video, cache_json = p._layer_cache_paths_for(p._layer_specs[0])
+
+    def _fake_run(cmd, cache_path, **kwargs):
+        """ffmpeg の代わりに空の成果物を置く（dry_run 経路は中身を読まない）"""
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "wb") as f:
+            f.write(b"")
+
+    monkeypatch.setattr(_svp, "_run_ffmpeg_to_cache", _fake_run)
+    try:
+        # dry_run 後は objects/_layers/_anchors が解決済み＝
+        # _generate_pending_caches が呼ぶのと同じ状態
+        p._render_layer_to_cache(0)
+        with open(cache_json, encoding="utf-8") as f:
+            saved = json.load(f)
+        assert saved["anchors"] == {"A.start": 0, "A.end": 2}, saved["anchors"]
+
+        # 読み出し側: Plan pass を通さない素の Project へ復元する
+        # （Plan の残り値に助けられていないことを保証する）
+        fresh = Project()
+        fresh.configure(width=160, height=90, fps=10)
+        # キャッシュ鍵は総尺も含むため、本番の _resolve_plan_duration と同じく
+        # 読み出し前に総尺を確定させる（ここだけ手で揃える）
+        fresh.duration = p.duration
+        fresh.layer(layer_a, cache="use")
+        assert fresh._anchors == {}
+        fresh._load_cached_layer(fresh._layer_specs[0])
+        assert fresh._anchors == {"A.start": 0, "A.end": 2}, fresh._anchors
+        assert fresh._anchor_defined_in["A.end"] == layer_a
+
+        # end-to-end でも until('A.end') が解決できる（回帰の目視ガード）
+        p2 = _anchor_cache_project(layer_a, layer_b, "use")
+        p2.render(str(tmp_path / "out2.mp4"), dry_run=True)
+        assert p2._anchors.get("A.end") == 2, p2._anchors
+        used = [o for o in p2.objects if getattr(o, "_until_anchor", None)]
+        assert len(used) == 1 and used[0].duration == 2, [
+            (o._until_anchor, o.duration) for o in used]
+    finally:
+        for path in (cache_video, cache_json):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 # --- issue #13 P2-13: 固定格子サンプリングのエイリアシング -----------------

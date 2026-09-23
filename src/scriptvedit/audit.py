@@ -276,17 +276,22 @@ def _audit_text_overflow(project, objects, findings):
 # --- 表示区間 ---------------------------------------------------------------
 
 def _project_total_duration(project):
-    """audit 時点で参照できる総尺（未確定なら構成から算出する）"""
+    """audit 時点で参照できる総尺（未確定なら構成から算出する）。
+
+    Project の private な内部（_configured_duration / _calc_total_duration）へ
+    ダックタイピングで依存するが、**例外は握り潰さない**。以前はここで全例外を
+    捨てて 0.0 を返しており、0 は _audit_outside_duration の早期 return 条件
+    なので、Project 側を改名した瞬間に「例外も警告も出ないまま総尺系の検査だけが
+    黙って無効化される」状態になっていた。静かに間違うより爆発させる方針に合わせ、
+    想定外の例外はそのまま呼び出し側へ伝播させる（private 属性に getattr の
+    フォールバックを置かないのも同じ理由）。
+    """
     total = getattr(project, "duration", None)
     if total:
         return float(total)
-    total = getattr(project, "_configured_duration", None)
-    if total:
-        return float(total)
-    try:
-        return float(project._calc_total_duration())
-    except Exception:
-        return 0.0
+    if project._configured_duration:
+        return float(project._configured_duration)
+    return float(project._calc_total_duration())
 
 
 def _audit_outside_duration(project, objects, findings):

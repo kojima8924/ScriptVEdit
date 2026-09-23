@@ -4,11 +4,8 @@ import subprocess
 import os
 import json
 import math as _math
-import warnings
 import builtins as _builtins
 import time as _time
-import threading as _threading
-import concurrent.futures as _futures
 
 # context は scriptvedit 内 import を持たない葉なので、末尾ではなく先頭で import
 # できる（循環しない）。「現在の Project」の実体はこちらが持つ。
@@ -22,30 +19,44 @@ from scriptvedit.context import (
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.audio import _probe_audio_length
-from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _file_fingerprint, _is_bakeable, _is_pending_cache_path, _layer_cache_encode_args, _layer_cache_paths, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _resolve_layer_cache_quality, _split_ops, _validate_morph_position, _web_cache_path
+from scriptvedit.cache import _is_pending_cache_path, _resolve_layer_cache_quality, _web_cache_path
 from scriptvedit.expr import Expr, max, min
 from scriptvedit.ffmpeg import FFmpegError, _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _normalize_ffmpeg_cmd, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.audio import _build_audio_effect_filters, _build_audio_pre_filters
-from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _build_video_pre_filters, _get_base_dimensions, _optimize_filter_chain, _unwrap_raw_stream_ref, _visible_window
+from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _get_base_dimensions, _optimize_filter_chain, _unwrap_raw_stream_ref, _visible_window
 from scriptvedit.objects import Object, _web_frames_dir
 from scriptvedit.assets import resolve_layer_path
-from scriptvedit.plugins import _EFFECT_PLUGINS, _autoload_plugins
-from scriptvedit.state import _BAKE_PIX_FMT, _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _PRESETS, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type, _suggest_hint
+from scriptvedit.plugins import _autoload_plugins
+from scriptvedit.state import _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _PRESETS, _detect_media_type, _suggest_hint
 from scriptvedit.timeline import (
     Pause, Scene, _AnchorMarker, _ScenePad, _check_until_zero_duration)
 from scriptvedit.validate import _require_number, _require_time, _validate_ffmpeg_color
+from scriptvedit.warn import _warn
 # 分割サブシステム（audit.py と同じ「project を第1引数に受ける自由関数」方式）
 from scriptvedit.params import (
     check_unconsumed_params, param as _param_impl)
 from scriptvedit.chapters import _chapters_metadata_path, _write_chapters_metadata, export_chapters as _export_chapters_impl, export_metadata as _export_metadata_impl, marker as _marker_impl
 from scriptvedit.preview import storyboard as _storyboard_impl, thumbnail as _thumbnail_impl
 from scriptvedit.parallel import _parallel_chunk_bounds, _parallel_chunk_count, _render_parallel
+from scriptvedit.checkpoint import (
+    _build_morph_webm_cmd, _collect_checkpoint_cmds, _morph_frame_count,
+    _step_context,
+    _apply_checkpoint_final_state as _apply_checkpoint_final_state_impl,
+    _ensure_checkpoints as _ensure_checkpoints_impl,
+    _plan_object_checkpoints as _plan_object_checkpoints_impl,
+    _process_checkpoints as _process_checkpoints_impl)
+from scriptvedit.layercache import (
+    _collect_cache_cmds, _generate_pending_caches, _validate_cache_specs,
+    _build_layer_cache_cmd as _build_layer_cache_cmd_impl,
+    _current_layer_sources_meta as _current_layer_sources_meta_impl,
+    _get_layer_data as _get_layer_data_impl,
+    _layer_cache_paths_for as _layer_cache_paths_for_impl,
+    _load_cached_layer as _load_cached_layer_impl,
+    _should_use_cache as _should_use_cache_impl)
 
-
-# _warn の集約リストはレイヤーキャッシュの並列生成スレッドからも触られる。
-# warnings.catch_warnings はプロセスグローバルでスレッドセーフでないため使わず、
-# append だけをロックで保護する（監査 項目8）。
-_WARN_LOCK = _threading.Lock()
+# _probe_media のメモ化辞書は None（probe失敗）も正規の格納値なので、
+# 「未登録」を dict.get の既定値で表すためのセンチネル。
+_PROBE_MISS = object()
 
 
 def _normalize_extra_cmds(value):
@@ -61,38 +72,6 @@ def _normalize_extra_cmds(value):
         return _normalize_ffmpeg_cmd(value)
     return value
 
-
-def _warn(project, message, *, sticky=False):
-    """警告を warnings.warn で出しつつ、レンダ末尾の [警告] ブロックへ集約する。
-
-    warnings は stderr へ流れるが ffmpeg の出力に埋もれ、Python 既定の
-    フィルタは同一箇所の再出力を抑制する。出力末尾しか読まない利用者・AIには
-    「音声が脱落した」「エンコーダがフォールバックした」等の**内容に影響する
-    警告**が届かないため、レンダ完了時にまとめて再掲する。
-
-    sticky=True: configure() 等レンダパス外で出た警告。次のレンダパス開始で
-    クリアせず、以後のレンダでも再掲する（設定はレンダをまたいで効くため）。
-    """
-    warnings.warn(message, stacklevel=3)
-    if project is None:
-        return
-    attr = "_sticky_warnings" if sticky else "_render_warnings"
-    bucket = getattr(project, attr, None)
-    if bucket is None:
-        return
-    with _WARN_LOCK:
-        if message not in bucket:  # 同一内容は1件にまとめる（再掲のため）
-            bucket.append(message)
-
-
-def _morph_frame_count(fps, dur):
-    """morph/particle の生成フレーム数を返す（短尺でも最低1フレームを保証）。
-
-    旧実装の int(fps * dur) は dur < 1/fps で 0 フレームになり PNG が
-    1枚も生成されず後段 ffmpeg が失敗し、非整数尺でも末尾区間を覆えなかった。
-    web Object（_web_frame_count）と同じ「切り上げ + 最低1」方針に統一する。
-    """
-    return _builtins.max(1, int(_math.ceil(float(fps) * float(dur))))
 
 
 class Project:
@@ -116,7 +95,12 @@ class Project:
         self._layer_audio_sources = {}  # layer filename → [音声ソース]（再生時の脱落警告用）
         self._layer_unknown_audio_sources = {}  # ffprobe失敗で音声有無が不明な動画
         self._extra_layer_deps = {}  # layer filename → [追加依存パス]（morph_toターゲット等）
-        self._layer_meta_cache = {}  # anchors.jsonパス → パース済みメタ（二重読み防止）
+        # anchors.jsonパス → パース済みメタ（二重読み防止）。書き込みは
+        # _layer_cache_is_fresh のみで、呼び出し元（_should_use_cache →
+        # _execute_render_pass）はレンダのメインスレッドに限られるため
+        # ロックは不要（並列化されるのは _generate_pending_caches の
+        # 「生成」側だけで、そちらはこの辞書を読み書きしない）。
+        self._layer_meta_cache = {}
         self._loudnorm_target = None  # normalize_audio() 設定時のLUFS目標
         self._loudnorm_options = None  # TP/LRA/limiter/sample_rate の実用出力設定
         self._markers = []  # [(time, label)] チャプターマーカー
@@ -519,7 +503,7 @@ class Project:
 
         戻り値: キャッシュ再生に使ったレイヤーファイル名の集合。
         """
-        self._validate_cache_specs()
+        _validate_cache_specs(self)
         self.objects = []
         self._layers = []
         self._mode = "render"
@@ -538,7 +522,21 @@ class Project:
         return used_cache_files
 
     def _probe_media(self, path):
-        """ffprobeでメディア情報を取得（キャッシュあり）"""
+        """ffprobeでメディア情報を取得（キャッシュあり）
+
+        **_probe_cache をロックで守らない理由**（_WARN_LOCK 等と違う扱いの記録）:
+        この dict はレイヤーキャッシュの並列生成（_generate_pending_caches の
+        ThreadPoolExecutor → _build_layer_cache_cmd → _resolve_obj_duration →
+        obj.length()）からワーカスレッド経由でも書かれるが、
+        (a) 操作は dict の単一の get / 代入だけで CPython の GIL 下では原子的、
+        (b) キーが (path, size, mtime_ns) なので**同じ鍵なら素材の実体も同じ**＝
+            競合して二重に probe しても書き込まれる値は一致する（メモ化であって
+            共有状態の更新ではない）、
+        (c) dict を作り直す _reset_runtime_state はレンダ開始時だけで、
+            ワーカは ThreadPoolExecutor の with を抜ける時点で必ず合流済み、
+        の3点からロックは不要。get は既定値をセンチネルにして
+        「in 判定 → 取り出し」の2操作に割らない（None も正規の格納値のため）。
+        """
         # メモ化キーに stat 署名（サイズ+mtime）を含める。パスのみをキーにすると
         # 同一パスへ素材を差し替えたとき旧情報を返し続ける（issue #13 P2-9）。
         # プロセス内メモ化のみでディスクへは永続化しない（CLAUDE.md の
@@ -548,8 +546,9 @@ class Project:
             cache_key = (path, st.st_size, st.st_mtime_ns)
         except OSError:
             cache_key = (path, None, None)
-        if cache_key in self._probe_cache:
-            return self._probe_cache[cache_key]
+        cached = self._probe_cache.get(cache_key, _PROBE_MISS)
+        if cached is not _PROBE_MISS:
+            return cached
         if _is_pending_cache_path(path):
             # dry_run中の未生成キャッシュ予定パス。probeせず警告なしでNoneを返す
             # （キャッシュはしない: 実レンダで生成された後は通常probeに進む）
@@ -633,10 +632,6 @@ class Project:
         filename = resolve_layer_path(filename, self)
         self._layer_specs.append({"filename": filename, "priority": priority,
                                   "cache": cache, "cache_quality": cache_quality})
-
-    def _layer_cache_paths_for(self, spec):
-        """spec の品質を反映したレイヤーキャッシュパスを返す（呼び出し側の取り違え防止）"""
-        return _layer_cache_paths(spec["filename"], self, spec.get("cache_quality"))
 
     def _exec_layer(self, filename, priority):
         """レイヤーファイルを実行してobjectsに登録"""
@@ -744,7 +739,9 @@ class Project:
     def _layer_structure_signature(self):
         """レイヤーごとのタイムライン構造署名を返す（Plan/Render差の検出用）。
 
-        レイヤー .py は Plan pass で複数回・Render pass でさらに1回実行される。
+        レイヤー .py は Plan pass で1回・Render pass でさらに1回の計2回
+        実行される（Plan の外側ループは _plan_resolve で廃止済み。同メソッドの
+        docstring 参照）。
         外部カウンタ・乱数・現在時刻などで実行ごとに構造が変わると、Plan で
         確定した総尺と Render の実構造がずれ、末尾が黙って切り詰められる
         （監査 issue #14 P0）。開始時刻は構造から決定されるため含めず、
@@ -792,7 +789,7 @@ class Project:
             raise RuntimeError(
                 f"レイヤー '{filename}' の構造が Plan と Render で一致しません。\n"
                 + "\n".join(details) + "\n"
-                "レイヤー .py はアンカー解決のため複数回実行されます。"
+                "レイヤー .py はアンカー解決のため Plan/Render の計2回実行されます。"
                 "外部カウンタ・乱数・現在時刻・環境の変化など、実行のたびに"
                 "結果が変わる記述を避け、決定的（何度実行しても同じ構造）に"
                 "してください。乱数が必要な場合は固定シードを使ってください。")
@@ -1074,7 +1071,7 @@ class Project:
                         os.remove(tmp_path)
                     except OSError:
                         pass
-        self._generate_pending_caches()
+        _generate_pending_caches(self)
         elapsed = _time.perf_counter() - _t0
         # ネストrender（from_project）は同じグローバルカウンタを共有するため、
         # 0へリセットせず「このレンダ開始時からの増分」を数える
@@ -1247,227 +1244,16 @@ class Project:
         # Plan確定時の構造署名を保存（Render passでの構造一致検証に使う）
         self._plan_structure = self._layer_structure_signature()
 
-    def _validate_cache_specs(self):
-        """cache='use' のファイル存在チェック"""
-        for spec in self._layer_specs:
-            if spec["cache"] == "use":
-                webm_path, json_path = self._layer_cache_paths_for(spec)
-                if not os.path.exists(webm_path):
-                    raise FileNotFoundError(
-                        f"キャッシュファイルが見つかりません: {webm_path}\n"
-                        f"レイヤー '{spec['filename']}' に cache='use' が指定されていますが、"
-                        f"先に cache='make' でキャッシュを生成してください。"
-                    )
-
-    def _current_layer_sources_meta(self, filename):
-        """レイヤーの「現在の」依存集合（正規化パス → 内容指紋）を構築する。
-
-        キャッシュ書き込み時のメタと同じ規則で作り、鮮度判定はこの現在集合と
-        メタの**完全一致**で行う。旧メタに載っている依存だけを再検査する方式だと、
-        環境変数等でレイヤーが参照する素材を a→b へ切り替えたとき、a が無変化な
-        だけで fresh と誤判定し旧映像を使い続ける（監査 issue #16 P0）。
-        指紋を取得できない依存は None（呼び出し側で stale 扱い＝fail-closed）。
-        """
-        meta = {}
-        for src in self._layer_sources.get(filename, []):
-            key = str(src).replace("\\", "/")
-            if key.startswith("text://"):
-                # text系の合成ソースは実体ファイルを持たないが、名前自体が
-                # テキスト内容+スタイルのハッシュで一意（_text_synthetic_source）。
-                # 名前を指紋として記録する。None のままだと fail-closed により
-                # text を含むレイヤーが永遠に fresh にならない。テキスト内容の
-                # 変更は名前（キー）の変化として完全一致比較で検出される。
-                # フォント実ファイルは別途 _layer_sources に登録済み（issue #16 P2）
-                meta[key] = key
-                continue
-            try:
-                meta[key] = _file_fingerprint(src)
-            except (OSError, TypeError):
-                meta[key] = None
-        # 登録済みプラグインのソース（書き込み側と同じ粗い粒度・安全側）
-        for plug in _EFFECT_PLUGINS.values():
-            src_file = getattr(plug, "source_file", None)
-            if not src_file:
-                # 定義元ファイルを持たないプラグイン（REPL / exec(<文字列>) /
-                # zip 同梱）。以前は continue で依存集合から丸ごと外れ、
-                # ビルダーを書き換えてもレイヤーキャッシュが陳腐化しなかった
-                # （監査 項目22b）。バイトコード指紋を鍵として載せる。
-                meta[f"plugin://{plug.name}"] = getattr(plug, "code_ffp", None)
-                continue
-            key = str(src_file).replace("\\", "/")
-            try:
-                meta[key] = _file_fingerprint(src_file)
-            except (OSError, TypeError):
-                meta[key] = None
-        return meta
-
-    def _layer_cache_is_fresh(self, spec):
-        """anchors.jsonに記録された依存（素材FFP・解決済みparam）と現状を比較して鮮度判定
-
-        メタの欠損・破損・未知形式は fail-closed（=陳腐扱い）。fail-open にすると
-        書きかけ・欠損メタの成果物が「常に新鮮」と誤判定され、依存変更を
-        取りこぼす（issue #13 P2-7）。後方互換の旧形式救済はしない（方針どおり）。
-        比較は「現在の依存集合とメタの完全一致」（キー集合の増減・差し替えも検出。
-        監査 issue #16 P0）。
-        """
-        _, json_path = self._layer_cache_paths_for(spec)
-        if not os.path.exists(json_path):
-            return False  # 成果物と完了メタの整合を必須化（メタ欠損=不完全）
-        try:
-            with open(json_path, encoding="utf-8") as f:
-                meta = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return False  # 破損メタ
-        if not isinstance(meta, dict) or "sources" not in meta:
-            return False  # 未知形式・sources無し
-        # パース済みメタを保持し、_load_cached_layerでの再読込をスキップする
-        self._layer_meta_cache[json_path] = meta
-        current = self._current_layer_sources_meta(spec["filename"])
-        if any(ffp is None for ffp in current.values()):
-            return False  # 現在の依存に指紋不能なものがある（fail-closed）
-        if current != (meta["sources"] or {}):
-            return False  # 依存の追加・削除・差し替え・内容変化のいずれか
-        # 解決済み param の比較（plan passが常にライブ実行するため、
-        # 現在値は self._layer_params に揃っている）
-        if meta.get("params", None) != self._layer_params.get(
-                spec["filename"], {}):
-            return False
-        return True
-
-    def _should_use_cache(self, spec):
-        """キャッシュ利用判定"""
-        cache = spec["cache"]
-        if cache == "use":
-            if not self._layer_cache_is_fresh(spec):
-                _warn(self,
-                      f"レイヤーキャッシュの素材が更新されています: {spec['filename']}。"
-                      f"cache='make' で再生成してください"
-                      f"（cache='use' 指定のため続行します）。")
-            return True
-        if cache == "auto":
-            webm_path, _ = self._layer_cache_paths_for(spec)
-            # 素材更新済みの古いキャッシュは使わず再実行
-            return os.path.exists(webm_path) and self._layer_cache_is_fresh(spec)
-        return False  # off, make
-
-    def _load_cached_layer(self, spec):
-        """キャッシュからObject生成 + anchors.jsonマージ"""
-        webm_path, json_path = self._layer_cache_paths_for(spec)
-        start_idx = len(self.objects)
-        # キャッシュwebmをObjectとして生成
-        cached_obj = Object.__new__(Object)
-        cached_obj.source = webm_path
-        cached_obj.transforms = []
-        cached_obj.effects = []
-        cached_obj.audio_effects = []
-        cached_obj.duration = None
-        cached_obj.start_time = 0
-        cached_obj.priority = spec["priority"]
-        cached_obj.media_type = "video"
-        cached_obj._until_anchor = None
-        cached_obj._video_deleted = False
-        cached_obj._audio_deleted = False
-        cached_obj._has_video = True
-        cached_obj._has_audio = False
-        cached_obj._web_source = None
-        cached_obj._web_size = None
-        cached_obj._web_fps = None
-        cached_obj._web_data = {}
-        cached_obj._web_name = None
-        cached_obj._web_debug_frames = False
-        # anchors.jsonからduration/anchorsを読み込み
-        # （_layer_cache_is_freshでパース済みならそのメタを流用し二重読みを避ける）
-        cache_meta = self._layer_meta_cache.get(json_path)
-        if cache_meta is None and os.path.exists(json_path):
-            with open(json_path, encoding="utf-8") as f:
-                cache_meta = json.load(f)
-        if cache_meta is not None:
-            cached_obj.duration = cache_meta.get("duration")
-            for name, time_val in cache_meta.get("anchors", {}).items():
-                self._anchors[name] = time_val
-                self._anchor_defined_in[name] = spec["filename"]
-        filename = spec["filename"]
-        has_runtime_audio_info = filename in self._layer_audio_sources
-        audio_sources = self._layer_audio_sources.get(filename, [])
-        unknown_audio_sources = self._layer_unknown_audio_sources.get(filename, [])
-        if not has_runtime_audio_info and cache_meta is not None:
-            audio_sources = cache_meta.get("audio_sources", [])
-            unknown_audio_sources = cache_meta.get("unknown_audio_sources", [])
-        legacy_audio_sources = []
-        if (not has_runtime_audio_info and not audio_sources
-                and not unknown_audio_sources and cache_meta is not None
-                and "audio_sources" not in cache_meta):
-            # issue #8以前のメタには音声情報がない。旧キャッシュをcache='use'で
-            # 再生しても無言脱落を見逃さないよう、記録済み素材をprobeして補う。
-            using_legacy_audio_info = True
-            for source in cache_meta.get("sources", {}):
-                media_type = _detect_media_type(source)
-                if media_type == "audio":
-                    legacy_audio_sources.append(source)
-                    continue
-                info = self._probe_media(source)
-                if info and info.get("has_audio"):
-                    legacy_audio_sources.append(source)
-                elif info is None and media_type == "video":
-                    unknown_audio_sources.append(source)
-            audio_sources = legacy_audio_sources
-        else:
-            using_legacy_audio_info = False
-        if audio_sources or unknown_audio_sources:
-            if using_legacy_audio_info:
-                details = list(audio_sources) + list(unknown_audio_sources)
-                _warn(self,
-                    f"旧形式のレイヤーキャッシュを再生するため音声が脱落する"
-                    f"可能性があります (cache='{spec['cache']}', "
-                    f"{spec['filename']}): {', '.join(details)}。"
-                    f"cache='make' で再生成するか、音声素材を cache='off' の"
-                    f"別レイヤーへ分離してください。")
-            elif unknown_audio_sources:
-                details = list(audio_sources) + list(unknown_audio_sources)
-                _warn(self,
-                    f"レイヤーキャッシュを再生しますが、ffprobeで音声の有無を"
-                    f"確認できない動画があるため音声が脱落する可能性があります "
-                    f"(cache='{spec['cache']}', {spec['filename']}): "
-                    f"{', '.join(details)}。"
-                    f"音声素材を cache='off' の別レイヤーへ分離してください。")
-            else:
-                _warn(self,
-                    f"レイヤーキャッシュを再生するため音声が脱落します "
-                    f"(cache='{spec['cache']}', {spec['filename']}): "
-                    f"{', '.join(audio_sources)}。"
-                    f"音声素材を cache='off' の別レイヤーへ分離してください。")
-        self.objects.append(cached_obj)
-        end_idx = len(self.objects)
-        self._layers.append((start_idx, end_idx, spec["priority"]))
-        self._stamp_layer_origin(start_idx, end_idx, spec["filename"])
-
-    def _get_layer_data(self, spec_index):
-        """指定レイヤーのオブジェクト群とアンカー群を取得"""
-        # _layersのインデックスはspec_indexに対応
-        if spec_index >= len(self._layers):
-            return [], {}
-        start_idx, end_idx, _ = self._layers[spec_index]
-        objects = self.objects[start_idx:end_idx]
-        anchors = {}
-        current_time = 0
-        for item in objects:
-            if isinstance(item, _AnchorMarker):
-                anchors[item.name] = current_time
-                continue
-            if isinstance(item, _ScenePad):
-                # シーン開始+目標尺まで進める（遅延パディング、キャッシュ用アンカー整合）
-                scene_start = anchors.get(f"scene:{item.scene_name}", 0)
-                target_time = scene_start + item.target_duration
-                if current_time < target_time:
-                    current_time = target_time
-                continue
-            # 正規リゾルバ(_resolve_anchors)と同じ非進行判定を適用する。
-            # show()/show_until() は _advance=False で時刻を進めないため、
-            # ここで無条件に加算するとキャッシュ用メタのアンカーだけずれて
-            # cache有無で後続レイヤーの開始時刻が変わる（issue #13 P2-10）
-            if item.duration is not None and getattr(item, "_advance", True):
-                current_time += item.duration
-        return objects, anchors
+    # --- レイヤーキャッシュ（実体は layercache.py）---
+    # viz.py・テストがインスタンス経由で呼ぶため Project 上に残す。薄いラッパ
+    # 関数を挟まず自由関数をそのままメソッドへ束縛する（呼び出し段数を
+    # 従来と同じに保ち、_warn の stacklevel をずらさないため）。
+    _layer_cache_paths_for = _layer_cache_paths_for_impl
+    _current_layer_sources_meta = _current_layer_sources_meta_impl
+    _should_use_cache = _should_use_cache_impl
+    _load_cached_layer = _load_cached_layer_impl
+    _get_layer_data = _get_layer_data_impl
+    _build_layer_cache_cmd = _build_layer_cache_cmd_impl
 
     def _collect_all_extra_cmds(self):
         """中間生成物（web/checkpoint/レイヤーキャッシュ/compute）の生成コマンド辞書。
@@ -1487,383 +1273,23 @@ class Project:
             if isinstance(obj, Object) and obj.media_type == "web":
                 obj.source = _web_cache_path(obj, self)
                 obj.media_type = "video"
-        extra.update(self._collect_checkpoint_cmds())
-        extra.update(self._collect_cache_cmds())
+        extra.update(_collect_checkpoint_cmds(self))
+        extra.update(_collect_cache_cmds(self))
         extra.update(self._pending_compute_cmds)
         return extra
 
-    def _collect_cache_cmds(self):
-        """dry_run用のキャッシュ生成コマンド辞書構築。
+    # --- チェックポイント（実体は checkpoint.py）---
+    # viz.py・テストがインスタンス経由で呼ぶため Project 上に残す。薄いラッパ
+    # 関数を挟まず自由関数をそのままメソッドへ束縛する（呼び出し段数を
+    # 従来と同じに保つため）。第1引数 project がそのまま self になる。
+    _plan_object_checkpoints = _plan_object_checkpoints_impl
+    _apply_checkpoint_final_state = _apply_checkpoint_final_state_impl
+    _process_checkpoints = _process_checkpoints_impl
+    _ensure_checkpoints = _ensure_checkpoints_impl
 
-        必ず _collect_checkpoint_cmds の後に呼ぶこと（実レンダの
-        _generate_pending_caches と同じオブジェクト状態＝チェックポイント
-        適用後を見るため）。順序は _collect_all_extra_cmds が保証する。
-        """
-        cache_cmds = {}
-        for i, spec in enumerate(self._layer_specs):
-            # "make" は常に生成（"auto" はキャッシュ有無に関わらず生成コマンドを持たない）
-            if spec["cache"] == "make":
-                webm_path, _ = self._layer_cache_paths_for(spec)
-                cmd = self._build_layer_cache_cmd(i, webm_path)
-                cache_cmds[webm_path] = cmd
-        return cache_cmds
-
-    def _build_checkpoint_image_cmd(self, source, transforms, cache_path):
-        """画像チェックポイント: Transform適用→透過PNG"""
-        # 一時Object経由で _build_transform_filters を再利用
-        temp = Object.__new__(Object)
-        temp.source = source
-        temp.transforms = list(transforms)
-        temp.effects = []
-        filters = _build_transform_filters(temp)
-        cmd = ["ffmpeg", "-y", "-i", source]
-        if filters:
-            cmd.extend(["-vf", ",".join(filters)])
-        cmd.extend(["-frames:v", "1", "-pix_fmt", "rgba", cache_path])
-        return cmd
-
-    def _build_checkpoint_video_cmd(self, source, media_type, transforms, effects,
-                                     cache_path, dur, fps):
-        """動画チェックポイント: Transform+Effect適用→透明VP9"""
-        cmd = ["ffmpeg", "-y"]
-        cmd.extend(_decoder_input_args(source, media_type, fps))
-
-        # フィルタ構築: 一時Object経由で既存ビルダーを再利用
-        temp = Object.__new__(Object)
-        temp.source = source
-        temp.transforms = list(transforms)
-        temp.effects = list(effects)
-        temp.media_type = media_type
-
-        base_dims = _get_base_dimensions(temp)
-        filters = _build_transform_filters(temp)
-        pre_filters = _build_video_pre_filters(temp)
-        filters = pre_filters + filters
-        eff_filters, _ = _build_effect_filters(temp, 0, dur, base_dims=base_dims)
-        filters.extend(eff_filters)
-        filters = _optimize_filter_chain(filters)
-
-        if filters:
-            cmd.extend(["-vf", ",".join(filters)])
-
-        cmd.extend([
-            "-c:v", "ffv1", "-level", "3",
-            # 色変換を挟まない中間形式（理由と実測値は state.py の _BAKE_PIX_FMT）
-            "-pix_fmt", _BAKE_PIX_FMT,
-            "-t", str(dur), cache_path,
-        ])
-        return cmd
-
-    def _build_morph_webm_cmd(self, frame_pattern, cache_path, duration, fps):
-        """PNG連番 → alpha映像 のffmpegコマンドを構築
-
-        末尾に1フレーム複製して出力する（tpad=stop_mode=clone）。
-
-        理由: overlay の enable 窓は閉区間 between(t, start, start+dur) で、
-        覆うフレーム数は floor(fps*dur)+1。一方このクリップは
-        _morph_frame_count = ceil(fps*dur) フレームしか無いため、
-        fps*dur が整数になる通常ケース（time(1.0) 等）でちょうど1フレーム
-        足りず、その1枚だけ第2入力がEOF → eof_action=pass でベースの
-        背景色（黒）が素通しして「モーフ末尾の黒落ち」になっていた。
-        複製フレームは到達先画像そのものなので、伸ばしても見た目は変わらない。
-        窓の外に出る余剰フレームは enable で表示されない。
-        """
-        n_frames = _morph_frame_count(fps, duration)
-        return ["ffmpeg", "-y", "-framerate", str(fps),
-                "-i", frame_pattern,
-                "-vf", "tpad=stop_mode=clone:stop=1",
-                "-c:v", "ffv1", "-level", "3",
-                # morphのPNG連番(RGBA)をそのまま格納する。yuva444pだとここで
-                # RGBA→YUV変換が入り、PILの描画結果と往復一致しなくなる
-                # （理由と実測値は state.py の _BAKE_PIX_FMT）
-                "-pix_fmt", _BAKE_PIX_FMT,
-                "-frames:v", str(n_frames + 1), cache_path]
-
-    @staticmethod
-    def _require_morph_duration(bakeable_ops, dur, source):
-        """morph_toを含むObjectのduration未設定を明示エラーにする
-
-        画像 + duration未設定のまま進むと int(fps * None) の TypeError で
-        原因が分かりにくいため、ここで日本語エラーを投げる。
-        """
-        has_term = any(t == "effect" and op.name in _TERMINAL_FRAME_EFFECTS
-                       for t, op in bakeable_ops)
-        if has_term and not dur:   # None も 0 も不可（0はフレーム0枚になる）
-            raise ValueError(
-                f"morph_to/explode_to/assemble_from を含むObject ('{source}') には"
-                f"表示時間の指定が必要です。obj.time(秒数) で duration を設定してください。")
-
-    def _checkpoint_bake_duration(self, obj, original_source):
-        """チェックポイントのベイク尺を決定する。
-
-        speed/reverse/freeze_frame 等の live 時間系Effectが残るObjectは、
-        表示尺(duration)ではなくソース基準の実長(trimのみ反映)でベイクする。
-        表示尺でベイクすると、後段の時間系Effect適用でソース素材が
-        不足/過剰になる（例: speed(2)で表示尺5s → 元素材10sが必要）ため。
-        """
-        is_video = _detect_media_type(original_source) in ("video",)
-        has_time_live = any(
-            getattr(e, "name", None) in _TIME_LIVE_EFFECTS for e in obj.effects)
-        if is_video and has_time_live:
-            info = self._probe_media(original_source)
-            base = info.get("duration") if info else None
-            if base is None:
-                base = getattr(obj, "_resolved_length", None) or obj.duration
-            if base:
-                cur = base
-                for e in obj.effects:
-                    if e.name == "trim" and e.params.get("duration") is not None:
-                        cur = _builtins.min(cur, e.params["duration"])
-                return cur
-        dur = obj.duration
-        # video + duration未指定 → obj.length() で補完
-        if dur is None and is_video:
-            dur = obj.length()
-        # 尺0はベイク尺として成立しない（clip((t-start)/0,…) がゼロ除算になる）。
-        # ただし None はここで埋めてはいけない: 呼び出し側の
-        # _require_morph_duration が「morph系に time() が無い」を None で判定して
-        # おり、fallback を入れるとその検査をすり抜ける。救うのは 0 だけ。
-        return dur if dur != 0 else self._resolve_obj_duration(obj)
-
-    def _plan_object_checkpoints(self, obj):
-        """1つのObjectのチェックポイント計画を構築する（純粋計画・実行しない）。
-
-        実レンダ(_process_checkpoints)と dry_run(_collect_checkpoint_cmds)の
-        両方がこの計画を通ることで、キャッシュパス・コマンド列・Object最終状態の
-        規則を一本化する（片方だけ直して両経路のパスがずれる事故の根絶）。
-
-        戻り値: 対象外（text/bakeable無し/全off/保存点無し）なら None。
-        それ以外は dict:
-          steps: 実行順の計画ステップ列。各ステップは dict で
-            kind: "checkpoint"|"pre_bake"|"frame_extract"|"morph"|"particle"
-            sp_idx: 属する保存点の bakeable_ops インデックス（resumeスキップ用）
-            path: 生成先キャッシュパス
-            build_cmd: () -> ffmpegコマンド列。実レンダは直前ステップの実体化後に
-                呼ぶ（動画チェックポイントは入力の実寸を probe するため、
-                生成順に遅延評価しないと中間物の寸法が反映されない）。
-                morph/particle はプレースホルダのフレームパターン版
-                （実レンダは _execute_frames_step が一時dirで組み直す）。
-            label: 進捗表示の見出し
-            policy: 保存点opのpolicy（pre_bake/frame_extractは存在チェックのみ
-                なので持たない＝従来挙動）
-            morph/particle 追加キー: op / src（フレーム生成の入力画像）/ dur / fps
-          final: _apply_checkpoint_final_state でObjectへ適用する最終状態
-          resume_args: _find_resume_point へそのまま渡す引数タプル
-        """
-        if obj.media_type == "text":
-            return None  # テキスト系は実体ファイルを持たずベイク対象外
-        ops = _build_unified_ops(obj)
-        bakeable_ops, live_ops = _split_ops(ops)
-        if not bakeable_ops:
-            return None
-        # 全opがpolicy="off"ならスキップ
-        if all(getattr(op, 'policy', 'auto') == "off" for _, op in bakeable_ops):
-            return None
-
-        _validate_morph_position(bakeable_ops)
-
-        save_points = _compute_save_points(bakeable_ops)
-        if not save_points:
-            return None
-
-        original_source = obj.source
-        dur = self._checkpoint_bake_duration(obj, original_source)
-        fps = self.fps
-        self._require_morph_duration(bakeable_ops, dur, original_source)
-
-        is_video = _detect_media_type(original_source) in ("video",)
-        current_source = original_source
-        current_media_type = obj.media_type
-        steps = []
-
-        def _cp_builder(src, mt, transforms, effects, path, cp_dur):
-            """チェックポイントコマンドの遅延ビルダー（現在値をクロージャへ固定）"""
-            if cp_dur is None:
-                return lambda: self._build_checkpoint_image_cmd(
-                    src, transforms, path)
-            return lambda: self._build_checkpoint_video_cmd(
-                src, mt, transforms, effects, path, cp_dur, fps)
-
-        def _plan_pre_bake(pre_ops, pre_segment, sp_idx, label):
-            """morph/explode直前の未ベイクopsを中間チェックポイントへ計画する
-            （破棄するとmorph前のresize等が黙って消えるため先にベイクする）"""
-            nonlocal current_source, current_media_type
-            pre_has_effects = any(t == "effect" for t, _ in pre_segment)
-            pre_dur = dur if (pre_has_effects or is_video) else None
-            pre_fps = fps if pre_dur is not None else None
-            pre_quality = getattr(pre_ops[-1][1], 'quality', 'final')
-            pre_path = _checkpoint_cache_path(
-                original_source, pre_segment, pre_dur, pre_fps, pre_quality)
-            steps.append({
-                "kind": "pre_bake", "sp_idx": sp_idx, "path": pre_path,
-                "label": label,
-                "build_cmd": _cp_builder(
-                    current_source, current_media_type,
-                    [o for t, o in pre_ops if t == "transform"],
-                    [o for t, o in pre_ops if t == "effect"],
-                    pre_path, pre_dur),
-            })
-            current_source = pre_path
-            current_media_type = _detect_media_type(pre_path)
-
-        def _plan_frame_extract(src, sp_idx, label):
-            """morph/粒子生成（PIL）は画像のみ対応: 動画ソース（前ベイクの
-            .mkv等）は最終フレームをRGBA PNGへ抽出してから入力にする"""
-            frame_path = _morph_input_frame_path(src)
-            steps.append({
-                "kind": "frame_extract", "sp_idx": sp_idx, "path": frame_path,
-                "label": label,
-                "build_cmd": (lambda s=src, fp=frame_path:
-                              _build_morph_frame_extract_cmd(s, fp)),
-            })
-            return frame_path
-
-        sorted_sps = sorted(save_points)
-        prev_sp_idx = None
-        for sp_idx in sorted_sps:
-            segment_ops = bakeable_ops[:sp_idx + 1]
-            has_effects = any(t == "effect" for t, _ in segment_ops)
-            cp_dur = dur if (has_effects or is_video) else None
-            cp_fps = fps if cp_dur is not None else None
-            sp_typ, sp_op = bakeable_ops[sp_idx]
-            quality = getattr(sp_op, 'quality', 'final')
-            policy = getattr(sp_op, 'policy', 'auto')
-            seg_start = 0 if prev_sp_idx is None else prev_sp_idx + 1
-
-            # morph_to 分岐
-            if (sp_typ == "effect" and sp_op.name == "morph_to"
-                    and hasattr(sp_op, '_morph_target')):
-                pre_ops = bakeable_ops[seg_start:sp_idx]
-                if pre_ops:
-                    _plan_pre_bake(pre_ops, bakeable_ops[:sp_idx], sp_idx,
-                                   "チェックポイント保存 (morph前処理)")
-                if _detect_media_type(current_source) == "video":
-                    current_source = _plan_frame_extract(
-                        current_source, sp_idx, "モーフ入力フレーム抽出")
-                    current_media_type = "image"
-                morph_path = _morph_cache_path(
-                    current_source, sp_op, dur, fps, quality)
-                steps.append({
-                    "kind": "morph", "sp_idx": sp_idx, "path": morph_path,
-                    "label": "モーフキャッシュ保存", "policy": policy,
-                    "op": sp_op, "src": current_source, "dur": dur, "fps": fps,
-                    "build_cmd": (lambda mp=morph_path:
-                                  self._build_morph_webm_cmd(
-                                      os.path.join("__morph_frames__",
-                                                   "frame_%05d.png"),
-                                      mp, dur, fps)),
-                })
-                current_source = morph_path
-                current_media_type = "video"
-            # 粒子Effect分岐
-            elif sp_typ == "effect" and sp_op.name in ("explode_to",
-                                                       "assemble_from"):
-                if sp_op.name == "explode_to":
-                    # explode: 直前の未ベイクopsを先にベイク（morphと同じ経路）
-                    pre_ops = bakeable_ops[seg_start:sp_idx]
-                    if pre_ops:
-                        _plan_pre_bake(pre_ops, bakeable_ops[:sp_idx], sp_idx,
-                                       "チェックポイント保存 (explode前処理)")
-                    img_path = current_source
-                else:  # assemble_from: 集合元画像を入力にする
-                    img_path = sp_op._assemble_source.source
-                if _detect_media_type(img_path) == "video":
-                    img_path = _plan_frame_extract(
-                        img_path, sp_idx, "粒子入力フレーム抽出")
-                part_path = _particle_cache_path(
-                    img_path, sp_op, dur, fps, quality)
-                steps.append({
-                    "kind": "particle", "sp_idx": sp_idx, "path": part_path,
-                    "label": "粒子キャッシュ保存", "policy": policy,
-                    "op": sp_op, "src": img_path, "dur": dur, "fps": fps,
-                    "build_cmd": (lambda pp=part_path:
-                                  self._build_morph_webm_cmd(
-                                      os.path.join("__particle_frames__",
-                                                   "frame_%05d.png"),
-                                      pp, dur, fps)),
-                })
-                current_source = part_path
-                current_media_type = "video"
-            else:
-                cache_path = _checkpoint_cache_path(
-                    original_source, segment_ops, cp_dur, cp_fps, quality)
-                local_ops = bakeable_ops[seg_start:sp_idx + 1]
-                steps.append({
-                    "kind": "checkpoint", "sp_idx": sp_idx, "path": cache_path,
-                    "label": "チェックポイント保存", "policy": policy,
-                    "build_cmd": _cp_builder(
-                        current_source, current_media_type,
-                        [o for t, o in local_ops if t == "transform"],
-                        [o for t, o in local_ops if t == "effect"],
-                        cache_path, cp_dur),
-                })
-                current_source = cache_path
-                current_media_type = _detect_media_type(cache_path)
-            prev_sp_idx = sp_idx
-
-        remaining = bakeable_ops[sorted_sps[-1] + 1:]
-        final = {
-            "source": current_source,
-            "media_type": current_media_type,
-            "transforms": [op for t, op in remaining if t == "transform"],
-            "effects": ([op for t, op in remaining if t == "effect"]
-                        + [op for t, op in live_ops if t == "effect"]),
-            "dur": dur,
-            "live_effects": [op for t, op in live_ops if t == "effect"],
-        }
-        return {
-            "steps": steps,
-            "final": final,
-            "resume_args": (original_source, bakeable_ops, dur, fps,
-                            save_points),
-        }
-
-    @staticmethod
-    def _apply_checkpoint_final_state(obj, final):
-        """計画の最終状態をObjectへ適用する（source差し替え・残余ops再設定）。
-
-        差し替え前に解決した実長を保持（差し替え後・未生成予定パスへの
-        probe依存を排除し、dry_runと実レンダで式を一致させる）。
-        live 時間系Effect（speed/freeze_frame）が残る場合は表示尺に換算する。
-        """
-        if final["dur"]:
-            obj._resolved_length = _apply_time_effects_to_duration(
-                final["dur"], final["live_effects"])
-        obj.source = final["source"]
-        obj.media_type = final["media_type"]
-        obj.transforms = list(final["transforms"])
-        obj.effects = list(final["effects"])
-
-    def _process_checkpoints(self, obj):
-        """1つのObjectのチェックポイント処理（実レンダ）。
-
-        計画(_plan_object_checkpoints)を立て、復元点より後のステップだけを
-        実行してからObjectへ最終状態を適用する。dry_run側
-        (_collect_checkpoint_cmds)と同一の計画を通るため、キャッシュパスが
-        経路間でずれることはない。
-        """
-        plan = self._plan_object_checkpoints(obj)
-        if plan is None:
-            return
-        # 統計は実行の前に記録する（実行後だと自分で作った物をヒットと数える）
-        for step in plan["steps"]:
-            self._note_planned_artifact(step["path"])
-        # 復元点チェック（bakeable_opsベース）: 復元点以前のステップは既存
-        # キャッシュを使うため実行しない（後続が参照する入力パスは計画が
-        # 同一規則で解決済みなので、実行の有無でコマンドは変わらない）
-        resume_idx, _resume_path = self._find_resume_point(*plan["resume_args"])
-        for step in plan["steps"]:
-            if resume_idx is not None and step["sp_idx"] <= resume_idx:
-                continue
-            self._execute_checkpoint_step(step, obj)
-        self._apply_checkpoint_final_state(obj, plan["final"])
-
-    @staticmethod
-    def _step_context(step, obj):
-        """チェックポイント生成失敗時に「どのオブジェクト起因か」を示す文脈。"""
-        who = "" if obj is None else             f"（素材 {obj.source} / start={obj.start_time}s）"
-        return f"{step['label']}{who} → {step['path']}"
-
+    # ffmpeg を実際に起動する段だけは project.py に残す。テストが
+    # scriptvedit.project._run_ffmpeg_to_cache を差し替えて生成を偽装するため、
+    # この名前の解決先モジュールを変えてはいけない。
     def _execute_checkpoint_step(self, step, obj=None):
         """計画ステップ1件を実行する（実レンダ専用）。
 
@@ -1885,7 +1311,7 @@ class Project:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             print(f"{step['label']}: {path}")
             _run_ffmpeg_to_cache(cmd, path, timeout=600,
-                                 context=self._step_context(step, obj))
+                                 context=_step_context(step, obj))
             return
         need_render = (step["policy"] == "force") or not os.path.exists(path)
         if not need_render:
@@ -1897,7 +1323,7 @@ class Project:
         cmd = step["build_cmd"]()
         print(f"{step['label']}: {path}")
         _run_ffmpeg_to_cache(cmd, path, timeout=600,
-                             context=self._step_context(step, obj))
+                             context=_step_context(step, obj))
 
     def _execute_frames_step(self, step, obj=None):
         """morph/particle 共通: 一時dirへPNG連番を生成しffv1中間へエンコードする。
@@ -1932,64 +1358,10 @@ class Project:
                 gen(step["src"], tmpdir, n_frames, blend_fn=blend_fn, **gen_kw)
             frame_pattern = os.path.join(tmpdir, "frame_%05d.png")
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            cmd = self._build_morph_webm_cmd(frame_pattern, path, dur, fps)
+            cmd = _build_morph_webm_cmd(frame_pattern, path, dur, fps)
             print(f"{step['label']}: {path}")
             _run_ffmpeg_to_cache(cmd, path, timeout=600,
-                                 context=self._step_context(step, obj))
-
-    def _find_resume_point(self, original_source, ops, duration, fps, save_points):
-        """force地点より左のauto保存点のみresume候補"""
-        # 最左force位置
-        first_force = None
-        for i, (typ, op) in enumerate(ops):
-            if getattr(op, 'policy', 'auto') == "force" and _is_bakeable(typ, op):
-                first_force = i
-                break
-        boundary = (first_force - 1) if first_force is not None else len(ops) - 1
-
-        # boundary以下のauto保存点を右から探索
-        candidates = sorted([i for i in save_points
-                            if i <= boundary and getattr(ops[i][1], 'policy', 'auto') == "auto"],
-                           reverse=True)
-
-        is_video = _detect_media_type(original_source) in ("video",)
-        for idx in candidates:
-            segment_ops = ops[:idx + 1]
-            # 保存側と同じくセグメント（保存点までのprefix）単位でhas_effectsを計算
-            # （全ops基準だとキャッシュキーが食い違い、永久にキャッシュミスする）
-            has_effects = any(t == "effect" for t, _ in segment_ops)
-            cp_dur = duration if (has_effects or is_video) else None
-            cp_fps = fps if cp_dur is not None else None
-            quality = getattr(ops[idx][1], 'quality', 'final')
-            path = _checkpoint_cache_path(original_source, segment_ops, cp_dur, cp_fps, quality)
-            if os.path.exists(path):
-                return idx, path
-        return None, None
-
-    def _ensure_checkpoints(self):
-        """bakeable opsを持つ全Objectのチェックポイント処理（対象判定は計画側）"""
-        for obj in self.objects:
-            if isinstance(obj, Object):
-                self._process_checkpoints(obj)
-
-    def _collect_checkpoint_cmds(self):
-        """dry_run用: 全チェックポイントコマンドを収集（計画は実レンダと共通）。
-
-        morph/particle はフレーム生成を伴わないため、フレームパターンが
-        プレースホルダのコマンドを収集する。収集後は実レンダと同じ最終状態を
-        Objectへ適用する（sourceの予定パス差し替え・実長保持等）。
-        """
-        cmds = {}
-        for obj in self.objects:
-            if not isinstance(obj, Object):
-                continue
-            plan = self._plan_object_checkpoints(obj)
-            if plan is None:
-                continue
-            for step in plan["steps"]:
-                cmds[step["path"]] = step["build_cmd"]()
-            self._apply_checkpoint_final_state(obj, plan["final"])
-        return cmds
+                                 context=_step_context(step, obj))
 
     def _collect_web_cmds(self):
         """dry_run用: web Objectのwebmエンコードコマンドを収集"""
@@ -2090,103 +1462,8 @@ class Project:
         # ffmpeg自体がマルチスレッドのため控えめに（CPU数-1、上限4）
         return _builtins.max(1, _builtins.min(cpu - 1, 4))
 
-    def _generate_pending_caches(self):
-        """レイヤーキャッシュ生成を実行（独立レイヤーは ThreadPoolExecutor で並列）"""
-        pending = [i for i, spec in enumerate(self._layer_specs)
-                   if spec["cache"] == "make"]
-        if not pending:
-            return
-        for i in pending:
-            self._note_planned_artifact(
-                self._layer_cache_paths_for(self._layer_specs[i])[0])
-        workers = _builtins.min(self._parallel_workers(), len(pending))
-        if workers <= 1 or len(pending) == 1:
-            for i in pending:
-                self._render_layer_to_cache(i)
-            return
-        # 各レイヤーキャッシュは独立（相互に入力参照しない）ため並列化して差し支えない
-        print(f"レイヤーキャッシュを並列生成: {len(pending)}件 (workers={workers})")
-        errors = []
-        with _futures.ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {ex.submit(self._render_layer_to_cache, i): i for i in pending}
-            for fut in _futures.as_completed(futs):
-                try:
-                    fut.result()
-                except Exception as e:  # 1件失敗しても他の結果は確定させる
-                    errors.append((futs[fut], e))
-        if errors:
-            i, e = errors[0]
-            raise RuntimeError(
-                f"レイヤーキャッシュ生成に失敗しました "
-                f"({self._layer_specs[i]['filename']}): {e}") from e
-
-    def _build_layer_cache_cmd(self, spec_index, webm_path):
-        """レイヤーキャッシュ用ffmpegコマンド（透過を保つ中間ファイル）
-
-        エンコード設定は spec の cache_quality で決まる（_LAYER_CACHE_QUALITY）。
-        webm_path: 出力先パス。呼び出し側で計算して渡す
-        （_layer_cache_pathsはFFP依存のため、二重計算するとレイヤーファイルの
-        mtime変化等で構築時と実行時のパスが食い違うおそれがある）。
-        拡張子は品質ごとに異なる（draft/balanced=.webm, lossless=.mkv）。
-        """
-        spec = self._layer_specs[spec_index]
-        objects, anchors = self._get_layer_data(spec_index)
-        # 本レンダと同じく priority ソート + 映像を持つオブジェクトのみ合成
-        renderable = sorted(
-            [o for o in objects if isinstance(o, Object) and o.has_video],
-            key=lambda o: o.priority)
-        # レイヤーキャッシュは映像のみ保存するため、既知の音声と判定不能動画を警告
-        audio_sources = self._layer_audio_sources.get(spec["filename"], [])
-        unknown_audio_sources = self._layer_unknown_audio_sources.get(
-            spec["filename"], [])
-        if audio_sources or unknown_audio_sources:
-            details = list(audio_sources) + list(unknown_audio_sources)
-            status = ("音声はキャッシュ再生時に脱落します" if not unknown_audio_sources
-                      else "音声がキャッシュ再生時に脱落する可能性があります")
-            _warn(self,
-                f"レイヤーキャッシュ ({spec['filename']}) は映像のみ保存します。"
-                f"{status}: {', '.join(details)}\n"
-                f"回避策: 音声を持つ素材は cache を付けない別レイヤーに分離してください"
-                f"（透過VP9への音声多重化はレイヤー内amix/adelay/duck_underの"
-                f"再現が必要で本ウェーブでは見送り）。")
-
-        dur = self.duration or self._calc_total_duration()
-
-        inputs = []
-        filter_parts = []
-
-        # 入力0: 透明キャンバス
-        inputs.extend([
-            "-f", "lavfi",
-            "-i", f"color=c=black@0.0:s={self.width}x{self.height}:d={dur}:r={self.fps},format=rgba",
-        ])
-
-        current_base = "[0:v]"
-
-        for i, obj in enumerate(renderable):
-            input_idx = i + 1
-            inputs.extend(_build_input_args(obj, self.fps))
-            # 本レンダと同じ解決ロジックでu正規化の分母を統一
-            # （レイヤー全体尺fallbackだとcache有無でアニメ速度が変わる）
-            obj_dur = self._resolve_obj_duration(obj)
-            parts, out_label = _build_video_overlay_parts(
-                obj, input_idx, current_base, obj_dur,
-                visible_window=_visible_window(obj, self.fps))
-            filter_parts.extend(parts)
-            current_base = out_label
-
-        cmd = ["ffmpeg", "-y"]
-        cmd.extend(inputs)
-
-        if filter_parts:
-            cmd.extend(["-filter_complex", ";".join(filter_parts)])
-            cmd.extend(["-map", current_base])
-
-        # 品質段階に応じたエンコード引数（draft/balanced=VP9 alpha, lossless=FFV1）
-        cmd.extend(_layer_cache_encode_args(spec.get("cache_quality")))
-        cmd.extend(["-t", str(dur), webm_path])
-        return cmd
-
+    # 計画・鮮度判定は layercache.py だが、ffmpeg を起動するこの段だけは
+    # project.py に残す（_execute_checkpoint_step と同じ理由）。
     def _render_layer_to_cache(self, spec_index):
         """レイヤーキャッシュ生成実行"""
         spec = self._layer_specs[spec_index]
@@ -2241,10 +1518,20 @@ class Project:
 
     def _build_aloop_filter(self, obj, loop_effect):
         """aloop フィルタ文字列を構築（元素材長からループ用サンプル数を決定）。
-        aloopは無限ループ(loop=-1)し、後段のatrim/durationで尺を確定する。"""
-        length = _probe_audio_length(obj.source)
+        aloopは無限ループ(loop=-1)し、後段のatrim/durationで尺を確定する。
+
+        probe 先は obj.source ではなく **obj.audio_source（元素材）**。
+        source はチェックポイントで `-an` の映像専用中間物へ差し替わりうるので、
+        そちらを見ると (a) 音声ストリームが無いので sample_rate が取れず、
+        (b) cold（未生成）と warm（実体化済み）で probe の成否が変わって
+        **dry_run の出力コマンドがキャッシュ状態に依存してしまう**
+        （CLAUDE.md §3「dry_run はキャッシュ状態に依存しない」の違反）。
+        音声は常に元素材から取るので、尺も SR も元素材を見るのが正しい。
+        """
+        audio_src = obj.audio_source
+        length = _probe_audio_length(audio_src)
         # 実サンプルレートを取得（高SR素材でも1周期分を確実に確保するため）。
-        info = self._probe_media(obj.source)
+        info = self._probe_media(audio_src)
         sr = info.get("sample_rate") if info else None
         if length and sr:
             size = int(_math.ceil(length * sr)) + sr
@@ -2377,16 +1664,27 @@ class Project:
         出たラベルから素材へ辿れる。
         """
         renderable = [o for o in self.objects if isinstance(o, Object)]
+        sorted_objects = sorted(renderable, key=lambda o: o.priority)
         lines = ["入力の対応表（[fxN] の N が入力番号）:",
                  "  入力0: 背景キャンバス"]
-        for i, obj in enumerate(sorted(renderable, key=lambda o: o.priority),
-                                start=1):
+        for i, obj in enumerate(sorted_objects, start=1):
             effects = ",".join(e.name for e in obj.effects) or "なし"
             transforms = ",".join(t.name for t in obj.transforms) or "なし"
             lines.append(
                 f"  入力{i}: {obj.source} start={obj.start_time}s "
                 f"dur={obj.duration} transform=[{transforms}] "
                 f"effect=[{effects}]")
+        # チェックポイントで source が中間物へ差し替わった Object の音声専用入力
+        # （_build_ffmpeg_cmd と同じ順序・同じ条件で並べる）。音声を持てない
+        # 出力形式（gif/webp/png連番等）では付かないので、その旨を添える。
+        idx = 1 + len(sorted_objects)
+        for obj in sorted_objects:
+            if not obj.has_audio or obj.audio_source == obj.source:
+                continue
+            lines.append(
+                f"  入力{idx}: {obj.audio_source}"
+                f"（音声のみ。音声を持つ出力形式のときだけ付く）")
+            idx += 1
         return lines
 
     def _run_main_ffmpeg(self, cmd, output_path, timeout):
@@ -2430,6 +1728,25 @@ class Project:
             input_idx = i + 1
             input_map[id(obj)] = input_idx
             inputs.extend(_build_input_args(obj, self.fps))
+        n_inputs = 1 + len(sorted_objects)  # 背景キャンバス + オブジェクト入力
+
+        # --- 音声入力 ---
+        # チェックポイントで source が中間物（-an の映像専用）へ差し替わった
+        # Object は、音声を元素材（audio_source）から取るため専用の入力を足す。
+        # こうしないと中間物に音声を焼き込む必要があり、その場合
+        # 「未生成(cold)＝音声なし／生成済み(warm)＝音声あり」とキャッシュの
+        # 有無で出力コマンドが変わる（_build_checkpoint_video_cmd の -an 参照）。
+        audio_objects = ([o for o in sorted_objects if o.has_audio]
+                         if fmt["has_audio"] else [])
+        audio_input_map = dict(input_map)  # obj id → 音声入力index（既定は映像と同じ）
+        for obj in audio_objects:
+            if obj.audio_source == obj.source:
+                continue
+            audio_input_map[id(obj)] = n_inputs
+            inputs.extend(_decoder_input_args(
+                obj.audio_source, _detect_media_type(obj.audio_source),
+                self.fps))
+            n_inputs += 1
 
         # --- 映像チェーン ---
         current_base = "[0:v]"
@@ -2446,10 +1763,9 @@ class Project:
             current_base = out_label
 
         # --- 音声チェーン ---
-        # サムネイル等の映像専用出力では音声枝を構築しない。構築だけして
+        # サムネイル等の映像専用出力では音声枝を構築しない（audio_objects は
+        # 入力構築の段で fmt["has_audio"] を見て決めてある）。構築だけして
         # -map しないと、loudnorm 等の終端が未接続になり ffmpeg が EINVAL で落ちる。
-        audio_objects = ([o for o in sorted_objects if o.has_audio]
-                         if fmt["has_audio"] else [])
         audio_out = None
 
         if audio_objects:
@@ -2457,7 +1773,7 @@ class Project:
             idx_by_id = {}  # id(obj) → audio_labels内index（duck_underのother参照用）
             for ai, obj in enumerate(audio_objects):
                 idx_by_id[id(obj)] = ai
-                input_idx = input_map[id(obj)]
+                input_idx = audio_input_map[id(obj)]
                 dur = self._resolve_obj_duration(obj)
                 start = obj.start_time
 
@@ -2621,8 +1937,11 @@ class Project:
             meta_path = _chapters_metadata_path(self)
             if not self._dry_run:
                 _write_chapters_metadata(self, meta_path)
-            # メタ入力のストリーム index = 既存 -i 個数（color 1 + オブジェクト入力数）
-            meta_idx = 1 + len(sorted_objects)
+            # メタ入力のストリーム index = 既存 -i 個数
+            # （背景キャンバス + オブジェクト入力 + 追加した音声入力）。
+            # len(sorted_objects) から数え直さないこと: 音声専用入力を足した分
+            # ずれて、チャプターが別入力のメタを指す
+            meta_idx = n_inputs
             cmd.extend(["-f", "ffmetadata", "-i", meta_path])
 
         use_audio = bool(audio_out) and fmt["has_audio"]

@@ -13,7 +13,7 @@ import builtins as _builtins
 from scriptvedit.context import current_project
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.expr import Expr, max
+from scriptvedit.expr import Expr
 from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIXFMT_VER, _BAKEABLE_EFFECTS, _CACHE_DIR, _ENGINE_VER, _TERMINAL_FRAME_EFFECTS, _detect_media_type
 
 
@@ -214,7 +214,8 @@ def _compute_save_points(ops):
             force_indices.append(i)
 
     # RAA: bakeable ops中の最右 policy="auto"（最後のFSP以降にforceがなければ）
-    last_force = max(force_indices) if force_indices else -1
+    # scriptvedit.expr.max は Expr 用のラッパなので、int の列には組み込みを直接使う
+    last_force = _builtins.max(force_indices) if force_indices else -1
     raa_candidate = None
     for i, (typ, op) in enumerate(ops):
         policy = getattr(op, 'policy', 'auto')
@@ -271,15 +272,15 @@ def _norm_src_path(path):
     return path.replace("\\", "/")
 
 
-def _checkpoint_cache_path(original_source, ops, duration=None, fps=None, quality="final"):
+def _checkpoint_cache_path(original_source, ops, duration=None, fps=None):
     """チェックポイントのキャッシュファイルパスを計算（signature方式）"""
     # 素材=内容指紋 / キャッシュ生成物(web webm 等)=パス署名（dry_runと実レンダで鍵一致）
     sigs = [_src_signature(original_source)]
     opfp = _op_prefix_fingerprint(ops)
     sigs.append(opfp)
-    # 呼び出し側のraw hintではなく、prefix全体で出力に効く品質だけを鍵へ入れる。
-    quality = _ops_effective_quality(ops)
-    sigs.append(f"q={quality}")
+    # 品質は呼び出し側の raw hint ではなく、prefix 全体で出力に実際に効くものだけを
+    # ops から導出して鍵へ入れる（未対応 op のヒントで鍵が分裂しないように）。
+    sigs.append(f"q={_ops_effective_quality(ops)}")
     # 注: 生成される中間物の内容は draft/本番で同一のため、_ACTIVE_QUALITY(rq)は
     # 鍵に含めない（含めると本番↔draft で全キャッシュミスになり無駄な再生成が起きる）
     sigs.append(f"ev={_ENGINE_VER}")
@@ -312,7 +313,7 @@ def _checkpoint_cache_path(original_source, ops, duration=None, fps=None, qualit
 _MORPH_RENDER_VER = "3"
 
 
-def _morph_cache_path(src_path, morph_op, duration, fps, quality="final"):
+def _morph_cache_path(src_path, morph_op, duration, fps):
     """morph WebMのキャッシュパスを計算"""
     # キャッシュ生成物はパス署名、素材は内容指紋（_src_signature に一本化）
     sigs = [_src_signature(src_path)]
@@ -321,12 +322,14 @@ def _morph_cache_path(src_path, morph_op, duration, fps, quality="final"):
         try:
             sigs.append(f"tgt_ffp={_file_fingerprint(morph_op._morph_target.source)}")
         except OSError:
-            sigs.append(f"tgt_src={morph_op._morph_target.source}")
+            sigs.append(
+                f"tgt_src={_norm_src_path(str(morph_op._morph_target.source))}")
     sigs.append(f"op={_op_fingerprint_str(morph_op)}")
     sigs.append(f"dur={duration}")
     sigs.append(f"fps={fps}")
-    quality = _effective_quality(morph_op)
-    sigs.append(f"q={quality}")
+    # 品質は op から出力に実際に効くものだけを導出する。呼び出し側の raw hint を
+    # 混ぜると、未対応 op で同一出力なのに鍵だけ分裂するため受け取らない。
+    sigs.append(f"q={_effective_quality(morph_op)}")
     # 中間物は draft/本番で同一内容のため rq(_ACTIVE_QUALITY)は鍵に含めない
     sigs.append(f"ev={_ENGINE_VER}")
     sigs.append(f"mv={_MORPH_RENDER_VER}")
@@ -335,7 +338,7 @@ def _morph_cache_path(src_path, morph_op, duration, fps, quality="final"):
     return os.path.join(cache_dir, f"{key}.mkv")
 
 
-def _particle_cache_path(img_path, particle_op, duration, fps, quality="final"):
+def _particle_cache_path(img_path, particle_op, duration, fps):
     """explode_to/assemble_from の粒子アニメmkvキャッシュパスを計算
 
     img_path: 粒子化する単一画像（explode=直前ソース, assemble=集合元）
@@ -344,8 +347,8 @@ def _particle_cache_path(img_path, particle_op, duration, fps, quality="final"):
     sigs.append(f"op={_op_fingerprint_str(particle_op)}")
     sigs.append(f"dur={duration}")
     sigs.append(f"fps={fps}")
-    quality = _effective_quality(particle_op)
-    sigs.append(f"q={quality}")
+    # 品質は op から導出する（_morph_cache_path と同じ方針）。
+    sigs.append(f"q={_effective_quality(particle_op)}")
     # 中間物は draft/本番で同一内容のため rq(_ACTIVE_QUALITY)は鍵に含めない
     sigs.append(f"ev={_ENGINE_VER}")
     sigs.append(f"mv={_MORPH_RENDER_VER}")
@@ -524,7 +527,7 @@ def _web_cache_path(obj, project):
         ffp = _web_source_fingerprint(obj._web_source)
         sigs.append(f"ffp={ffp}")
     except (OSError, TypeError):
-        sigs.append(f"src={obj._web_source}")
+        sigs.append(f"src={_norm_src_path(str(obj._web_source))}")
     # データハッシュ
     data_str = json.dumps(obj._web_data, sort_keys=True, default=str)
     sigs.append(f"data={hashlib.sha256(data_str.encode()).hexdigest()[:12]}")
@@ -547,7 +550,7 @@ def _web_cache_path(obj, project):
             try:
                 deps_fps.append(str(_file_fingerprint(dep)))
             except OSError:
-                deps_fps.append(dep)
+                deps_fps.append(_norm_src_path(str(dep)))
         sigs.append(f"deps={hashlib.sha256('|'.join(deps_fps).encode()).hexdigest()[:12]}")
     sigs.append(f"ev={_ENGINE_VER}")
     key = _sig_key(sigs)
@@ -630,7 +633,7 @@ def _layer_cache_paths(filename, project, quality=None):
         ffp = _file_fingerprint(filename)
         sigs.append(f"ffp={ffp}")
     except (OSError, TypeError):
-        sigs.append(f"src={filename}")
+        sigs.append(f"src={_norm_src_path(str(filename))}")
     sigs.append(f"ev={_ENGINE_VER}")
     sigs.append(f"w={project.width}")
     sigs.append(f"h={project.height}")
@@ -638,7 +641,7 @@ def _layer_cache_paths(filename, project, quality=None):
     sigs.append(f"bg={project.background_color}")
     # 出力尺も鍵に含める（キャッシュは -t dur で尺を焼き込むため、
     # 総尺変更後に旧キャッシュを再利用すると短尺切れ/古い尺が戻る。issue #13 P1-4）
-    # render経路ではplan pass直後に総尺が確定済み（_render_impl参照）
+    # render経路ではplan pass直後に総尺が確定済み（Project._resolve_plan_duration参照）
     sigs.append(f"dur={project.duration}")
     # 品質も鍵の一部（同じ素材でも draft と lossless は別成果物）。
     # 名前だけでなく**実際のエンコード引数**を含めることで、将来 crf/pix_fmt を
@@ -771,9 +774,6 @@ def cache_clear(cache_dir=_CACHE_DIR, *, force=False):
         print(f"キャッシュ全削除: {os.path.abspath(cache_dir)}")
     else:
         print(f"キャッシュディレクトリはありません: {cache_dir}")
-
-
-# watch が監視する拡張子（レイヤー.py + 画像/音声/フォント/字幕/HTML等の素材）
 
 
 # --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛。scripts/check_import_cycles.py で計測）---

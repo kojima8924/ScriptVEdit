@@ -36,16 +36,20 @@ from scriptvedit import (
     mask, mask_wipe, opacity, blend_mode, rounded, pip,
     blur_background_fill, progress_bar,
     speed, reverse, freeze_frame, video_sequence,
-    trim, adelete,
+    trim, adelete, atempo,
     narrate, Narration, karaoke, beat_sync, slide,
     formula, formula_lines,
 )
 # 内部ヘルパーは実体モジュールから直接 import する
 # （package root からの private 再エクスポートは廃止済み）
 from scriptvedit.cache import (
-    _checkpoint_cache_path, _file_fingerprint, _web_cache_path,
+    _checkpoint_cache_path, _compute_save_points, _file_fingerprint,
+    _layer_cache_paths, _morph_cache_path, _web_cache_path,
 )
 from scriptvedit.expr import _resolve_param
+from scriptvedit.ffmpeg import (
+    _FILTER_SCRIPT_THRESHOLD, _externalize_long_filters,
+)
 from scriptvedit.filters.audio import _atempo_chain_rates
 from scriptvedit.filters.video import _build_effect_filters, _build_video_pre_filters
 from scriptvedit.cache import _is_bakeable, _is_cache_artifact_path, _op_fingerprint_str
@@ -5276,6 +5280,744 @@ ALL_TESTS += [
     # --- 監査 項目16: API 語彙の整理 ---
     ("bubble tail検証", check_bubble_tail_validated),
     ("avolume 一本化", check_avolume_replaces_again_and_afade),
+]
+
+
+# =============================================================================
+# Wave2: 各レーンが「test_errors.py は担当外」として積み残した回帰ケース
+# =============================================================================
+
+# --- manifest / describe: レイヤー間タイムラインの独立性 ---
+
+def check_describe_has_layer_timeline_constraint():
+    """describe の constraints に layer_timeline_independent が warning で載る
+
+    「レイヤーをまたぐと順次カーソルが 0 へ戻る」はエラーにならず黙って重なる
+    ため、AI/利用者が describe を読んだ時点で気付けることが唯一の防御になる。
+    """
+    m = describe()
+    hit = [c for c in m["constraints"] if c["id"] == "layer_timeline_independent"]
+    if not hit:
+        return False, f"constraint が無い: {[c['id'] for c in m['constraints']]}"
+    if hit[0]["severity"] != "warning":
+        return False, f"severity が warning でない: {hit[0]['severity']}"
+    if set(hit[0]["applies_to"]) != {"Project.layer", "Object.time"}:
+        return False, f"applies_to が想定外: {hit[0]['applies_to']}"
+    return True, f"severity={hit[0]['severity']} applies_to={hit[0]['applies_to']}"
+
+
+def check_describe_entries_cite_layer_timeline_constraint():
+    """describe(name='layer'/'time') の notes に [layer_timeline_independent] が入る
+
+    constraints は全文が1か所にあるだけでは読まれない。該当エントリを
+    単体で引いたときにも制約への参照が出ることまでが要件。
+    """
+    for name, section, entry in (("layer", "project_methods", "Project.layer"),
+                                 ("time", "object_methods", "Object.time")):
+        m = describe(name=name)
+        found = [e for e in m.get(section, []) if e["name"] == entry]
+        if not found:
+            return False, f"describe(name={name!r}) に {entry} が無い"
+        notes = " ".join(found[0].get("notes") or [])
+        if "[layer_timeline_independent]" not in notes:
+            return False, f"{entry} の notes に制約参照が無い: {notes[:120]}"
+    return True, "Project.layer / Object.time の両方が制約を引用"
+
+
+def _two_layer_start_times(second_layer_prologue=""):
+    """2レイヤー構成を dry_run し {素材ファイル名: start_time} を返す
+
+    a.py は shape_badge を 5 秒、b.py は shape_figure を 3 秒配置する。
+    second_layer_prologue は b.py の先頭へ差し込む行（pause.time(5) 等）。
+    """
+    a_path = _tmp_file("_tmp_tl_a.py")
+    b_path = _tmp_file("_tmp_tl_b.py")
+    try:
+        with open(a_path, "w", encoding="utf-8") as f:
+            f.write('from scriptvedit import *\n'
+                    'a = Object(asset("images/shape_badge.png"))\n'
+                    'a.time(5)\n')
+        with open(b_path, "w", encoding="utf-8") as f:
+            f.write('from scriptvedit import *\n'
+                    + second_layer_prologue +
+                    'b = Object(asset("images/shape_figure.png"))\n'
+                    'b.time(3)\n')
+        p = _mk_project()
+        p.layer(a_path, priority=0)
+        p.layer(b_path, priority=1)
+        p.render("_tmp.mp4", dry_run=True)
+        # p.objects には Pause 等のタイムライン項目も並ぶので素材だけを拾う
+        return {os.path.basename(str(o.source)): o.start_time
+                for o in p.objects if hasattr(o, "source")}
+    finally:
+        for path in (a_path, b_path):
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+def check_layer_timeline_cursor_resets_per_layer():
+    """別レイヤーの obj.time(5) は次レイヤーの開始位置を動かさない（制約の実装側）
+
+    describe が警告している挙動そのもの。ここが 5 になったら
+    「レイヤー内は順次・レイヤー間は並行」という記述が嘘になる。
+    """
+    starts = _two_layer_start_times()
+    if starts.get("shape_badge.png") != 0:
+        return False, f"1レイヤー目が 0 で始まっていない: {starts}"
+    if starts.get("shape_figure.png") != 0:
+        return False, f"2レイヤー目が 0 から始まっていない（制約の記述と不一致）: {starts}"
+    return True, f"start_time={starts}"
+
+
+def check_layer_pause_time_shifts_second_layer():
+    """b.py 先頭の pause.time(5) は 2レイヤー目を 5 秒へずらす（制約が案内する回避策）"""
+    starts = _two_layer_start_times("pause.time(5)\n")
+    if starts.get("shape_figure.png") != 5.0:
+        return False, f"pause.time(5) が効いていない: {starts}"
+    return True, f"start_time={starts}"
+
+
+# --- assets: must_exist=False は共有ライブラリを探索しない ---
+
+def check_asset_must_exist_false_skips_library():
+    """asset(must_exist=False) は共有ライブラリを探索せず _imported へコピーもしない
+
+    「素材があれば使う」判定に must_exist=False を使うと、共有ライブラリに
+    しか無い素材が永久に取り込まれず条件が常に False になる（assets.py の
+    docstring が警告している誤用）。既定呼び出しとの差をここで固定する。
+    """
+    from scriptvedit.assets import IMPORTED_DIR, assets_dir
+    rel = "images/_tmp_lane_shared.png"
+    lib = tempfile.mkdtemp(prefix="sv_assetlib_")
+    os.makedirs(os.path.join(lib, "images"))
+    with open(os.path.join(lib, "images", "_tmp_lane_shared.png"), "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n_tmp_lane_shared")
+    imported = os.path.join(assets_dir(), IMPORTED_DIR, "images",
+                            "_tmp_lane_shared.png")
+    old_env = os.environ.get("SCRIPTVEDIT_ASSETS")
+    os.environ["SCRIPTVEDIT_ASSETS"] = lib
+    try:
+        lazy = asset(rel, must_exist=False)
+        if os.path.exists(lazy):
+            return False, f"must_exist=False が実在パスを返した: {lazy}"
+        if os.path.exists(imported):
+            return False, "must_exist=False で _imported へコピーされた"
+        eager = asset(rel)
+        if eager != imported or not os.path.exists(eager):
+            return False, f"既定呼び出しで _imported へコピーされない: {eager}"
+        return True, f"lazy={os.path.basename(lazy)} / eager=_imported へコピー"
+    finally:
+        if os.path.exists(imported):
+            os.unlink(imported)
+        shutil.rmtree(lib, ignore_errors=True)
+        if old_env is None:
+            os.environ.pop("SCRIPTVEDIT_ASSETS", None)
+        else:
+            os.environ["SCRIPTVEDIT_ASSETS"] = old_env
+
+
+# --- checkpoint と音声 ---
+
+def check_checkpoint_adelete_keeps_output_silent():
+    """adelete() 付き動画をベイクしても音声専用入力が増えず -an のまま出る
+
+    チェックポイントは映像専用(-an)なので、音声は元素材から別入力で取り直す
+    経路がある。adelete() のときにその入力まで足すと、消したはずの音声が
+    ミキサへ戻る（かつ入力が1本増えてコマンドが変わる）。
+    """
+    layer_code = (
+        'from scriptvedit import *\n'
+        'v = Object(asset("video/clip_with_audio.mp4"))\n'
+        'v <= glow()\n'
+        'v <= adelete()\n'
+        'v.time(2)\n')
+    temp_path = _tmp_file("_tmp_cp_adelete.py")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.write(layer_code)
+        p = _mk_project()
+        p.layer(temp_path, priority=0)
+        result = p.render("_tmp.mp4", dry_run=True)
+        main = " ".join(result["main"])
+        if "-an" not in result["main"]:
+            return False, f"-an が無い: {main[:300]}"
+        if "clip_with_audio.mp4" in main:
+            return False, f"元素材が音声入力として追加された: {main[:300]}"
+        if not result["cache"]:
+            return False, "チェックポイントが計画されていない（前提が崩れた）"
+        return True, "音声入力なし・-an 維持"
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def check_checkpoint_final_state_audio_is_cache_independent():
+    """元素材を probe できないとき has_audio は False へ倒れ、キャッシュ有無で変わらない
+
+    音声判定を差し替え後（チェックポイント）のパスで行うと、未生成(cold)＝
+    音声なし / 生成済み(warm)＝音声ありとキャッシュの有無で結論が変わる。
+    差し替え先に「音声を持つ実在ファイル」を与えても False のままになることで、
+    probe 対象が元素材に固定されていることを示す。
+    """
+    import warnings as _warnings
+    p = _mk_project()
+    unreadable = "__tmp_no_such_source__.mp4"
+    results = []
+    for replaced in (_require_asset("video/clip_with_audio.mp4"),
+                     "__tmp_no_such_checkpoint__.mkv"):
+        obj = Object(unreadable)
+        if obj._has_audio is not None:
+            return False, f"前提が崩れた（動画の _has_audio が未判定でない）: {obj._has_audio}"
+        final = {"source": replaced, "audio_source": unreadable,
+                 "media_type": "video", "transforms": [], "effects": [],
+                 "dur": 2.0, "live_effects": []}
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            p._apply_checkpoint_final_state(obj, final)
+        results.append((obj._has_audio, obj.has_audio, obj._audio_source))
+    if any(r[0] is not False or r[1] is not False for r in results):
+        return False, f"has_audio が False へ倒れていない: {results}"
+    if len(set(results)) != 1:
+        return False, f"キャッシュの有無で結論が変わった: {results}"
+    if results[0][2] != unreadable:
+        return False, f"_audio_source が元素材を指していない: {results[0][2]}"
+    return True, f"has_audio=False（差し替え先に依らず一定）: {results[0]}"
+
+
+# --- レイヤーキャッシュのメタ破損 ---
+
+def _fake_layer_cache(meta):
+    """レイヤーキャッシュの成果物と anchors.json を偽装した Project を作る
+
+    戻り値: (project, 成果物パス, 後始末関数)
+    総尺を configure(duration=...) で固定するのは、キャッシュ鍵に尺が入るため
+    render 前後でパスがずれないようにするため。
+    """
+    layer_path = _tmp_file("_tmp_layer_cache.py")
+    with open(layer_path, "w", encoding="utf-8") as f:
+        f.write('from scriptvedit import *\n'
+                'o = Object(asset("images/shape_badge.png"))\n'
+                'o.time(2)\n')
+    p = Project()
+    p.configure(width=320, height=240, fps=10, background_color="black",
+                duration=2)
+    p.layer(layer_path, priority=0, cache="use")
+    art_path, json_path = p._layer_cache_paths_for(p._layer_specs[0])
+    os.makedirs(os.path.dirname(art_path), exist_ok=True)
+    with open(art_path, "wb") as f:
+        f.write(b"dummy-layer-cache")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+
+    def cleanup():
+        for path in (layer_path, art_path, json_path):
+            if os.path.exists(path):
+                os.unlink(path)
+        # レイヤー名がプロセス単位でユニークなので、置き場ごと消さないと
+        # __cache__ に空ディレクトリが実行のたび積み上がる
+        shutil.rmtree(os.path.dirname(art_path), ignore_errors=True)
+
+    return p, art_path, cleanup
+
+
+def check_layer_cache_meta_without_anchors_key():
+    """anchors キーを欠いた anchors.json でも cache='use' が落ちない（警告して続行）
+
+    手で壊した／旧版が書いたメタでも KeyError にせず、鮮度判定は
+    fail-closed（陳腐扱いの警告）のまま通す。duration は読めた分だけ反映する。
+    """
+    import warnings as _warnings
+    p, art_path, cleanup = _fake_layer_cache({"duration": 2.0, "sources": {}})
+    try:
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            p.render("_tmp.mp4", dry_run=True)
+        msgs = [str(w.message) for w in caught]
+        if not any("レイヤーキャッシュの素材が更新されています" in m for m in msgs):
+            return False, f"陳腐警告が出ていない: {msgs}"
+        if p._anchors:
+            return False, f"anchors キーが無いのにアンカーが増えた: {p._anchors}"
+        cached = [o for o in p.objects if str(o.source) == art_path]
+        if len(cached) != 1:
+            return False, f"キャッシュ Object が1件でない: {[o.source for o in p.objects]}"
+        if cached[0].duration != 2.0:
+            return False, f"duration がメタから読めていない: {cached[0].duration}"
+        return True, f"警告1件・anchors 空・duration={cached[0].duration}"
+    finally:
+        cleanup()
+
+
+def check_cached_layer_object_attrs_match_init():
+    """_load_cached_layer が作る Object の属性集合が Object.__init__ と一致する
+
+    __new__ で組み立てるため属性を1つ落としても構築時には気付けず、Project 側が
+    getattr のフォールバックをやめて直接参照した瞬間に AttributeError になる。
+    """
+    import warnings as _warnings
+    p, art_path, cleanup = _fake_layer_cache({"duration": 2.0, "sources": {}})
+    try:
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            p.render("_tmp.mp4", dry_run=True)
+        cached = [o for o in p.objects if str(o.source) == art_path]
+        if len(cached) != 1:
+            return False, f"キャッシュ Object が1件でない: {len(cached)}"
+        _mk_project()
+        reference = Object(_require_asset("images/shape_badge.png"))
+        missing = set(vars(reference)) - set(vars(cached[0]))
+        if missing:
+            return False, f"__init__ が設定する属性が欠けている: {sorted(missing)}"
+        return True, f"{len(vars(reference))} 属性すべてを保持"
+    finally:
+        cleanup()
+
+
+# --- viz（inspect の予想キャッシュ） ---
+
+def check_inspect_text_object_has_no_checkpoint_prediction():
+    """text Object は実体ファイルを持たないので [予想キャッシュ] に出ない
+
+    かつて viz が「source に __cache__ を含めばキャッシュ由来」という緩い規則で
+    判定しており、drawtext の textfile（__cache__/artifacts/text/*.txt）を
+    checkpoint として誤って予告していた。
+    """
+    layer_path = _tmp_file("_tmp_inspect_text.py")
+    try:
+        with open(layer_path, "w", encoding="utf-8") as f:
+            f.write('from scriptvedit import *\n'
+                    't = text("あ", size=48) <= fade(0.5)\n'
+                    't.time(2)\n')
+        p = _mk_project()
+        p.layer(layer_path, priority=0)
+        p.render("_tmp.mp4", dry_run=True)
+        report = p.inspect()
+        if "checkpoint" in report:
+            return False, f"checkpoint 行が出た:\n{report}"
+        if "[予想キャッシュ]" in report:
+            return False, f"[予想キャッシュ] 節が出た:\n{report}"
+        return True, "予想キャッシュ節なし"
+    finally:
+        if os.path.exists(layer_path):
+            os.unlink(layer_path)
+
+
+def check_inspect_layer_cache_path_honors_quality():
+    """inspect() が予告するレイヤーキャッシュパスは本体の算出値と一致する（.mkv）
+
+    viz が _layer_cache_paths(filename, project) を直に呼ぶと cache_quality が
+    落ち、拡張子も鍵も違う「決して実在しないパス」を予告してしまう。
+    """
+    layer_path = _tmp_file("_tmp_inspect_q.py")
+    try:
+        with open(layer_path, "w", encoding="utf-8") as f:
+            f.write('from scriptvedit import *\n'
+                    'o = Object(asset("images/shape_badge.png"))\n'
+                    'o.time(2)\n')
+        p = _mk_project()
+        p.layer(layer_path, priority=0, cache="auto", cache_quality="lossless")
+        p.render("_tmp.mp4", dry_run=True)
+        expected = p._layer_cache_paths_for(p._layer_specs[0])[0]
+        if not expected.endswith(".mkv"):
+            return False, f"lossless なのに .mkv でない: {expected}"
+        report = p.inspect()
+        if "[予想キャッシュ]" not in report:
+            return False, f"予想キャッシュ節が無い:\n{report}"
+        if expected not in report:
+            return False, f"予告パスが一致しない（期待 {expected}）:\n{report}"
+        return True, f"予告={expected}"
+    finally:
+        if os.path.exists(layer_path):
+            os.unlink(layer_path)
+
+
+# --- キャッシュ鍵: 読めないパスのフォールバックも正規化する ---
+
+def _unreadable_path_cache_keys(root):
+    """root を cwd にして「読めないパス」由来のキャッシュ鍵を2種類計算する
+
+    素材本体は実在の絶対パス（内容指紋）なので、鍵の差は読めないパスの
+    正規化だけに由来する。
+    """
+    import types
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(root)
+        morph_op = Effect("morph_to")
+        morph_op._morph_target = types.SimpleNamespace(
+            source=os.path.join(root, "sub", "no_such_target.png"))
+        morph_key = os.path.basename(_morph_cache_path(
+            _require_asset("images/shape_badge.png"), morph_op, 2.0, 30))
+        proj = Project()
+        proj.configure(width=320, height=240, fps=10,
+                       background_color="black", duration=2)
+        layer_key = os.path.basename(_layer_cache_paths(
+            os.path.join(root, "sub", "no_such_layer.py"), proj)[0])
+        return morph_key, layer_key
+    finally:
+        os.chdir(old_cwd)
+
+
+def check_cache_keys_normalize_unreadable_paths():
+    """読めない素材のパス署名は cwd 相対・`/` 区切りへ正規化される（移植性）
+
+    _morph_cache_path のターゲット画像と _layer_cache_paths のレイヤーファイルは
+    どちらも「指紋が取れなければパス署名」へ落ちる。ここが生パスのままだと
+    リポジトリの置き場所でキャッシュ鍵が変わり、別マシンで全再生成になる。
+    """
+    root_a = tempfile.mkdtemp(prefix="sv_norm_a_")
+    root_b = tempfile.mkdtemp(prefix="sv_norm_b_")
+    try:
+        keys_a = _unreadable_path_cache_keys(root_a)
+        keys_b = _unreadable_path_cache_keys(root_b)
+        if keys_a != keys_b:
+            return False, f"置き場所で鍵が変わった: {keys_a} vs {keys_b}"
+        return True, f"morph={keys_a[0]} layer={keys_a[1]}（置き場所非依存）"
+    finally:
+        shutil.rmtree(root_a, ignore_errors=True)
+        shutil.rmtree(root_b, ignore_errors=True)
+
+
+def check_web_cache_key_normalizes_unreadable_dep():
+    """_web_cache_path の deps も指紋不能時は正規化パスで鍵化する（移植性）"""
+    root_a = tempfile.mkdtemp(prefix="sv_web_a_")
+    root_b = tempfile.mkdtemp(prefix="sv_web_b_")
+    old = current_project()
+    try:
+        keys = []
+        for root in (root_a, root_b):
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(root)
+                p = Project()
+                p.configure(width=640, height=360, fps=30,
+                            background_color="black")
+                obj = subtitle_box(
+                    "test", deps=[os.path.join(root, "sub", "no_such.css")])
+                keys.append(os.path.basename(_web_cache_path(obj, p)))
+            finally:
+                os.chdir(old_cwd)
+        if keys[0] != keys[1]:
+            return False, f"置き場所で鍵が変わった: {keys}"
+        return True, f"key={keys[0]}（置き場所非依存）"
+    finally:
+        activate(old)
+        shutil.rmtree(root_a, ignore_errors=True)
+        shutil.rmtree(root_b, ignore_errors=True)
+
+
+def check_compute_save_points_multiple_force():
+    """_compute_save_points: force 複数 + 最右 auto の判定
+
+    RAA（最右 auto）は「最後の force より後ろにある」ときだけ保存点になる。
+    force が複数あるとき last_force を取り違えると最右 auto を拾い損ねる／
+    余計に拾うため、4パターンで固定する。
+    """
+    cases = [
+        # force 2つ + 最後の force より後ろの auto → 3点
+        ([glow(), +vignette(), pixelize(4), +opacity(0.5), glitch()], {1, 3, 4}),
+        # 末尾が force → RAA 無し
+        ([glow(), +vignette(), pixelize(4), +opacity(0.5)], {1, 3}),
+        # 全部 force → 全位置
+        ([+glow(), +vignette()], {0, 1}),
+        # force 無し → 最右 auto だけ
+        ([glow(), pixelize(4)], {1}),
+    ]
+    for effects, expected in cases:
+        ops = [("effect", e) for e in effects]
+        got = _compute_save_points(ops)
+        if got != expected:
+            names = [(e.name, getattr(e, "policy", "auto")) for e in effects]
+            return False, f"{names}: 期待 {sorted(expected)} / 実際 {sorted(got)}"
+    return True, f"{len(cases)}パターン一致"
+
+
+# --- audio_viz: 出力に効かない色はキャッシュ鍵へ混ぜない ---
+
+def check_audio_viz_color_key_only_for_waves():
+    """audio_viz: color は waves だけが鍵に効く（spectrum/cqt は同一パス）
+
+    showspectrum / showcqt は ffmpeg カラーを受け取るパラメータを持たないため
+    color を変えても出力は同じ。鍵に混ぜると同一出力なのにキャッシュだけ
+    分裂する（cache.py の方針違反）。
+    """
+    src = _require_asset("audio/bgm_loop.mp3")
+    p = _mk_project()
+    p._mode = "plan"   # 生成をスキップ（鍵だけ見る＝ffmpeg を起動しない）
+
+    def source_of(kind, color):
+        return str(audio_viz(src, kind=kind, color=color, duration=3.0).source)
+
+    for kind in ("spectrum", "cqt"):
+        if source_of(kind, "white") != source_of(kind, "red"):
+            return False, f"kind={kind} で color がキャッシュを分裂させた"
+    if source_of("waves", "white") == source_of("waves", "red"):
+        return False, "kind='waves' で color 違いが同じパスになった"
+    return True, "spectrum/cqt は色非依存・waves は色依存"
+
+
+# --- text 系 Object は通常の Object と同じ形をしている ---
+
+def check_text_factories_produce_standard_objects():
+    """text 系ファクトリの Object は通常の Object と同じ属性集合（差分は _text_spec のみ）
+
+    これらは Object.__new__ で組み立てるため、__init__ が増やした属性を
+    取りこぼしても構築時には気付けない。
+    """
+    _mk_project()
+    reference = set(vars(Object(_require_asset("images/shape_badge.png"))))
+    srt_path = _tmp_file("_tmp_text_attrs.srt")
+    with open(srt_path, "w", encoding="utf-8") as f:
+        f.write("1\n00:00:00,000 --> 00:00:02,000\nあ\n\n")
+    try:
+        factories = {
+            "text": lambda: text("あ", size=48),
+            "typewriter": lambda: typewriter("あい", size=48),
+            "counter": lambda: counter(0, 10, size=48),
+            "progress_bar": progress_bar,
+            "subtitles": lambda: subtitles(srt_path),
+            "karaoke": lambda: karaoke([(0.0, 2.0, "あい")]),
+        }
+        for name, factory in factories.items():
+            obj = factory()
+            if not isinstance(obj, Object):
+                return False, f"{name}: Object ではない: {type(obj).__name__}"
+            attrs = set(vars(obj))
+            missing = reference - attrs
+            extra = attrs - reference
+            if missing:
+                return False, f"{name}: 属性が欠けている: {sorted(missing)}"
+            if extra != {"_text_spec"}:
+                return False, f"{name}: 想定外の差分: {sorted(extra)}"
+        return True, f"{len(factories)}ファクトリが {len(reference)} 属性 + _text_spec"
+    finally:
+        if os.path.exists(srt_path):
+            os.unlink(srt_path)
+
+
+def check_text_object_timeline_operators():
+    """text Object も `a >> b` / `t @ 3.5` で通常の Object と同じく解決される"""
+    layer_path = _tmp_file("_tmp_text_timeline.py")
+    try:
+        with open(layer_path, "w", encoding="utf-8") as f:
+            f.write('from scriptvedit import *\n'
+                    'a = text("あ", size=48)\n'
+                    'a.time(2)\n'
+                    'b = text("い", size=48)\n'
+                    'b.time(1)\n'
+                    'a >> b\n'
+                    'c = text("う", size=48)\n'
+                    'c.time(1)\n'
+                    'c @ 3.5\n')
+        p = _mk_project()
+        p.layer(layer_path, priority=0)
+        p.render("_tmp.mp4", dry_run=True)
+        starts = {o._text_spec["content"]: o.start_time for o in p.objects}
+        if starts != {"あ": 0, "い": 2, "う": 3.5}:
+            return False, f"タイムライン解決が想定外: {starts}"
+        return True, f"start_time={starts}"
+    finally:
+        if os.path.exists(layer_path):
+            os.unlink(layer_path)
+
+
+def check_karaoke_ass_regenerated_after_truncation():
+    """切り詰められた .ass の残骸があっても karaoke が正しい内容へ再生成する
+
+    ファイル名が内容ハッシュなので「存在すればスキップ」ガードを置くと、
+    中断で 0 バイトになった ASS が以後どのレンダでも使われ続ける。
+    """
+    lines = [(0.0, 2.0, "あいう")]
+    obj = karaoke(lines)
+    ass_path = obj._text_spec["srt"]
+    with open(ass_path, encoding="utf-8") as f:
+        original = f.read()
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write("")            # 切り詰められた残骸を再現
+    again = karaoke(lines)
+    if again._text_spec["srt"] != ass_path:
+        return False, f"同じ内容で別パスになった: {again._text_spec['srt']}"
+    with open(ass_path, encoding="utf-8") as f:
+        restored = f.read()
+    if restored != original:
+        return False, f"再生成されなかった（{len(restored)} バイト）"
+    return True, f"{len(restored)} バイトへ再生成"
+
+
+# --- 公開 API の名前空間 ---
+
+def check_star_import_exposes_only_public_names():
+    """`from scriptvedit import *` に Pause/Scene/Group が入り、内部ヘルパーは入らない
+
+    Pause / Scene / Group は DSL の戻り値型なので isinstance 判定に要る。
+    逆に resolve_layer_path / Percent は private 再エクスポートを廃止した
+    内部ヘルパーで、復活させると公開 API と誤解される。
+    """
+    namespace = {}
+    exec("from scriptvedit import *", namespace)
+    missing = [n for n in ("Pause", "Scene", "Group") if n not in namespace]
+    if missing:
+        return False, f"公開されていない: {missing}"
+    revived = [n for n in ("resolve_layer_path", "Percent")
+               if n in namespace or hasattr(sv, n)]
+    if revived:
+        return False, f"内部ヘルパーが復活している: {revived}"
+    return True, "Pause/Scene/Group 公開・内部ヘルパー非公開"
+
+
+def check_filter_externalization_threshold_boundary():
+    """-/filter_complex への切り替えは長さが閾値ちょうどで発火する（境界）
+
+    Windows のコマンドライン長制限は「超えたら失敗」なので、境界が 1 文字
+    ずれると長大フィルタのレンダだけが環境依存で落ちる。
+    """
+    for length, should_externalize in ((_FILTER_SCRIPT_THRESHOLD, True),
+                                       (_FILTER_SCRIPT_THRESHOLD - 1, False)):
+        cmd = ["ffmpeg", "-filter_complex", "x" * length, "out.mp4"]
+        new_cmd, tmp_files = _externalize_long_filters(cmd)
+        try:
+            externalized = new_cmd[1] == "-/filter_complex"
+            if externalized != should_externalize:
+                return False, (f"len={length}: 外部化={externalized} "
+                               f"（期待 {should_externalize}）")
+            if externalized:
+                if len(tmp_files) != 1 or not os.path.exists(tmp_files[0]):
+                    return False, f"一時ファイルが作られていない: {tmp_files}"
+                with open(tmp_files[0], encoding="utf-8") as f:
+                    if f.read() != "x" * length:
+                        return False, "一時ファイルの内容が一致しない"
+            elif tmp_files:
+                return False, f"閾値未満なのに一時ファイルが出来た: {tmp_files}"
+        finally:
+            for path in tmp_files:
+                if os.path.exists(path):
+                    os.unlink(path)
+    return True, f"閾値 {_FILTER_SCRIPT_THRESHOLD} ちょうどで発火"
+
+
+# --- 音声ファクトリ / audit / tts の入口検証 ---
+
+def check_atempo_invalid_rate_rejected():
+    """atempo: 非数値・範囲外・非有限・Expr/lambda を入口で ValueError にする
+
+    rate はフィルタ文字列へ直に埋まるため、通すと atempo=abc / atempo=0 という
+    壊れたフィルタになり、原因の分からない ffmpeg エラーとして利用者に届く。
+    有効範囲 0.01〜100 は兄弟の speed() と揃えてある。
+    """
+    for bad, marker in (("x", "数値"), (0, "範囲"), (-1, "範囲"),
+                        (0.001, "範囲"), (101, "範囲"),
+                        (float("inf"), "NaN/Infinity"),
+                        (float("nan"), "NaN/Infinity"),
+                        (True, "数値")):
+        ok, msg = _expect_raise(lambda b=bad: atempo(b), ValueError,
+                                ("atempo", "rate", marker))
+        if not ok:
+            return False, f"atempo({bad!r}): {msg}"
+    ok, msg = _expect_raise(lambda: atempo(lambda u: u), ValueError,
+                            ("atempo", "Expr/lambda"))
+    if not ok:
+        return False, f"atempo(lambda): {msg}"
+    # 有効値は素通しし、int を float へ正規化しない
+    # （"atempo=2" という既存のフィルタ文字列とキャッシュ鍵を変えないため）
+    rate = atempo(2).params["rate"]
+    if rate != 2 or isinstance(rate, float):
+        return False, f"有効値が正規化された: {rate!r}"
+    return True, "不正値8種+lambdaを拒否・atempo(2) は int のまま"
+
+
+def check_audit_total_duration_propagates_attribute_error():
+    """_project_total_duration: 総尺を出せない相手には AttributeError を伝播させる
+
+    以前はここで全例外を握り潰して 0.0 を返しており、0 は総尺系の検査の
+    早期 return 条件なので「例外も警告も出ないまま検査だけが黙って無効化
+    される」状態だった。静かに間違うより爆発させる。
+    """
+    import types
+    from scriptvedit.audit import _project_total_duration
+    stub = types.SimpleNamespace(duration=None, _configured_duration=None)
+    try:
+        result = _project_total_duration(stub)
+    except AttributeError as e:
+        if "_calc_total_duration" not in str(e):
+            return False, f"別の AttributeError: {e}"
+        return True, str(e)
+    return False, f"例外にならず {result!r} を返した"
+
+
+def check_tts_zero_byte_cache_is_not_a_hit():
+    """tts: 0 バイトのキャッシュ残骸を命中扱いにせず合成経路へ進む
+
+    TTS は再生成にエンジン/ネットワークが要るためキャッシュ命中そのものは
+    残すが、0 バイトの残骸まで使うと黙って無音のナレーションになる。
+    合成はモックする（SAPI/VOICEVOX/ネットワークに依存させない）。
+    """
+    from scriptvedit import tts as tts_mod
+    cache_dir = tempfile.mkdtemp(prefix="sv_tts_")
+    calls = []
+
+    def fake_synth(content, voice, speed, pitch, cache_path):
+        calls.append(cache_path)
+        with open(cache_path, "wb") as f:
+            f.write(b"RIFF----WAVEfmt ")
+
+    orig_synth, orig_voice = tts_mod._synth_sapi, tts_mod._sapi_voice
+    tts_mod._synth_sapi = fake_synth
+    tts_mod._sapi_voice = lambda speaker: "テスト音声"
+    try:
+        path = tts_mod._cache_path("sapi", "テスト", "テスト音声", 1.0, 0.0,
+                                   cache_dir)
+        with open(path, "wb") as f:
+            f.write(b"")       # 0 バイトの残骸
+        got = tts_mod.tts("テスト", backend="sapi", cache_dir=cache_dir)
+        if got != path:
+            return False, f"キャッシュパスが違う: {got} != {path}"
+        if len(calls) != 1:
+            return False, f"0 バイト残骸を命中扱いにした（合成 {len(calls)} 回）"
+        if os.path.getsize(path) == 0:
+            return False, "合成後も 0 バイトのまま"
+        # 非空になった以後は命中して再合成しない
+        tts_mod.tts("テスト", backend="sapi", cache_dir=cache_dir)
+        if len(calls) != 1:
+            return False, f"非空キャッシュを命中扱いにしなかった（合成 {len(calls)} 回）"
+        return True, "0バイト=再合成 / 非空=命中"
+    finally:
+        tts_mod._synth_sapi, tts_mod._sapi_voice = orig_synth, orig_voice
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+ALL_TESTS += [
+    # --- manifest / describe: レイヤー間タイムラインの独立性 ---
+    ("describe レイヤー時間制約", check_describe_has_layer_timeline_constraint),
+    ("describe notesが制約引用", check_describe_entries_cite_layer_timeline_constraint),
+    ("レイヤー間で順次カーソル独立", check_layer_timeline_cursor_resets_per_layer),
+    ("pause.timeでレイヤーをずらす", check_layer_pause_time_shifts_second_layer),
+    # --- assets ---
+    ("asset must_exist=False は非探索", check_asset_must_exist_false_skips_library),
+    # --- checkpoint と音声 ---
+    ("checkpoint+adeleteで-an維持", check_checkpoint_adelete_keeps_output_silent),
+    ("checkpoint音声判定はキャッシュ非依存",
+     check_checkpoint_final_state_audio_is_cache_independent),
+    ("anchorsキー欠損メタ", check_layer_cache_meta_without_anchors_key),
+    ("キャッシュObject属性=__init__", check_cached_layer_object_attrs_match_init),
+    # --- viz ---
+    ("inspect: textにcheckpoint無し",
+     check_inspect_text_object_has_no_checkpoint_prediction),
+    ("inspect: 品質込みレイヤーパス", check_inspect_layer_cache_path_honors_quality),
+    # --- キャッシュ鍵 ---
+    ("読めないパスの鍵正規化", check_cache_keys_normalize_unreadable_paths),
+    ("web depsの鍵正規化", check_web_cache_key_normalizes_unreadable_dep),
+    ("save points: force複数", check_compute_save_points_multiple_force),
+    # --- audio / text ---
+    ("audio_viz colorはwavesのみ鍵", check_audio_viz_color_key_only_for_waves),
+    ("text系Objectの属性集合", check_text_factories_produce_standard_objects),
+    ("text系の>>と@", check_text_object_timeline_operators),
+    ("karaoke ASS残骸の再生成", check_karaoke_ass_regenerated_after_truncation),
+    # --- 公開 API ---
+    ("star importの公開名", check_star_import_exposes_only_public_names),
+    ("filter外部化の閾値境界", check_filter_externalization_threshold_boundary),
+    # --- 入口検証 ---
+    ("atempo 不正値拒否", check_atempo_invalid_rate_rejected),
+    ("audit総尺は例外を伝播", check_audit_total_duration_propagates_attribute_error),
+    ("tts 0バイト残骸は非命中", check_tts_zero_byte_cache_is_not_a_hit),
 ]
 
 

@@ -229,21 +229,39 @@ def _externalize_long_filters(cmd):
     """フィルタ文字列が閾値を超える場合、一時ファイル + FFmpeg 8 の `-/オプション` 構文に差し替える
 
     例: `-filter_complex <長大な文字列>` → `-/filter_complex <一時ファイルパス>`
+
+    同じオプションが複数回現れても**全件**外部化する。現状の
+    _build_ffmpeg_cmd は -filter_complex を 1 回しか出さないが、以前の
+    「オプションごとに最初の 1 件だけ外部化して break」実装はその
+    前提に暗黙に依存していた。前提が崩れると 2 本目以降が長大なまま
+    残り、Windows のコマンドライン長制限に当たって「複雑な動画だけ
+    突然失敗する」沈黙した失敗になるため、前提を置かず全件処理する。
+
     Returns: (実行用cmd, 一時ファイルパスのリスト)
     """
     import tempfile
     new_cmd = list(cmd)
     tmp_files = []
-    for opt in ("-filter_complex", "-vf", "-af"):
-        for i in range(len(new_cmd) - 1):
-            if new_cmd[i] == opt and len(new_cmd[i + 1]) >= _FILTER_SCRIPT_THRESHOLD:
-                fd, path = tempfile.mkstemp(suffix=".txt", prefix="svfilter_")
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(new_cmd[i + 1])
-                new_cmd[i] = f"-/{opt.lstrip('-')}"
-                new_cmd[i + 1] = path
-                tmp_files.append(path)
-                break
+    try:
+        for opt in ("-filter_complex", "-vf", "-af"):
+            for i in range(len(new_cmd) - 1):
+                if new_cmd[i] == opt and len(new_cmd[i + 1]) >= _FILTER_SCRIPT_THRESHOLD:
+                    fd, path = tempfile.mkstemp(suffix=".txt", prefix="svfilter_")
+                    # 書き込み前に記録する（途中で例外になっても掃除対象から漏れない）
+                    tmp_files.append(path)
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(new_cmd[i + 1])
+                    new_cmd[i] = f"-/{opt.lstrip('-')}"
+                    new_cmd[i + 1] = path
+    except BaseException:
+        # 途中で失敗すると呼び出し側は tmp_files を受け取れず、
+        # 既に作った一時ファイルを誰も消せなくなるのでここで掃除する。
+        for path in tmp_files:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise
     return new_cmd, tmp_files
 
 

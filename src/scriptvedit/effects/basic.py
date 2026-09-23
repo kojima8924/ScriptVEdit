@@ -1,12 +1,12 @@
+# -*- coding: utf-8 -*-
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.effects.paths import look_at
 from scriptvedit.expr import Const, Expr, _resolve_param, _to_expr, deg2rad, lerp
 from scriptvedit.objects import AudioEffect, Effect, Transform
 from scriptvedit.state import _suggest_hint
-from scriptvedit.validate import _require_time, _validate_ffmpeg_color
-# -*- coding: utf-8 -*-
-
+from scriptvedit.validate import (
+    _require_number, _require_time, _validate_ffmpeg_color)
 
 
 # --- Transform関数 ---
@@ -274,5 +274,19 @@ def atrim(duration=None, *, start=0):
 
 
 def atempo(rate=1.0):
-    """音声テンポ変更（時間影響あり）"""
+    """音声テンポ変更（時間影響あり）。rate は定数倍率（0.01〜100）。
+
+    範囲は兄弟の speed() と揃えてある。ffmpeg の atempo 自体は 0.5〜100 しか
+    受け付けないが、filters/audio.py の _atempo_chain_rates が範囲外を多段へ
+    自動分解するので 0.01 まで書ける（0.01 で atempo 7段）。それより外は
+    段数と音質劣化が非現実的で、speed() 経由（_auto_from_speed）でも到達
+    しないため受理しない。
+
+    rate は ffmpeg のフィルタ文字列へ直に埋まるため Expr/lambda は不可。
+    入口で弾かないと atempo=abc / atempo=0 という壊れたフィルタになり、
+    原因の分からない ffmpeg エラーとして利用者に届く。
+    """
+    # float() へ正規化しない（atempo(2) の "atempo=2" という既存の
+    # コマンド文字列とキャッシュ鍵をそのまま保つため）。
+    _require_number("atempo", "rate", rate, 0.01, 100.0)
     return AudioEffect("atempo", rate=rate)

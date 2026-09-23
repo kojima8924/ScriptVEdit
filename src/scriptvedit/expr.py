@@ -2,6 +2,7 @@
 
 import math as _math
 import builtins as _builtins
+import re as _re
 
 
 # --- Expr（式ビルダー） ---
@@ -135,6 +136,21 @@ class Expr:
 class Const(Expr):
     """定数ノード"""
     def __init__(self, value):
+        # NaN / ±Infinity を式へ入れない。ここは Expr に数値が入る唯一の口
+        # （_to_expr / _resolve_param / 各ファクトリは必ず Const を通る）なので、
+        # 構築時に弾くにはここが最小かつ漏れが無い。
+        # 素通りさせた場合の ffmpeg 側の挙動は実測で次のとおり割れていて、
+        # どちらも原因の分からない形で表面化する:
+        #   inf … scale の eval=frame 式では通ってしまい、意図しない絵になる
+        #   nan … "Error when evaluating the expression" →
+        #         "Failed to configure output pad" で失敗し、geq の alpha に
+        #         入ると "A luminance or RGB expression is mandatory" になる
+        # 定数パラメータ側は validate._require_number が既に同じ判定をしており、
+        # Expr 経路だけ穴が空いていたのを塞ぐ。
+        if isinstance(value, float) and not _math.isfinite(value):
+            raise ValueError(
+                f"Expr に NaN/Infinity は使えません: {value!r}"
+                "（0除算や overflow を起こしていないか確認してください）")
         self.value = value
 
     def to_ffmpeg(self, u_expr):
@@ -277,6 +293,8 @@ _NONFOLDABLE_FUNCS = frozenset({'random'})
 def _make_binop(op, left, right):
     """定数畳み込み・恒等式簡約付きBinOp生成"""
     if isinstance(left, Const) and isinstance(right, Const):
+        # overflow で ±Infinity になった畳み込み結果は Const が ValueError で
+        # 弾く（黙って inf を式へ埋めると ffmpeg 側で原因の分からない失敗になる）
         l, r = left.value, right.value
         if op == '+': return Const(l + r)
         if op == '-': return Const(l - r)
@@ -316,11 +334,79 @@ def _make_func(name, args):
             try:
                 vals = [a.value for a in args]
                 result = funcs[name](*vals)
-                if isinstance(result, (int, float)) and _math.isfinite(result):
-                    return Const(result)
             except (ValueError, ZeroDivisionError, OverflowError):
-                pass
+                # Python 側が計算を拒むだけのケース（log(0) / mod(x,0) /
+                # exp(710) 等）は ffmpeg の意味論と食い違う（ffmpeg は -inf や
+                # nan を返して走り続ける）ので、構築時に殺さず畳み込みだけ
+                # 諦めてノードのまま残す。
+                return _FuncCall(name, args)
+            if isinstance(result, (int, float)):
+                # 非有限の結果は Const が ValueError で弾く。上の except に
+                # 巻き込まれて黙って未畳み込みへ落ちないよう try の外で構築する。
+                return Const(result)
     return _FuncCall(name, args)
+
+
+# lambda 内で Expr に使えない Python 演算子 → 代替 API の対応表。
+# Expr は比較演算子・`%` / `//`・ビット演算をオーバーロードしていないので、
+# `u < 0.5` と書くと素の Python が「'<' not supported between instances of
+# 'Var' and 'float'」を投げる。これを一律「math関数は使えません」へ丸めると
+# 利用者が原因に辿り着けない（実測）ため、演算子ごとに言い換える。
+_EXPR_OP_ALTERNATIVES = {
+    "<": "lt(a, b)",
+    ">": "gt(a, b)",
+    "<=": "lte(a, b)",
+    ">=": "gte(a, b)",
+    "%": "mod(a, b)",
+    "//": "floor(a / b)",
+    "&": "and_(a, b)",
+    "|": "or_(a, b)",
+    "^": "neq(a, b)",
+    "~": "not_(a)",
+    "<<": "a * pow(2, b)",
+    ">>": "floor(a / pow(2, b))",
+}
+
+# CPython が「その演算子は使えない」TypeError に用いる3系統の文面から
+# 演算子を取り出す（比較 / 二項 / 単項）。
+_OP_TYPE_ERROR_PATTERNS = (
+    _re.compile(r"'(\S+)' not supported between instances of"),
+    _re.compile(r"unsupported operand type\(s\) for ([^:]+):"),
+    _re.compile(r"bad operand type for unary (\S+):"),
+)
+
+_MATH_FUNC_HINT = (
+    "lambda内でmath関数は使えません。scriptveditの関数を使ってください。\n"
+    "使用可能: sin, cos, tan, exp, log, sqrt, lerp, clip, abs, min, max, "
+    "floor, ceil, smoothstep, step, mod, frac, PI, E"
+)
+
+
+def _lambda_type_error(exc):
+    """lambda 内で出た TypeError を、原因の分かる日本語メッセージへ言い換える。
+
+    呼び出し側で `from exc` して例外の鎖を残すほか、文面にも原文を載せる
+    （一律に丸めると「実際に何が使えなかったのか」が失われる）。
+    """
+    text = str(exc)
+    op = None
+    for pattern in _OP_TYPE_ERROR_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            op = m.group(1).strip()
+            break
+    if op in _EXPR_OP_ALTERNATIVES:
+        return TypeError(
+            f"lambda内で Expr に演算子 '{op}' は使えません"
+            "（Expr は比較演算子・剰余・整除・ビット演算を持ちません）。\n"
+            f"代わりに {_EXPR_OP_ALTERNATIVES[op]} を使ってください"
+            "（比較: lt/gt/lte/gte/eq_/neq、条件分岐: if_(cond, then, else)）。\n"
+            f"元のエラー: {text}")
+    if "must be real number" in text or "float() argument" in text:
+        return TypeError(f"{_MATH_FUNC_HINT}\n元のエラー: {text}")
+    return TypeError(
+        "lambda の評価に失敗しました（引数 u は数値ではなく Expr です）。\n"
+        f"元のエラー: {text}")
 
 
 def _resolve_param(param):
@@ -334,11 +420,7 @@ def _resolve_param(param):
         try:
             result = param(u)
         except TypeError as e:
-            raise TypeError(
-                "lambda内でmath関数は使えません。scriptveditの関数を使ってください。\n"
-                "使用可能: sin, cos, tan, exp, log, sqrt, lerp, clip, abs, min, max, "
-                "floor, ceil, smoothstep, step, mod, frac, PI, E"
-            ) from e
+            raise _lambda_type_error(e) from e
         return _to_expr(result)
     raise TypeError(f"Effect引数にはfloat, lambda, Exprのいずれかを渡してください: {type(param)}")
 
@@ -586,6 +668,3 @@ class Percent:
         return "P"
 
 P = Percent()
-
-
-# --- 遅延解決の相互参照（関数本体からのみ使用: 循環importを避けるため末尾で束縛）---

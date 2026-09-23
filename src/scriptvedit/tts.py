@@ -181,7 +181,19 @@ def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
 
     cache_path = _cache_path(backend, text, resolved, speed, pitch, cache_dir,
                              engine=engine)
-    if os.path.exists(cache_path):
+    # キャッシュ命中判定。CLAUDE.md §5 の「__cache__ 配下に『存在すればスキップ』
+    # ガードを置かない」は、再生成がタダ（内容から一意に書き直せる）テキスト成果物
+    # の話で、ここは当てはまらない: TTS の再生成には VOICEVOX エンジンの起動や
+    # ネットワークが要るため、命中を捨てると合成できない環境でレンダが落ちる。
+    # 代わりに、そのガードが防ごうとしている「切り詰められた残骸を以後ずっと
+    # 使い続ける」方だけを潰す:
+    #   * 書き込みは3バックエンドとも原子的（voicevox=_atomic_write_bytes /
+    #     edge=_run_ffmpeg_to_cache / sapi=tmp→os.replace）なので、中断で
+    #     半端な wav が最終パスに残ることは無い。
+    #   * それでも 0 バイトの残骸（旧版が残したもの・ディスクフル等）は
+    #     命中扱いにせず作り直す。空 wav は tts_duration が例外にするだけで、
+    #     黙って無音のナレーションになる余地を残さない。
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
         return cache_path
     os.makedirs(cache_dir, exist_ok=True)
 

@@ -55,6 +55,7 @@
       "3",
       "-pix_fmt",
       "bgra",
+      "-an",
       "-t",
       "4",
       "__cache__/artifacts/checkpoint/ac9b64e5/753455439376a1d2.mkv"
@@ -81,6 +82,7 @@
       "3",
       "-pix_fmt",
       "bgra",
+      "-an",
       "-t",
       "4",
       "__cache__/artifacts/checkpoint/b00c4c21/0754a0ff65265edd.mkv"
@@ -107,6 +109,7 @@
       "3",
       "-pix_fmt",
       "bgra",
+      "-an",
       "-t",
       "4",
       "__cache__/artifacts/checkpoint/fa445802/0f27fc38ab54cf9f.mkv"
@@ -133,6 +136,7 @@
       "3",
       "-pix_fmt",
       "bgra",
+      "-an",
       "-t",
       "4",
       "__cache__/artifacts/checkpoint/ad076f7b/c921b43731f9fe98.mkv"

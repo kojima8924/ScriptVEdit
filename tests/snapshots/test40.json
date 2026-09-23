@@ -49,6 +49,7 @@
       "3",
       "-pix_fmt",
       "bgra",
+      "-an",
       "-t",
       "2",
       "__cache__/artifacts/checkpoint/a04e6a90/9b1674e5c0fc9de3.mkv"

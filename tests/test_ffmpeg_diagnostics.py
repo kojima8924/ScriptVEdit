@@ -10,13 +10,14 @@
 import os
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
 import scriptvedit as sv
 from scriptvedit.ffmpeg import (
-    FFmpegError, _normalize_ffmpeg_cmd, _run_ffmpeg, _signed_exit_code,
-    _stderr_excerpt)
+    FFmpegError, _externalize_long_filters, _normalize_ffmpeg_cmd, _run_ffmpeg,
+    _signed_exit_code, _stderr_excerpt)
 
 _NO_FFMPEG = shutil.which("ffmpeg") is None
 
@@ -92,6 +93,62 @@ def test_run_ffmpeg_failure_reports_cause_without_full_command(tmp_path):
     assert "color=c=black:s=64x36:d=0.2:r=5" in exc.value.cmd
     assert exc.value.returncode != 0
     assert exc.value.stderr_tail
+
+
+def test_externalize_handles_every_long_filter_occurrence(monkeypatch):
+    """長大フィルタは同じオプションが複数回現れても全件外部化される
+
+    以前はオプションごとに最初の 1 件だけ外部化して break しており、
+    「-filter_complex は 1 回しか出ない」という構築側の前提に暗黙に
+    依存していた。前提が崩れたときに長大なまま残るのを防ぐ。
+    """
+    import scriptvedit.ffmpeg as ffmpeg_mod
+    monkeypatch.setattr(ffmpeg_mod, "_FILTER_SCRIPT_THRESHOLD", 8)
+    cmd = ["ffmpeg", "-y",
+           "-filter_complex", "a" * 20,
+           "-filter_complex", "b" * 20,
+           "-vf", "c" * 20,
+           "-af", "short",          # 閾値未満はそのまま
+           "out.mp4"]
+    run_cmd, tmp_files = _externalize_long_filters(cmd)
+    try:
+        assert len(tmp_files) == 3
+        assert run_cmd[2] == "-/filter_complex" and run_cmd[3] == tmp_files[0]
+        assert run_cmd[4] == "-/filter_complex" and run_cmd[5] == tmp_files[1]
+        assert run_cmd[6] == "-/vf" and run_cmd[7] == tmp_files[2]
+        assert run_cmd[8:10] == ["-af", "short"]
+        for path, expected in zip(tmp_files, ["a" * 20, "b" * 20, "c" * 20]):
+            with open(path, encoding="utf-8") as f:
+                assert f.read() == expected
+    finally:
+        for path in tmp_files:
+            os.remove(path)
+
+
+def test_externalize_cleans_up_when_writing_fails(monkeypatch):
+    """途中で書き込みに失敗したら既に作った一時ファイルを残さない
+
+    例外を投げると呼び出し側は tmp_files を受け取れないので、
+    自分で掃除しないと %TEMP% に svfilter_*.txt が永久に残る。
+    """
+    import scriptvedit.ffmpeg as ffmpeg_mod
+    monkeypatch.setattr(ffmpeg_mod, "_FILTER_SCRIPT_THRESHOLD", 8)
+    created = []
+    real_mkstemp = tempfile.mkstemp
+
+    def spy_mkstemp(*args, **kwargs):
+        if created:  # 2 本目で失敗させる（1 本目は作成済みの状態）
+            raise OSError("テスト用の一時ファイル作成失敗")
+        fd, path = real_mkstemp(*args, **kwargs)
+        created.append(path)
+        return fd, path
+
+    monkeypatch.setattr(tempfile, "mkstemp", spy_mkstemp)
+    cmd = ["ffmpeg", "-filter_complex", "a" * 20, "-vf", "b" * 20, "out.mp4"]
+    with pytest.raises(OSError):
+        _externalize_long_filters(cmd)
+    assert len(created) == 1
+    assert not os.path.exists(created[0])
 
 
 @pytest.mark.skipif(_NO_FFMPEG, reason="ffmpeg がありません")

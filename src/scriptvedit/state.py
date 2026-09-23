@@ -26,11 +26,6 @@ def _detect_media_type(path):
     return "image"  # フォールバック
 
 
-# --- ffmpeg実行ヘルパー ---
-
-# Windowsのコマンドライン長制限対策: フィルタ文字列がこの長さを超えたら一時ファイル経由で渡す
-
-
 # --- configure許可キー ---
 
 _CONFIGURE_KEYS = {"width", "height", "fps", "duration", "background_color",

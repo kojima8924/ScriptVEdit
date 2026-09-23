@@ -1,9 +1,8 @@
+# -*- coding: utf-8 -*-
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.objects import Effect
 from scriptvedit.validate import _require_number
-# -*- coding: utf-8 -*-
-
 
 
 # --- 時間操作Effect（映像・live） ---

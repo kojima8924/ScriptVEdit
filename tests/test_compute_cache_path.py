@@ -65,8 +65,8 @@ def test_two_stage_compute_dry_run_paths_match_real_render(tmp_path):
 
     # 1) キャッシュ皆無の状態で dry_run → 2段分の生成予定パス
     p1 = _build(tmp_path, src)
-    dry = p1.render(str(tmp_path / "o.mp4"), dry_run=True)
-    planned = _compute_keys(dry["cache"])
+    cold = p1.render(str(tmp_path / "o.mp4"), dry_run=True)
+    planned = _compute_keys(cold["cache"])
     assert len(planned) == 2, f"2段の compute が予告されていない: {planned}"
     final_source = [o.source for o in p1.objects][0]
 
@@ -78,8 +78,20 @@ def test_two_stage_compute_dry_run_paths_match_real_render(tmp_path):
 
     # 3) キャッシュがある状態でも鍵は動かない（＝再生成を誘発しない）
     p3 = _build(tmp_path, src)
-    p3.render(str(tmp_path / "o.mp4"), dry_run=True)
+    warm = p3.render(str(tmp_path / "o.mp4"), dry_run=True)
     assert [o.source for o in p3.objects][0] == final_source
-    assert _compute_keys(p3.render(str(tmp_path / "o.mp4"),
-                                   dry_run=True)["cache"]) == [], \
-        "キャッシュ済みなのに再生成コマンドが予告されている"
+
+    # 4) dry_run はキャッシュ状態に依存しない（cold と warm で完全一致）。
+    #    dry_run が返すのは「キャッシュが空の状態で何を実行するか」であって
+    #    「いま何が未生成か」ではない。checkpoint（_collect_checkpoint_cmds）/
+    #    web（_collect_web_cmds）/ レイヤーキャッシュ（_collect_cache_cmds）は
+    #    元からこの契約で、compute / from_project / xfade 生成物（media.py の
+    #    _finalize_generated_object）だけが存在チェックで分岐していた。
+    #    それを揃えたことで「実レンダの後はキャッシュを消さないと
+    #    スナップショットが落ちる」罠が消えている。戻すとその罠が復活する。
+    assert _compute_keys(warm["cache"]) == planned, \
+        "dry_run の出力がキャッシュの有無で変わっている"
+    assert warm["cache"] == cold["cache"], \
+        "dry_run の cache コマンドがキャッシュの有無で変わっている"
+    assert warm["main"] == cold["main"], \
+        "dry_run の main コマンドがキャッシュの有無で変わっている"

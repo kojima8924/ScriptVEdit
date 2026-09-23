@@ -62,10 +62,16 @@ def _finalize_generated_object(cache_path, cmd, origin_sources, total_dur):
             proj._current_layer_file, []).extend(origin_sources)
     if proj is not None and getattr(proj, '_mode', None) == "plan":
         pass  # plan pass: 生成スキップ
+    elif proj is not None and getattr(proj, '_dry_run', False):
+        # dry_run は「キャッシュが空の状態で何を実行するか」を返す契約なので、
+        # 存在チェックより**先**に置く。逆順にすると実レンダで生成物が実体化した
+        # 途端に dry_run の cache dict からコマンドが消え、同じ入力なのに
+        # 出力コマンドが変わる（＝スナップショットが実レンダの有無で落ちる）。
+        # チェックポイント側（checkpoint.py の _collect_checkpoint_cmds）も存在に
+        # 関わらず全ステップの build_cmd() を返しており、それに揃えている。
+        proj._pending_compute_cmds[cache_path] = cmd
     elif os.path.exists(cache_path):
         pass  # キャッシュ命中
-    elif proj is not None and getattr(proj, '_dry_run', False):
-        proj._pending_compute_cmds[cache_path] = cmd
     else:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         _run_ffmpeg_to_cache(cmd, cache_path, timeout=600)

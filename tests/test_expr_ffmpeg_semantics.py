@@ -5,11 +5,13 @@
 ffmpeg とずれていると **同じ関数が定数か動的かで結果が変わる**。
 round がその代表（C は絶対値方向、Python は偶数丸め）。監査 項目22(a)。
 """
+import math
 import shutil
 import subprocess
 
 import pytest
 
+import scriptvedit as sv
 from scriptvedit import Var, round as sv_round
 from scriptvedit.expr import Const, _FuncCall
 
@@ -90,3 +92,106 @@ def test_sign_log10_cbrt_do_not_emit_bare_ffmpeg_calls():
     for fn, name in ((sign, "sign"), (log10, "log10"), (cbrt, "cbrt")):
         out = fn(u).to_ffmpeg("T")
         assert f"{name}(" not in out, f"{name}() が ffmpeg 式へ素通ししている: {out}"
+
+
+# --- NaN / ±Infinity を式へ入れない ---------------------------------------
+# ffmpeg 側の挙動は実測で割れている:
+#   inf … scale の eval=frame 式では通ってしまい、意図しない絵になる
+#   nan … "Error when evaluating the expression" → "Failed to configure
+#         output pad"。geq の alpha に入ると
+#         "A luminance or RGB expression is mandatory" になり原因が分からない
+# どちらも「利用者が意図して書く値」ではないので構築時に拒否する。
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_const_rejects_non_finite(value):
+    with pytest.raises(ValueError, match="NaN/Infinity"):
+        Const(value)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_effect_param_rejects_non_finite_constant(value):
+    """定数パラメータ（_resolve_param の float 経路）"""
+    with pytest.raises(ValueError, match="NaN/Infinity"):
+        sv.scale(value)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_effect_param_rejects_non_finite_from_lambda(value):
+    """lambda の戻り値経路（_resolve_param → _to_expr → Const）"""
+    with pytest.raises(ValueError, match="NaN/Infinity"):
+        sv.fade(lambda u: value)
+
+
+def test_constant_folding_rejects_overflow_to_infinity():
+    """定数伝播が overflow したら黙って inf を埋めずに止まる"""
+    with pytest.raises(ValueError, match="NaN/Infinity"):
+        Const(1e308) + Const(1e308)
+
+
+def test_constant_folding_keeps_node_when_python_cannot_evaluate():
+    """Python が計算を拒むだけの式（ffmpeg は走る）は畳み込みを諦めるだけ"""
+    e = sv.sqrt(Const(-1.0))       # Python: math domain error / ffmpeg: nan
+    assert not isinstance(e, Const)
+    assert e.to_ffmpeg("T") == "sqrt(-1.0)"
+
+
+# --- lambda 内の TypeError を原因別に言い換える ----------------------------
+
+
+@pytest.mark.parametrize("build,op,alternative", [
+    (lambda u: u < 0.5, "<", "lt(a, b)"),
+    (lambda u: u >= 0.5, ">=", "gte(a, b)"),
+    (lambda u: u % 2, "%", "mod(a, b)"),
+    (lambda u: u // 2, "//", "floor(a / b)"),
+    (lambda u: u & 1, "&", "and_(a, b)"),
+    (lambda u: ~u, "~", "not_(a)"),
+])
+def test_unsupported_operator_message_names_the_operator(build, op, alternative):
+    """`u < 0.5` を「math関数は使えません」に丸めない（原因が特定できないため）"""
+    with pytest.raises(TypeError) as excinfo:
+        sv.scale(build)
+    text = str(excinfo.value)
+    assert f"演算子 '{op}'" in text
+    assert alternative in text
+    assert "math関数" not in text
+    # 元の例外情報を落とさない
+    assert "元のエラー:" in text
+    assert excinfo.value.__cause__ is not None
+
+
+def test_math_function_message_is_kept_for_math_type_errors():
+    """math.sin(u) は従来どおり「scriptvedit の関数を使え」と案内する"""
+    with pytest.raises(TypeError, match="math関数は使えません") as excinfo:
+        sv.scale(lambda u: math.sin(u))
+    assert "元のエラー:" in str(excinfo.value)
+
+
+# --- easing の定義域 -------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["ease_in_circ", "ease_out_circ", "ease_in_out_circ"])
+@pytest.mark.parametrize("t", [-0.5, -0.001, 0.0, 0.5, 1.0, 1.2, 3.0])
+def test_circ_easings_stay_finite_outside_unit_range(name, t):
+    """circ 系は sqrt の定義域外でも落ちない（3本で挙動を揃えてある）"""
+    value = getattr(sv, name)(Var("u")).eval_at(t)
+    assert math.isfinite(value)
+
+
+def test_ease_spring_hits_both_endpoints_exactly():
+    """終端が 1.0 を超えたまま終わると alpha/scale が規定値を僅かに外れる"""
+    spring = sv.ease_spring()(Var("u"))
+    assert spring.eval_at(0.0) == pytest.approx(0.0, abs=1e-12)
+    assert spring.eval_at(1.0) == pytest.approx(1.0, abs=1e-12)
+    # 途中のオーバーシュートは仕様なので残る
+    assert spring.eval_at(0.33) > 1.1
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"damping": float("nan")},
+    {"stiffness": float("inf")},
+    {"damping": -10000},     # exp(10000) が overflow する
+])
+def test_ease_spring_rejects_unusable_params(kwargs):
+    with pytest.raises(ValueError, match="有限の数値"):
+        sv.ease_spring(**kwargs)

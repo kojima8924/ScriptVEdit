@@ -208,8 +208,3 @@ def _main(argv=None):
         return 0
     parser.print_help()
     return 1
-
-
-# --- プラグイン自動読込（import 時: カレントディレクトリの plugins/） ---
-# 環境変数 SCRIPTVEDIT_NO_PLUGINS を設定すると自動読込を無効化できる。
-#

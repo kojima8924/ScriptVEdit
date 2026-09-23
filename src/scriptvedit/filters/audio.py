@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import builtins as _builtins
+import math as _math
 
 # context は scriptvedit 内 import を持たない葉なので先頭で import できる。
 from scriptvedit.context import current_project
@@ -48,19 +49,30 @@ def _build_audio_pre_filters(obj):
                 filters.append(f"atempo={r}")
         elif e.name == "arepeat":
             # obj * n（DSL糖衣）の音声側: 区間全体を n 回連続再生。
-            # aloop の size はサンプル数（segment × sample_rate）。
-            # sample_rate は probe で取得し、不能時は 44100 へフォールバック
-            # （dry_run の未生成キャッシュ等。実レンダでは通常 probe できる）
+            # aloop の size は「ループ対象としてバッファするサンプル数」
+            # （segment × sample_rate）。aloop に入る時点の音声は直前の
+            # atrim/atempo 適用後＝ちょうど segment 秒なので、size が実サンプル数
+            # を上回っても全区間をバッファして繰り返すだけで無害。逆に足りないと
+            # 各周回の末尾が黙って欠ける。**必ず多めに見積もる**こと。
+            # sample_rate は probe で取得し、不能時（素材が読めない等）は
+            # 192kHz 相当で見積もる。ここを 44100 固定にしていると、48kHz 素材で
+            # size が約8%不足し毎周ぶん末尾が落ちる（project.py の
+            # _build_aloop_filter も同じ理由で 192000 を使っている）。
+            #
+            # probe 先は obj.source ではなく **obj.audio_source（元素材）**。
+            # source はチェックポイントで `-an` の映像専用中間物へ差し替わりうるので、
+            # そちらを見ると sample_rate が取れないうえ、cold/warm で probe の成否が
+            # 変わって dry_run の出力がキャッシュ状態に依存してしまう。
             n = e.params["count"]
             segment = e.params["segment"]
             sr = None
             proj = current_project()
             if proj is not None:
-                info = proj._probe_media(obj.source)
+                info = proj._probe_media(obj.audio_source)
                 sr = (info or {}).get("sample_rate")
-            sr = sr or 44100
-            filters.append(
-                f"aloop=loop={n - 1}:size={int(round(segment * sr))}")
+            sr = sr or 192000
+            size = int(_math.ceil(segment * sr))
+            filters.append(f"aloop=loop={n - 1}:size={size}")
             filters.append("asetpts=N/SR/TB")
     return filters
 

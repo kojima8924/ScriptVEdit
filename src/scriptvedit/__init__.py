@@ -35,6 +35,8 @@ __all__ = [
     # コアクラス
     "Project", "Object", "Transform", "TransformChain", "Effect", "EffectChain",
     "AudioEffect", "AudioEffectChain",
+    # group() / tile() の返り値型（利用者が isinstance で判別できるよう公開する）
+    "Group",
     "VideoView", "AudioView",
     "FFmpegError",
     # ファクトリ関数
@@ -59,7 +61,9 @@ __all__ = [
     # 統合サブモジュール（tts/beat/web）
     "narrate", "Narration", "beat_sync", "slide",
     # アンカー/同期
-    "anchor", "pause", "scene",
+    # Pause / Scene は pause.time() / p.scene() が返す型。利用者が isinstance で
+    # タイムライン項目を振り分けられるよう型も公開する
+    "anchor", "pause", "scene", "Pause", "Scene",
     # Expr
     "Expr", "Const", "Var",
     # 数学関数
@@ -109,6 +113,8 @@ __all__ = [
     "asset", "assets_dir", "here",
     # ファイル監視（READMEの例が star import 前提のため公開する）
     "watch",
+    # キャッシュ操作（レンダ後に cache_gc(7) を呼ぶ等、Python API として使う）
+    "cache_clear", "cache_gc", "cache_stats",
 ]
 
 
@@ -136,12 +142,14 @@ def _preload(*module_names):
         __import__(name)
 
 
+# resolve_layer_path は Project.layer() 専用の内部ヘルパーなので
+# ここでは再エクスポートしない（project.py が assets から直接 import する）
 from scriptvedit.assets import (  # noqa: F401
-    asset, assets_dir, here, resolve_layer_path
+    asset, assets_dir, here
 )
 _preload("scriptvedit.state")
 from scriptvedit.expr import (  # noqa: F401
-    Const, E, Expr, P, PI, Percent, Var, abs, acos, and_, asin, atan, atan2, between, case,
+    Const, E, Expr, P, PI, Var, abs, acos, and_, asin, atan, atan2, between, case,
     cbrt, ceil, clamp, clip, cos, cosh, deg2rad, eq_, exp, floor, frac, gt, gte, if_, lerp,
     log, log10, lt, lte, max, min, mod, neq, not_, or_, pow, rad2deg, random, round, sign,
     sin, sinh, smoothstep, sqrt, step, tan, tanh, trunc

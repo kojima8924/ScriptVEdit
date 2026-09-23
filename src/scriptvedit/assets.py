@@ -31,6 +31,11 @@
        → 見つかったら 2 の場所へ**コピーして**、コピー先のパスを返す
   4. FileNotFoundError（difflib による「もしかして」候補付き）
 
+`must_exist=False` は 1・2 だけを見て、3 の共有ライブラリ探索とコピーを**行わない**
+（出力先パスの組み立て用）。素材の有無で分岐したいときは既定のまま呼んで
+FileNotFoundError を捕まえること（must_exist=False だと共有ライブラリにしか
+無い素材が永久に取り込まれない）。
+
 コピーは dry_run でも常に行う: asset() の戻り値は ffmpeg コマンドに埋まるため、
 dry_run と本レンダでパスが食い違うとスナップショットが壊れる（一貫性が最優先）。
 キャッシュ鍵は**内容ハッシュ**なので、コピーでパスが変わっても再レンダは起きない。
@@ -237,6 +242,12 @@ def asset(relpath, *, must_exist=True):
     共有ライブラリ（環境変数 SCRIPTVEDIT_ASSETS、`;` 区切り）にしか無い素材は
     `assets/_imported/<relpath>` へコピーしてから、そのコピー先のパスを返す
     （プロジェクトが自己完結する。dry_run でも同じパスを返すためコピーは常に行う）。
+
+    must_exist=False は「出力先パスの組み立て」用で、**共有ライブラリを探索せず
+    コピーもしない**（プロジェクト assets/ 直下の未作成パスをそのまま返す）。
+    素材の有無で分岐したいときは must_exist=False + os.path.exists ではなく、
+    既定（must_exist=True）で呼んで FileNotFoundError を捕まえること。
+    前者だと共有ライブラリにしか無い素材が永久に取り込まれない。
     """
     parts = _rel_parts(relpath)
     base = assets_dir()
@@ -262,7 +273,11 @@ def asset(relpath, *, must_exist=True):
         return imported
 
     if not must_exist:
-        # 存在チェックをスキップする用途（出力先の組み立て等）。コピーもしない。
+        # 存在チェックをスキップする用途（出力先の組み立て等）。
+        # ここは共有ライブラリ探索より前で return する＝**取り込みも起きない**。
+        # 「素材があれば使う」判定に must_exist=False を使うと、共有ライブラリに
+        # しか無い素材が永久にコピーされず条件が常に False になるので、
+        # その用途では既定（must_exist=True）で呼んで FileNotFoundError を捕まえる。
         return direct
 
     lib_hit = _find_in_library(parts)
