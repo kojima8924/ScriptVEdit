@@ -43,7 +43,7 @@ def _asset_or_skip(rel):
     try:
         return asset(rel)
     except FileNotFoundError:
-        pytest.skip(f"素材が無い環境: {rel}")
+        pytest.skip(f"素材 {rel} が無い環境")
 
 
 def _chain(effect, dur=1):

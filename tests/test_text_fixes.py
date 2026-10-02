@@ -49,7 +49,7 @@ def _need_font():
     try:
         return _resolve_font(None)
     except FileNotFoundError as exc:
-        pytest.skip(str(exc))
+        pytest.skip(f"フォントが無い環境: {str(exc).splitlines()[0]}")
 
 
 def _need_render():

@@ -486,7 +486,7 @@ def test_ttc_font_index(jp_font):
     try:
         ImageFont.truetype(jp_font, 40, index=1)
     except OSError:
-        pytest.skip("書体が1つだけの .ttc")
+        pytest.skip("書体が1つだけの .ttc フォント")
     a = text_image("書体 Aa", size=48, font_index=0)
     b = text_image("書体 Aa", size=48, font_index=1)
     assert a.source != b.source
@@ -897,7 +897,7 @@ def test_glyph_in_cmap_is_not_missing_even_if_it_looks_like_notdef():
     """cmap に在る字は、絵が .notdef と同じでも「無い字」にしない（MS ゴシックの □）"""
     font = "C:/Windows/Fonts/msgothic.ttc"
     if not os.path.exists(font):
-        pytest.skip("MS ゴシックが無い環境")
+        pytest.skip("MS ゴシックのフォントが無い環境")
     o = text_image("チェック□を入れる", size=64, font=font)
     assert o._text_image["missing"] == []
     assert ti._cmap_lookup(font, 0) is not None
