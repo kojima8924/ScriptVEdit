@@ -3,8 +3,8 @@
 import math as _math
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.expr import (Const, Expr, Var, _to_expr, clip, exp, if_,
-                              lerp, lt, sin)
+from scriptvedit.expr import (Const, Expr, Var, _UStr, _UValue, _to_expr,
+                              clip, exp, if_, lerp, lt, sin)
 from scriptvedit.objects import Effect
 from scriptvedit.validate import _validate_ffmpeg_color
 
@@ -189,14 +189,22 @@ class _LookAtExpr(Expr):
     def to_ffmpeg(self, u_expr):
         up = f"(({u_expr})+{self.du})"
         um = f"(({u_expr})-{self.du})"
+        dur = getattr(u_expr, "dur", None)
+        if dur is not None:
+            # 秒で書いた式（elapsed 等）にも ±du ずらした時刻を渡す
+            up, um = _UStr(up, dur), _UStr(um, dur)
         dx = f"(({self.x_expr.to_ffmpeg(up)})-({self.x_expr.to_ffmpeg(um)}))"
         dy = f"(({self.y_expr.to_ffmpeg(up)})-({self.y_expr.to_ffmpeg(um)}))"
         return f"(atan2({dy}\\,{dx})+{self.offset_rad})"
 
     def eval_at(self, u_value):
         du = self.du
-        dx = self.x_expr.eval_at(u_value + du) - self.x_expr.eval_at(u_value - du)
-        dy = self.y_expr.eval_at(u_value + du) - self.y_expr.eval_at(u_value - du)
+        up, um = u_value + du, u_value - du
+        dur = getattr(u_value, "dur", None)
+        if dur is not None:
+            up, um = _UValue(up, dur), _UValue(um, dur)
+        dx = self.x_expr.eval_at(up) - self.x_expr.eval_at(um)
+        dy = self.y_expr.eval_at(up) - self.y_expr.eval_at(um)
         return _math.atan2(dy, dx) + self.offset_rad
 
 

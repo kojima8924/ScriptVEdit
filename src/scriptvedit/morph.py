@@ -107,6 +107,22 @@ _UNPREMUL_EPS = 1e-4
 # 実測: 硬いアイコン・図形・文字は 0.00〜0.03、ぼかしたグロー/影は 1.00。
 _SDF_SOFT_LIMIT = 0.35
 
+# method="sdf" で「2枚の形が重ならない」と判定する閾値。
+# 重なり = 不透明部（α>=0.5）の共通部分の面積 / 小さい方の面積（align=True なら
+# 重心を合わせた後）。距離場の補間は、重なりの無い形どうしでは A がその場で痩せて
+# 消え、B がその場で太って現れるだけになる（形が動かない＝見た目はクロスフェード）。
+# 実測: 離れた位置の2つの文字列（align=False）は 0.0。同じ桁数の数字どうしは 0.4 以上
+_SDF_OVERLAP_WARN = 0.05
+
+# method="sdf" の fit=None（自動）で「2枚の大きさが違う」とみなす比。
+# 不透明部の外接矩形の幅か高さがこの比を超えて違えば、外接矩形を合わせながら
+# 補間する（fit）。距離場の補間は「相手の形から遠い部分ほど早く消え、遅く現れる」
+# ので、幅の違う文字列どうしでは、はみ出す側の端の文字が動き出した直後に消える
+# （実測: 1688px の日時 → 1156px の日時で、先頭の「20」と末尾の「4:07」が
+# 進行度 0.2 で既に無い）。同じ大きさの組（同じ桁数の数字など）は従来どおり
+# その場で溶けて入れ替わる方が良いので、合わせない
+_SDF_FIT_AUTO_RATIO = 1.15
+
 # 退化ケース（全透明／全不透明）で使う「無限遠」の距離。
 # キャンバス寸法基準にしておくと、通常の距離値と桁が揃い補間が破綻しない
 def _sdf_far(shape) -> float:
@@ -823,14 +839,164 @@ def _shift_field(field: np.ndarray, off, border) -> np.ndarray:
                           borderMode=cv2.BORDER_CONSTANT, borderValue=border)
 
 
+def _alpha_centroid(alpha: np.ndarray) -> np.ndarray:
+    """不透明度で重み付けした重心 (x, y)。全透明ならキャンバスの中心"""
+    h, w = alpha.shape
+    total = float(alpha.sum())
+    if total <= 1e-6:
+        return np.array([(w - 1) / 2.0, (h - 1) / 2.0], dtype=np.float32)
+    ys, xs = np.mgrid[0:h, 0:w]
+    return np.array([float((xs * alpha).sum() / total),
+                     float((ys * alpha).sum() / total)], dtype=np.float32)
+
+
+def _alpha_bbox(alpha: np.ndarray):
+    """不透明部（α>=0.5）の外接矩形 (x0, y0, x1, y1)（x1, y1 は端の外側）。無ければ None"""
+    mask = alpha >= 0.5
+    if not mask.any():
+        return None
+    xs = np.flatnonzero(mask.any(axis=0))
+    ys = np.flatnonzero(mask.any(axis=1))
+    return (float(xs[0]), float(ys[0]), float(xs[-1] + 1), float(ys[-1] + 1))
+
+
+def _resolve_fit(fit, box_a, box_b, align) -> bool:
+    """fit（外接矩形を合わせながら補間するか）を決める。None は自動"""
+    if box_a is None or box_b is None:
+        return False
+    if fit is not None:
+        return bool(fit)
+    if not align:
+        return False   # align=False は「動かさない」指定なので自動では合わせない
+    for lo, hi in ((0, 2), (1, 3)):
+        sa, sb = box_a[hi] - box_a[lo], box_b[hi] - box_b[lo]
+        if max(sa, sb) / max(min(sa, sb), 1.0) > _SDF_FIT_AUTO_RATIO:
+            return True
+    return False
+
+
+def _fit_box(box_from, box_to, t):
+    """2つの外接矩形を進行度 t で補間した矩形（中心と大きさを線形に。大きさは 1px 以上）"""
+    out = []
+    for lo, hi in ((0, 2), (1, 3)):
+        c = ((box_from[lo] + box_from[hi]) * (1.0 - t)
+             + (box_to[lo] + box_to[hi]) * t) / 2.0
+        size = max((box_from[hi] - box_from[lo]) * (1.0 - t)
+                   + (box_to[hi] - box_to[lo]) * t, 1.0)
+        out.append((c - size / 2.0, c + size / 2.0))
+    return (out[0][0], out[1][0], out[0][1], out[1][1])
+
+
+def _fit_matrix(box_from, box_now):
+    """box_from を box_now へ写すアフィン行列（軸ごとの拡大縮小 + 平行移動）と、
+    距離の値に掛ける倍率（拡大縮小で距離も伸び縮みするため。軸で違うときは相乗平均）"""
+    sx = (box_now[2] - box_now[0]) / max(box_from[2] - box_from[0], 1.0)
+    sy = (box_now[3] - box_now[1]) / max(box_from[3] - box_from[1], 1.0)
+    mat = np.array([[sx, 0.0, box_now[0] - sx * box_from[0]],
+                    [0.0, sy, box_now[1] - sy * box_from[1]]], dtype=np.float32)
+    return mat, float(np.sqrt(sx * sy))
+
+
+def _warp_field(field: np.ndarray, mat, border) -> np.ndarray:
+    """アフィン変換（fit 用。_shift_field の拡大縮小つき版）"""
+    h, w = field.shape[:2]
+    if border == "replicate":
+        return cv2.warpAffine(field, mat, (w, h), flags=cv2.INTER_LINEAR,
+                              borderMode=cv2.BORDER_REPLICATE)
+    return cv2.warpAffine(field, mat, (w, h), flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=border)
+
+
+def _sdf_overlap(alpha_a, alpha_b, c_a, c_b, align, fit_boxes=None) -> float:
+    """2枚の不透明部の重なり（共通部分の面積 / 小さい方の面積。0〜1）
+
+    align=True のときは B を A の重心へ寄せてから測る（整列後に重なるなら
+    形は動いて見える）。fit_boxes=(box_a, box_b) のときは B の外接矩形を A の
+    外接矩形へ合わせてから測る。どちらかに不透明部が無ければ 0。
+    """
+    mask_a = alpha_a >= 0.5
+    mask_b = alpha_b >= 0.5
+    if fit_boxes is not None:
+        (ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1) = (
+            tuple(int(v) for v in box) for box in fit_boxes)
+        mask_a = mask_a[ay0:ay1, ax0:ax1]
+        mask_b = cv2.resize(mask_b[by0:by1, bx0:bx1].astype(np.uint8),
+                            (ax1 - ax0, ay1 - ay0),
+                            interpolation=cv2.INTER_NEAREST).astype(bool)
+        align = False
+    area = min(int(mask_a.sum()), int(mask_b.sum()))
+    if area == 0:
+        return 0.0
+    if align:
+        dx, dy = (int(round(float(v))) for v in (c_a - c_b))
+        h, w = mask_b.shape
+        moved = np.zeros_like(mask_b)
+        ys = slice(max(dy, 0), min(h + dy, h))
+        xs = slice(max(dx, 0), min(w + dx, w))
+        yd = slice(max(-dy, 0), min(h - dy, h))
+        xd = slice(max(-dx, 0), min(w - dx, w))
+        moved[ys, xs] = mask_b[yd, xd]
+        mask_b = moved
+    return float((mask_a & mask_b).sum()) / float(area)
+
+
+def _sdf_crossfade_reason(alpha_a, alpha_b, c_a, c_b, align, fit_boxes=None):
+    """sdf のモーフが実質クロスフェードになる理由（ならなければ None）"""
+    if _sdf_unusable(alpha_a) or _sdf_unusable(alpha_b):
+        return ("輪郭が取れない素材（全面不透明・全透明・全体が半透明）のため、"
+                "形は変形せずクロスフェードになります。背景が透明な PNG を使うか、"
+                "transition() / fade を使ってください")
+    overlap = _sdf_overlap(alpha_a, alpha_b, c_a, c_b, align, fit_boxes)
+    if overlap < _SDF_OVERLAP_WARN:
+        moved = align or fit_boxes is not None
+        how = "位置を合わせても" if moved else "align=False のままでは"
+        fix = ("形の違いが大きすぎます。method=\"transport\" を試すか、"
+               "transition() / fade を使ってください" if moved else
+               "align=True にするか、2枚の位置を揃えてください")
+        return (f"2枚の不透明部が{how}重なりません（重なり {overlap:.0%}）。"
+                f"形は動かず、その場で消えて現れるクロスフェードになります。{fix}")
+    return None
+
+
+def diagnose_sdf_morph(path_a, path_b, align=True, fit=None):
+    """sdf のモーフが実質クロスフェードになる組かを調べる（p.audit() 用）
+
+    返値: 理由の文字列（問題なければ None）。画像2枚を読むだけで距離場は作らない。
+    """
+    arr_a, arr_b, _canvas = load_images(path_a, path_b)
+    alpha_a = arr_a[:, :, 3].astype(np.float32) / 255.0
+    alpha_b = arr_b[:, :, 3].astype(np.float32) / 255.0
+    box_a, box_b = _alpha_bbox(alpha_a), _alpha_bbox(alpha_b)
+    use_fit = _resolve_fit(fit, box_a, box_b, bool(align))
+    return _sdf_crossfade_reason(
+        alpha_a, alpha_b, _alpha_centroid(alpha_a), _alpha_centroid(alpha_b),
+        bool(align), (box_a, box_b) if use_fit else None)
+
+
 def _prepare_sdf_morph(path_a, path_b, *,
-                       align=True, edge_softness=1.0,
-                       color_ease=1, color_path="oklch"):
+                       align=True, fit=None, edge_softness=1.0,
+                       color_ease=1, color_path="oklch", et_range=(0.0, 1.0)):
     """形状ベースモーフの前処理（画像読み込み→SDF→色場の拡張→OKLab化）
+
+    et_range は形の進行度が取る範囲（内部引数。generate 側が blend から求める）。
+
+    大きさの違う2枚（fit）: 距離場の補間は、相手の形から遠い部分ほど早く消え、
+    遅く現れる。幅の違う文字列どうしでは、はみ出す側の端の文字が途中のコマで
+    欠ける（_SDF_FIT_AUTO_RATIO のコメント参照）。fit では2枚の不透明部の
+    外接矩形を、中心と大きさを補間しながら互いに合わせてから距離場を補間する
+    （広い方が狭い方へ縮みながら変形する）。端が欠けない。
+
+    キャンバスの余白: 整列（align / fit）で絵が動いた先がキャンバスの外に出ると
+    端が切れ、ずらした距離場の欠けた帯（番兵値）が相手の絵まで消す。
+    動く分だけ透明の余白を四方に足してから補間する
+    （左右・上下で対称＝絵の位置は変わらない）。
 
     パラメータ:
         align: True なら不透明部の重心を合わせてから形状補間する
             （位置がずれた図形が「フェードで入れ替わる」のではなく移動する）
+        fit: True なら不透明部の外接矩形（位置と大きさ）を合わせながら補間する。
+            None（既定）は自動: align=True で、外接矩形の幅か高さが
+            _SDF_FIT_AUTO_RATIO 倍を超えて違うときだけ合わせる。False は合わせない
         edge_softness: 輪郭のアンチエイリアス幅 [px]（大きいほどぼける）
         color_ease: 色の進行度に smoothstep を何回かけるか（0〜3）。
             大きいほど両端の色を保持し、中間色を通過する時間が短くなる
@@ -838,26 +1004,59 @@ def _prepare_sdf_morph(path_a, path_b, *,
     """
     print("[1/3] 画像読み込み...")
     arr_a, arr_b, canvas = load_images(path_a, path_b)
-    w, h = canvas
 
     if color_path not in ("oklch", "oklab"):
         raise ValueError(
             f"未知の color_path: {color_path!r}（有効値: 'oklch', 'oklab'）")
 
-    print("[2/3] 符号付き距離場（SDF）を構築...")
     alpha_a = arr_a[:, :, 3].astype(np.float32) / 255.0
     alpha_b = arr_b[:, :, 3].astype(np.float32) / 255.0
+
+    box_a, box_b = _alpha_bbox(alpha_a), _alpha_bbox(alpha_b)
+    use_fit = _resolve_fit(fit, box_a, box_b, bool(align))
+
+    # 実質クロスフェードになる組は知らせる（黙って通すと原因が分からない）
+    crossfade = _sdf_crossfade_reason(
+        alpha_a, alpha_b, _alpha_centroid(alpha_a), _alpha_centroid(alpha_b),
+        bool(align), (box_a, box_b) if use_fit else None)
+    if crossfade:
+        print(f"  警告: {crossfade}")
+
+    # 整列で絵が動く分の余白（docstring 参照）
+    mx = my = 0
+    if use_fit:
+        # 補間した外接矩形がキャンバスからはみ出す分（進行度が 0..1 の間は2枚の
+        # 矩形の間に収まるので、はみ出すのは blend が行き過ぎるときだけ）
+        for et in (float(et_range[0]), float(et_range[1])):
+            x0, y0, x1, y1 = _fit_box(box_a, box_b, et)
+            mx = max(mx, int(np.ceil(max(-x0, x1 - canvas[0], 0.0))))
+            my = max(my, int(np.ceil(max(-y0, y1 - canvas[1], 0.0))))
+        mx, my = (m + 2 + (m & 1) if m else 0 for m in (mx, my))
+    elif align:
+        # 重心の差 × 進行度の幅。重心の差が 1px 未満なら足さない
+        gap = np.abs(_alpha_centroid(alpha_b) - _alpha_centroid(alpha_a))
+        span = max(float(et_range[1]) - float(et_range[0]), 1.0)
+        mx, my = (int(np.ceil(float(g) * span)) + 2 if g >= 1.0 else 0
+                  for g in gap)
+    # 偶数にそろえる（奇数だと 4:2:0 出力で元の絵の色差が半画素ずれる。_auto_expand と同じ）
+    mx, my = (m + (m & 1) for m in (mx, my))
+    if mx or my:
+        print(f"  整列の余白: 左右 {mx}px / 上下 {my}px")
+        pad = ((my, my), (mx, mx), (0, 0))
+        arr_a = np.pad(arr_a, pad)
+        arr_b = np.pad(arr_b, pad)
+        canvas = (canvas[0] + 2 * mx, canvas[1] + 2 * my)
+        alpha_a = arr_a[:, :, 3].astype(np.float32) / 255.0
+        alpha_b = arr_b[:, :, 3].astype(np.float32) / 255.0
+        if use_fit:
+            box_a, box_b = (
+                (b[0] + mx, b[1] + my, b[2] + mx, b[3] + my)
+                for b in (box_a, box_b))
+    w, h = canvas
+
+    print("[2/3] 符号付き距離場（SDF）を構築...")
     sdf_a = alpha_to_sdf(alpha_a)
     sdf_b = alpha_to_sdf(alpha_b)
-
-    # 重心（不透明度で重み付け）
-    def centroid(alpha):
-        total = float(alpha.sum())
-        if total <= 1e-6:
-            return np.array([(w - 1) / 2.0, (h - 1) / 2.0], dtype=np.float32)
-        ys, xs = np.mgrid[0:h, 0:w]
-        return np.array([float((xs * alpha).sum() / total),
-                         float((ys * alpha).sum() / total)], dtype=np.float32)
 
     # 距離場が使えない素材（輪郭なし／ほぼ半透明）は形状もアルファの
     # 線形ディゾルブへ逃がす。距離場を無理に使うと形が固まって急に抜ける
@@ -866,9 +1065,13 @@ def _prepare_sdf_morph(path_a, path_b, *,
         print("  注意: 距離場で扱えない素材（全透明/全不透明/ほぼ半透明）のため、"
               "形状はアルファの線形ディゾルブにフォールバックします")
 
-    c_a = centroid(alpha_a)
-    c_b = centroid(alpha_b)
-    if align:
+    c_a = _alpha_centroid(alpha_a)
+    c_b = _alpha_centroid(alpha_b)
+    if use_fit:
+        print(f"  外接矩形を合わせて補間（fit）: "
+              f"A {box_a[2] - box_a[0]:.0f}x{box_a[3] - box_a[1]:.0f}"
+              f" → B {box_b[2] - box_b[0]:.0f}x{box_b[3] - box_b[1]:.0f}")
+    elif align:
         print(f"  重心整列: A({c_a[0]:.1f}, {c_a[1]:.1f})"
               f" → B({c_b[0]:.1f}, {c_b[1]:.1f})")
 
@@ -881,7 +1084,8 @@ def _prepare_sdf_morph(path_a, path_b, *,
     lab_b = linear_rgb_to_oklab(lin_b)
 
     # 重心が一致していれば整列でのシフトは不要（色の極座標項を使い回せる）
-    shift_needed = bool(align) and float(np.abs(c_b - c_a).max()) >= 1e-3
+    shift_needed = (not use_fit and bool(align)
+                    and float(np.abs(c_b - c_a).max()) >= 1e-3)
 
     return {
         "canvas": canvas,
@@ -890,13 +1094,16 @@ def _prepare_sdf_morph(path_a, path_b, *,
         "alpha_a": alpha_a, "alpha_b": alpha_b,
         "shape_dissolve": shape_dissolve,
         "lab_a": lab_a, "lab_b": lab_b,
-        "polar": None if shift_needed else oklch_polar(lab_a, lab_b),
+        "polar": (None if (shift_needed or use_fit)
+                  else oklch_polar(lab_a, lab_b)),
         "c_a": c_a, "c_b": c_b,
         "align": shift_needed,
+        "fit": use_fit, "box_a": box_a, "box_b": box_b,
         "sdf_far": _sdf_far((h, w)),
         "edge_softness": max(float(edge_softness), 1e-3),
         "color_ease": int(min(max(color_ease, 0), 3)),
         "color_path": color_path,
+        "crossfade": crossfade,
     }
 
 
@@ -907,7 +1114,20 @@ def _sdf_morph_frame(ctx, et_shape, et_color) -> np.ndarray:
 
     a_a, a_b = ctx["alpha_a"], ctx["alpha_b"]
 
-    if ctx["align"]:
+    if ctx["fit"]:
+        # 2枚の外接矩形を、補間した矩形へそれぞれ写してから混ぜる
+        box_t = _fit_box(ctx["box_a"], ctx["box_b"], et_shape)
+        mat_a, k_a = _fit_matrix(ctx["box_a"], box_t)
+        mat_b, k_b = _fit_matrix(ctx["box_b"], box_t)
+        far = -ctx["sdf_far"]
+        sdf_a = _warp_field(sdf_a, mat_a, far) * k_a
+        sdf_b = _warp_field(sdf_b, mat_b, far) * k_b
+        lab_a = _warp_field(lab_a, mat_a, "replicate")
+        lab_b = _warp_field(lab_b, mat_b, "replicate")
+        if ctx["shape_dissolve"]:
+            a_a = _warp_field(a_a, mat_a, 0.0)
+            a_b = _warp_field(a_b, mat_b, 0.0)
+    elif ctx["align"]:
         c_t = (1.0 - et_shape) * ctx["c_a"] + et_shape * ctx["c_b"]
         off_a, off_b = c_t - ctx["c_a"], c_t - ctx["c_b"]
         far = -ctx["sdf_far"]
@@ -950,7 +1170,8 @@ _PREPARE_PARAM_KEYS = frozenset(
 _BLEND_PARAM_KEYS = frozenset(inspect.signature(_blend_settings).parameters)
 TRANSPORT_PARAM_KEYS = _PREPARE_PARAM_KEYS | _BLEND_PARAM_KEYS
 SDF_PARAM_KEYS = frozenset(
-    inspect.signature(_prepare_sdf_morph).parameters) - {"path_a", "path_b"}
+    inspect.signature(_prepare_sdf_morph).parameters) - {
+        "path_a", "path_b", "et_range"}
 MORPH_PARAM_KEYS = TRANSPORT_PARAM_KEYS | SDF_PARAM_KEYS | {"method"}
 
 # 両方式で名前が衝突しないことを保証する（衝突すると method 自動判定が壊れる）
@@ -1001,13 +1222,20 @@ def _split_transport_params(params):
 # ============================================================
 
 def _generate_sdf_frames(path_a, path_b, out_dir, n_frames, blend_fn, params):
-    """method="sdf" の RGBA PNG 連番生成"""
-    ctx = _prepare_sdf_morph(path_a, path_b, **params)
+    """method="sdf" の RGBA PNG 連番生成
+
+    返値: 実質クロスフェードになる組ならその理由（ならなければ None）
+    """
+    last = n_frames - 1
+    # 形の進行度が取る範囲（overshoot の分も余白に入れる）
+    ets = [min(max(blend_fn(i / max(last, 1)), -0.25), 1.25)
+           for i in range(n_frames)]
+    ctx = _prepare_sdf_morph(
+        path_a, path_b, et_range=(min(ets + [0.0]), max(ets + [1.0])), **params)
     w, h = ctx["canvas"]
 
     os.makedirs(out_dir, exist_ok=True)
     print(f"[SDF] RGBAフレーム生成: {n_frames}フレーム, {w}x{h}")
-    last = n_frames - 1
     for i in tqdm(range(n_frames), desc="フレーム生成"):
         t = i / max(last, 1)
         et_raw = blend_fn(t)
@@ -1028,6 +1256,7 @@ def _generate_sdf_frames(path_a, path_b, out_dir, n_frames, blend_fn, params):
             os.path.join(out_dir, f"frame_{i:05d}.png"))
 
     print(f"完了: {out_dir} ({n_frames}フレーム)")
+    return ctx["crossfade"]
 
 
 def generate_rgba_frames(path_a, path_b, out_dir, n_frames, blend_fn=None, **params):
@@ -1044,6 +1273,9 @@ def generate_rgba_frames(path_a, path_b, out_dir, n_frames, blend_fn=None, **par
                   method="transport" なら max_pixels, w_move, w_color,
                   w_vanish, grid_step, smoothing, color_metric, color_mix,
                   color_local, alpha_mode, alpha_sharp
+
+    返値: method="sdf" で実質クロスフェードになる組ならその理由の文字列
+          （呼び出し側が警告に出す）。それ以外は None
     """
     if blend_fn is None:
         blend_fn = ease_in_out
@@ -1054,8 +1286,8 @@ def generate_rgba_frames(path_a, path_b, out_dir, n_frames, blend_fn=None, **par
     method = _resolve_method(params)
     params = _split_method_params(method, params)
     if method == "sdf":
-        _generate_sdf_frames(path_a, path_b, out_dir, n_frames, blend_fn, params)
-        return
+        return _generate_sdf_frames(
+            path_a, path_b, out_dir, n_frames, blend_fn, params)
 
     prep_params, cfg = _split_transport_params(params)
 
@@ -1110,6 +1342,7 @@ def generate_rgba_frames(path_a, path_b, out_dir, n_frames, blend_fn=None, **par
         Image.fromarray(rgba, "RGBA").save(frame_path)
 
     print(f"完了: {out_dir} ({n_frames}フレーム)")
+    return None
 
 
 # ============================================================
@@ -1121,29 +1354,48 @@ def _load_image_rgba(path: str) -> np.ndarray:
     return np.array(Image.open(path).convert("RGBA"))
 
 
+# 自動 expand（expand=None）で「見える」とみなす粒の不透明度の下限。
+# fade=True の粒は進行度 p で 1-p に薄くなるので、これ未満まで薄れた粒は
+# 範囲の見積もりに入れない（消えかけの粒のためにキャンバスを広げると、
+# 面積に比例して重くなる）
+_AUTO_EXPAND_MIN_FADE = 0.05
+
+# 自動 expand の上限 [px]（片側）。超えたら警告して頭打ちにする
+_AUTO_EXPAND_MAX = 4000
+
+
+def _resolve_point(point, name):
+    """toward / from_point の (dx, dy) を検証して float の組にする"""
+    try:
+        dx, dy = point
+        dx, dy = float(dx), float(dy)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name} は (dx, dy) の数値2つ（素材の中心からのずれ px。"
+            f"右と下が正）: {point!r}") from None
+    if not (np.isfinite(dx) and np.isfinite(dy)):
+        raise ValueError(f"{name} に NaN / 無限大は使えません: {point!r}")
+    return dx, dy
+
+
 def _prepare_particles(path_a, *, max_pixels=2000, speed=200.0,
-                       spread=1.0, swirl=0.0, seed=42, expand=0):
+                       spread=1.0, swirl=0.0, seed=42, point=None):
     """パーティクル前処理（画像読み込み→ピクセル抽出→初速度計算）
 
     extract_pixels / subsample を流用し、各粒子の初速度を
     「重心からの放射方向 + ランダムジッター + 回転（接線方向）」で決める。
+    point（素材の中心からのずれ px）を指定したときは放射ではなく、その1点へ
+    集まる軌道の材料（到着の遅れ・横ぶれ）を作る。
 
-    返値: arr, canvas, positions, colors, velocities
-      - arr: RGBA画像（expand 指定時は透明マージン付き）
-      - canvas: (w, h)
-      - positions: (N, 2) 粒子の初期位置 [px]
-      - colors: (N, 4) 粒子の色 RGBA（0〜255, float64）
-      - velocities: (N, 2) 初速度 [px/正規化時間]
+    余白（expand）はここでは付けない。座標は素材画像の画素座標のままで、
+    呼び出し側が余白ぶんずらす（自動 expand は軌道が決まってから見積もるため）。
+
+    返値: arr, sim
+      - arr: RGBA画像（余白なし）
+      - sim: 軌道の材料。_particle_positions(sim, p, gravity) に渡す
     """
     arr = _load_image_rgba(path_a)
-
-    # 粒子が枠外で切れるのを緩和する透明マージン
-    expand = int(max(expand, 0))
-    if expand > 0:
-        arr = np.pad(arr, ((expand, expand), (expand, expand), (0, 0)))
-
     h, w = arr.shape[:2]
-    canvas = (w, h)
 
     positions, colors = extract_pixels(arr)
     rng = np.random.default_rng(seed)  # 再現性のため seed 必須
@@ -1151,8 +1403,10 @@ def _prepare_particles(path_a, *, max_pixels=2000, speed=200.0,
     n = len(positions)
     print(f"  粒子数: {n:,}（max_pixels={max_pixels}）")
 
+    sim = {"positions": positions, "colors": colors, "n": n,
+           "velocities": np.empty((0, 2)), "point": None}
     if n == 0:
-        return arr, canvas, positions, colors, np.empty((0, 2))
+        return arr, sim
 
     # 放射方向の単位ベクトル（重心から外向き。重心直上の点はランダム方向）
     centroid = positions.mean(axis=0)
@@ -1171,14 +1425,101 @@ def _prepare_particles(path_a, *, max_pixels=2000, speed=200.0,
         # 重心まわりの回転（接線方向速度 v_t = ω × r の線形近似）
         perp = np.column_stack([-offset[:, 1], offset[:, 0]])
         velocities = velocities + swirl * perp
+    sim["velocities"] = velocities
 
-    return arr, canvas, positions, colors, velocities
+    if point is not None:
+        # 1点へ集まる軌道（explode の toward / assemble の from_point）。
+        # 乱数は放射用の後に引く（point を指定しない場合の出力を変えないため）
+        target = np.array([(w - 1) / 2.0 + point[0], (h - 1) / 2.0 + point[1]])
+        rel = positions - target
+        rel_len = np.linalg.norm(rel, axis=1, keepdims=True)
+        rel_unit = np.where(rel_len > 1e-9, rel / np.maximum(rel_len, 1e-9),
+                            rand_unit)
+        stagger = float(min(max(spread, 0.0), 1.0)) * 0.4
+        sim["point"] = {
+            "target": target,
+            "rel": rel,
+            # 進行方向に直交する向き（横ぶれの方向）
+            "side": np.column_stack([-rel_unit[:, 1], rel_unit[:, 0]]),
+            # 粒ごとの出発の遅れ（spread が大きいほど列になって流れる）
+            "stagger": stagger,
+            "lag": rng.uniform(0.0, 1.0, size=(n, 1)) * stagger,
+            # 横ぶれの振幅 [px]（途中でふくらみ、両端で 0）
+            "wobble": speed * spread * 0.5 * rng.normal(size=(n, 1)),
+            "swirl": float(swirl),
+        }
+    return arr, sim
+
+
+def _particle_positions(sim, p, gravity):
+    """進行度 p（0〜1）での粒子位置 (N, 2)。素材画像の画素座標"""
+    pt = sim["point"]
+    if pt is None:
+        # 粒子位置: pos + v*p + 0.5*g*p^2（p を正規化時間として扱う）
+        cur = sim["positions"] + sim["velocities"] * p
+        cur[:, 1] += 0.5 * gravity * p * p
+        return cur
+    # 1点へ集まる: 粒ごとの進み e（0→1）で 元の位置 → 行き先 を結ぶ。
+    # p=1 で全ての粒が行き先に着く（遅れて出た粒ほど速く進む）
+    e = np.clip((p - pt["lag"]) / (1.0 - pt["stagger"]), 0.0, 1.0)
+    rel = pt["rel"]
+    if pt["swirl"] != 0.0:
+        ang = pt["swirl"] * e[:, 0]
+        c, s = np.cos(ang), np.sin(ang)
+        rel = np.column_stack([rel[:, 0] * c - rel[:, 1] * s,
+                               rel[:, 0] * s + rel[:, 1] * c])
+    cur = pt["target"] + rel * (1.0 - e)
+    cur = cur + pt["side"] * pt["wobble"] * np.sin(np.pi * e)
+    # 重力は道すじのたるみ（両端で 0。+ で下へふくらむ）
+    cur[:, 1] += gravity * (e * (1.0 - e))[:, 0]
+    return cur
+
+
+def _auto_expand(sim, canvas, progress, gravity, r, fade, limit=None):
+    """粒が切れない余白 (ex, ey) [px] を、実際の軌道から求める。
+
+    各フレームの進行度での粒子位置の外接矩形が、素材の矩形からはみ出す量を取る。
+    素材は overlay で中央に置かれるので余白は左右・上下で対称にする
+    （片側だけ足すと絵の位置がずれる）。fade=True では、ほぼ消えた粒
+    （不透明度 _AUTO_EXPAND_MIN_FADE 未満）は数えない。
+    limit=(lx, ly) は余白込みのキャンバスの半分の上限 [px]。Project の画面寸法を
+    渡すと、素材の中心が画面内にある限り画面の外になる範囲を焼かない。
+    """
+    w, h = canvas
+    over_x = over_y = 0.0
+    if sim["n"] > 0:
+        for p in sorted(set(progress)):
+            if p <= 0.0:
+                continue
+            if fade and (1.0 - p) < _AUTO_EXPAND_MIN_FADE:
+                continue
+            cur = _particle_positions(sim, p, gravity)
+            over_x = max(over_x, -float(cur[:, 0].min()),
+                         float(cur[:, 0].max()) - (w - 1))
+            over_y = max(over_y, -float(cur[:, 1].min()),
+                         float(cur[:, 1].max()) - (h - 1))
+    out = []
+    for over, size, lim in ((over_x, w, limit[0] if limit else None),
+                            (over_y, h, limit[1] if limit else None)):
+        e = int(np.ceil(over)) + r + 2 if over > 0.0 else 0
+        if lim is not None:
+            e = min(e, max(int(np.ceil(lim - size / 2.0)), 0))
+        if e > _AUTO_EXPAND_MAX:
+            print(f"  警告: 自動 expand が {e}px になるため {_AUTO_EXPAND_MAX}px で"
+                  f"頭打ちにします（粒が端で切れます。speed / gravity を下げるか "
+                  f"expand を明示してください）")
+            e = _AUTO_EXPAND_MAX
+        # 偶数にそろえる: 奇数だと overlay の位置が1画素ずれ、4:2:0 出力で元の絵の
+        # 色差が静止画として置いたときと半画素ずれる（縁の1列がにじむ）
+        out.append(e + (e & 1))
+    return out[0], out[1]
 
 
 def _generate_particle_frames(path_a, out_dir, n_frames, blend_fn, *, reverse,
                               max_pixels=2000, speed=200.0, gravity=300.0,
                               spread=1.0, swirl=0.0, particle_size=2,
-                              seed=42, dissolve=0.25, expand=0):
+                              seed=42, dissolve=0.25, expand=None, fade=True,
+                              point=None, expand_limit=None):
     """explode / assemble 共通のフレーム生成コア
 
     explode: 進行度 p=0 で元画像そのまま → p=1 で完全飛散＋フェードアウト。
@@ -1194,40 +1535,66 @@ def _generate_particle_frames(path_a, out_dir, n_frames, blend_fn, *, reverse,
         particle_size: 粒子（円）の半径 [px]
         seed: 乱数シード（default_rng に渡す。再現性のため固定）
         dissolve: 元画像→粒子表現へクロスフェードする進行度区間（0〜dissolve）
-        expand: キャンバスの透明マージン [px]（枠外に飛ぶ粒子の切れ防止）
+        expand: キャンバスの透明マージン [px]（枠外に飛ぶ粒子の切れ防止）。
+            None（既定）は軌道から自動で決める（_auto_expand。左右と上下で別の値）
+        fade: True（既定）は粒が進行度に合わせて薄れて消える（不透明度 1-p）。
+            False は薄れず、散った位置に残る
+        point: (dx, dy)。放射ではなく、素材の中心からこれだけずれた1点へ集まる
+            （公開名は explode の toward / assemble の from_point）
+        expand_limit: 自動 expand の上限（_auto_expand の limit）
     """
     if blend_fn is None:
         blend_fn = ease_in_out
+    if point is not None:
+        point = _resolve_point(point, "toward / from_point")
 
     # --- 前処理（読み込み→抽出→初速度） ---
-    arr, canvas, positions, colors, velocities = _prepare_particles(
+    arr, sim = _prepare_particles(
         path_a, max_pixels=max_pixels, speed=speed,
-        spread=spread, swirl=swirl, seed=seed, expand=expand,
+        spread=spread, swirl=swirl, seed=seed, point=point,
     )
-    w, h = canvas
-    # 合成はリニア光 × 事前乗算（sRGB値のまま混ぜると中間が暗く濁る）
-    img_pm = linear_premultiply(arr)
     r = max(int(particle_size), 1)
+
+    # 各フレームの進行度（粒子位置は物理シミュレーションのため負値・overshoot は
+    # 無意味。generate_rgba_frames と異なり [0,1] にクランプする）。
+    # assemble は explode の時間反転（進行度を 1→0 に逆走）
+    progress = []
+    for i in range(n_frames):
+        et = min(max(blend_fn(i / max(n_frames - 1, 1)), 0.0), 1.0)
+        progress.append(1.0 - et if reverse else et)
+
+    # --- 余白（粒子が枠外で切れるのを防ぐ透明マージン） ---
+    if expand is None:
+        ex, ey = _auto_expand(sim, (arr.shape[1], arr.shape[0]), progress,
+                              gravity, r, fade, limit=expand_limit)
+        print(f"  自動 expand: 左右 {ex}px / 上下 {ey}px")
+    else:
+        ex = ey = int(max(expand, 0))
+    if ex > 0 or ey > 0:
+        arr = np.pad(arr, ((ey, ey), (ex, ex), (0, 0)))
+    h, w = arr.shape[:2]
+    shift = np.array([ex, ey], dtype=np.float64)
+    colors = sim["colors"]
+
+    # 合成はリニア光 × 事前乗算（sRGB値のまま混ぜると中間が暗く濁る）。
+    # 元画像があるのは余白の内側（iy, ix）だけなので、浮動小数の合成もそこだけで行う
+    iy = slice(ey, h - ey)
+    ix = slice(ex, w - ex)
+    img_pm = linear_premultiply(arr[iy, ix])
 
     os.makedirs(out_dir, exist_ok=True)
     mode = "assemble" if reverse else "explode"
     print(f"パーティクルフレーム生成（{mode}）: {n_frames}フレーム, {w}x{h}")
     for i in tqdm(range(n_frames), desc=f"{mode} フレーム生成"):
-        t = i / max(n_frames - 1, 1)
-        # 粒子位置は物理シミュレーションのため負値・overshoot は無意味。
-        # generate_rgba_frames と異なり進行度は [0,1] にクランプする
-        et = min(max(blend_fn(t), 0.0), 1.0)
-        # assemble は explode の時間反転（進行度を 1→0 に逆走）
-        p = 1.0 - et if reverse else et
+        p = progress[i]
 
         if p <= 0.0:
             # 進行度0 = 元画像そのまま（ピクセル一致を保証）
             rgba = arr
         else:
-            # 粒子位置: pos + v*p + 0.5*g*p^2（p を正規化時間として扱う）
-            cur = positions + velocities * p
-            cur[:, 1] += 0.5 * gravity * p * p
-            fade = 1.0 - p  # 進行度1で完全フェードアウト
+            cur = _particle_positions(sim, p, gravity) + shift
+            # fade=True は進行度1で完全フェードアウト。False は薄れず残る
+            alpha_k = (1.0 - p) if fade else 1.0
 
             # 粒子レイヤーを描画（RGBA、円で塗りつぶし）
             layer = np.zeros((h, w, 4), dtype=np.uint8)
@@ -1235,38 +1602,70 @@ def _generate_particle_frames(path_a, out_dir, n_frames, blend_fn, *, reverse,
             yi = np.rint(cur[:, 1]).astype(np.int64)
             vis = (xi >= -r) & (xi < w + r) & (yi >= -r) & (yi < h + r)
             for x, y, col in zip(xi[vis], yi[vis], colors[vis]):
-                a = col[3] * fade
+                a = col[3] * alpha_k
                 if a < 1.0:
                     continue  # ほぼ透明な粒子はスキップ
                 cv2.circle(layer, (int(x), int(y)), r,
                            (int(col[0]), int(col[1]), int(col[2]), int(a)),
                            thickness=-1, lineType=cv2.LINE_AA)
 
-            # 元画像→粒子表現のクロスフェード（リニア光 × 事前乗算で合成）
+            # 元画像→粒子表現のクロスフェード（リニア光 × 事前乗算で合成）。
+            # 元画像が混ざるのは dissolve の間・元画像の矩形の中だけで、それ以外は
+            # 粒子レイヤーがそのまま出力になる（全画素をリニア光へ往復させると、
+            # キャンバスの面積に比例して重くなる。自動 expand で広がっても
+            # 重くならないよう、必要な範囲だけ計算する）
             ramp = 1.0 if dissolve <= 0.0 else min(p / dissolve, 1.0)
-            part_pm = linear_premultiply(layer)
-            blended = (1.0 - ramp) * img_pm + ramp * part_pm
-
-            # unpremultiply → sRGB へ戻して RGBA 保存
-            color, alpha = _unpremultiply(blended)
-            rgba = _to_rgba_u8(color, alpha)
+            rgba = layer
+            if ramp < 1.0:
+                part_pm = linear_premultiply(layer[iy, ix])
+                blended = (1.0 - ramp) * img_pm + ramp * part_pm
+                # unpremultiply → sRGB へ戻す
+                color, alpha = _unpremultiply(blended)
+                rgba[iy, ix] = _to_rgba_u8(color, alpha)
+                if ex > 0 or ey > 0:
+                    # 余白へ出た粒は、元画像と同じ割合（ramp）で薄く出す
+                    outside = np.ones((h, w), dtype=bool)
+                    outside[iy, ix] = False
+                    rgba[outside, 3] = np.rint(
+                        rgba[outside, 3] * ramp).astype(np.uint8)
 
         frame_path = os.path.join(out_dir, f"frame_{i:05d}.png")
-        Image.fromarray(rgba, "RGBA").save(frame_path)
+        # compress_level=1: 連番は直後に FFV1 へ入れて捨てる中間物なので、
+        # 圧縮率より書き出しの速さを取る（画素は変わらない）
+        Image.fromarray(rgba, "RGBA").save(frame_path, compress_level=1)
 
     print(f"完了: {out_dir} ({n_frames}フレーム)")
 
 
 # **params で受け付ける既知キー（タイポ検出用）。
-# _generate_particle_frames のキーワード専用引数から導出し、二重管理を避ける
-PARTICLE_PARAM_KEYS = frozenset(
+# _generate_particle_frames のキーワード専用引数から導出し、二重管理を避ける。
+# point は公開名が関数ごとに違う（explode=toward / assemble=from_point）。
+# expand_limit は Project が渡す内部引数で、DSL からは指定できない
+_PARTICLE_CORE_KEYS = frozenset(
     inspect.signature(_generate_particle_frames).parameters) - {
-        "path_a", "out_dir", "n_frames", "blend_fn", "reverse"}
+        "path_a", "out_dir", "n_frames", "blend_fn", "reverse",
+        "point", "expand_limit"}
+EXPLODE_PARAM_KEYS = _PARTICLE_CORE_KEYS | {"toward"}
+ASSEMBLE_PARAM_KEYS = _PARTICLE_CORE_KEYS | {"from_point"}
+
+# 各キーの既定値（describe の表・テストが実装と突き合わせる）
+PARTICLE_PARAM_DEFAULTS = {
+    k: v.default
+    for k, v in inspect.signature(_generate_particle_frames).parameters.items()
+    if k in _PARTICLE_CORE_KEYS}
 
 
-def _check_particle_params(params):
-    """未知キーはタイポの可能性が高いため明示的にエラーにする"""
-    _reject_unknown_keys(None, params, PARTICLE_PARAM_KEYS)
+def _particle_call_params(params, valid_keys, point_key):
+    """公開の **params を検証し、_generate_particle_frames の引数へ直す"""
+    params = dict(params)
+    limit = params.pop("expand_limit", None)
+    # 未知キーはタイポの可能性が高いため明示的にエラーにする
+    _reject_unknown_keys(None, params, valid_keys)
+    if point_key in params:
+        params["point"] = params.pop(point_key)
+    if limit is not None:
+        params["expand_limit"] = limit
+    return params
 
 
 def generate_explode_frames(path_a, out_dir, n_frames, blend_fn=None, **params):
@@ -1279,23 +1678,23 @@ def generate_explode_frames(path_a, out_dir, n_frames, blend_fn=None, **params):
         out_dir: 出力ディレクトリ（frame_00000.png 〜）
         n_frames: フレーム数
         blend_fn: 進行カーブ t→et（None で ease_in_out）
-        **params: max_pixels, speed, gravity, spread, swirl,
-                  particle_size, seed, dissolve, expand
+        **params: max_pixels, speed, gravity, spread, swirl, particle_size,
+                  seed, dissolve, expand, fade, toward
     """
-    _check_particle_params(params)
+    kw = _particle_call_params(params, EXPLODE_PARAM_KEYS, "toward")
     _generate_particle_frames(path_a, out_dir, n_frames, blend_fn,
-                              reverse=False, **params)
+                              reverse=False, **kw)
 
 
 def generate_assemble_frames(path_a, out_dir, n_frames, blend_fn=None, **params):
     """飛散状態の粒子が集合して画像になる RGBA PNG 連番を生成
 
     explode の時間反転。t=0 で完全飛散 → t=1 で元画像そのまま。
-    引数は generate_explode_frames と同一。
+    引数は generate_explode_frames と同じ（toward の代わりに from_point）。
     """
-    _check_particle_params(params)
+    kw = _particle_call_params(params, ASSEMBLE_PARAM_KEYS, "from_point")
     _generate_particle_frames(path_a, out_dir, n_frames, blend_fn,
-                              reverse=True, **params)
+                              reverse=True, **kw)
 
 
 # ============================================================

@@ -64,8 +64,11 @@ _ARG_BY_NAME = {
 _VARARG_ARGS = {
     "case": ((sv.gt(Var("u"), Const(0.5)), 1.0),),
     "keyframes": ((0, 0.0), (1, 1.0)),
+    "keyframes_sec": ((0, 0.0), (1.5, 1.0)),
     "max": (Var("u"), 0.5),
     "min": (Var("u"), 0.5),
+    # ramp の a / b は秒（数値のみ。Expr は構築時に ValueError）
+    "ramp": (0.5, 1.5),
     "sequence_param": ((0, 0.5, 1.0), (0.5, 1.0, 0.0)),
 }
 

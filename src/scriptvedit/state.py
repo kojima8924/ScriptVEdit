@@ -119,10 +119,16 @@ _BAKEABLE_EFFECTS = {"scale", "fade", "trim", "morph_to", "rotate_to", "wipe", "
                      "chroma_key", "vignette", "pixelize", "glow", "lut", "glitch",
                      "perspective_warp", "lens", "ken_burns", "drop_shadow", "outline",
                      "explode_to", "assemble_from",
-                     "mask", "mask_wipe", "opacity", "rounded"}
+                     "mask", "mask_wipe", "opacity", "rounded", "tint"}
 
 # 終端フレーム生成Effect（bakeable末尾に1つだけ・映像を生成する）
 _TERMINAL_FRAME_EFFECTS = {"morph_to", "explode_to", "assemble_from"}
+
+# 終端フレーム生成Effect に共通の時間指定（秒）。フレーム生成（morph.py）には
+# 渡さず、チェックポイントの計画（checkpoint.py の _terminal_frame_plan）が読む:
+#   delay    … 動き出すまでの秒数（その間は最初のコマを出す。フレームは作らない）
+#   duration … 動く秒数（None は残り全部）。終わった後は最後のコマを尺の終わりまで保持
+_TERMINAL_TIMING_KEYS = ("delay", "duration")
 
 # 時間操作系の live Effect（setpts/reverse/concat による時間変形）。
 # チェックポイントベイクの表示尺基準と食い違うため bakeable にはしない
@@ -160,6 +166,11 @@ _NORMALIZE_AUDIO_MODES = ("dynamic", "linear")
 # text / typewriter / counter の anchor（drawtext の x 起点）。
 # overlay 配置の _PLACEMENT_ANCHORS とは別軸の語彙なので値も別に持つ。
 _TEXT_ANCHORS = ("center", "left")
+
+# 名前で指定できるイージング（名前 -> u を受け取って Expr を返す1引数関数）。
+# easing.py が定義の直後に登録する。text.py（counter の easing="名前"）が
+# easing.py を import すると循環 import の SCC が育つので、葉であるここを介す。
+_NAMED_EASINGS = {}
 
 
 # --- パッケージ名前空間（プラグイン注入・describe のイントロスペクション用）---

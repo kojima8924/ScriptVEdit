@@ -176,6 +176,69 @@ class Var(Expr):
         raise ValueError(f"変数 '{self.name}' は数値評価できません")
 
 
+class _UStr(str):
+    """u（0..1 の進行度）の式文字列。同じ時間軸の「表示秒」も一緒に運ぶ。
+
+    Expr.to_ffmpeg(u_expr) の u_expr は文字列だが、秒で書く式（elapsed() /
+    ramp() / keyframes_sec()）は u だけでは組めない（秒 = u × 表示秒）。
+    そこで u の式を作る側（filters/video.py の _u_expr、filters/audio.py）が
+    この型で渡し、秒のノード（_TimeVar）が sec / dur を読む。
+    str の派生なので、u しか使わない既存の式・プラグインの ctx["u"] からは
+    ただの文字列に見える。
+
+    dur: 表示秒（数値）
+    sec: 経過秒の式文字列。省略時は「(u)×dur」（u の式しか無い呼び出し側でも
+        正しい値になる）。_u_expr は割り算を挟まない clip(t-start,0,dur) を渡す。
+    """
+    # str の派生は空でない __slots__ を持てないので、属性は __dict__ に置く
+
+    def __new__(cls, u, dur, sec=None):
+        self = super().__new__(cls, u)
+        self.dur = dur
+        self.sec = sec if sec is not None else f"(({u})*{dur})"
+        return self
+
+
+class _UValue(float):
+    """eval_at() へ渡す u の値。表示秒 dur も運ぶ（_UStr の数値版）。"""
+
+    def __new__(cls, u, dur):
+        self = super().__new__(cls, u)
+        self.dur = dur
+        return self
+
+
+class _TimeVar(Expr):
+    """秒の変数ノード。kind="sec" は表示開始からの経過秒（0..表示秒）、
+    kind="dur" は表示秒そのもの。
+
+    値は Object の尺が確定した後（フィルタ生成時）に決まる。to_ffmpeg は
+    _UStr から秒の式を、eval_at は _UValue から表示秒を受け取る。
+    どちらも持たない素の文字列 / 数値が来たとき:
+    - to_ffmpeg は記号 "sec(u)" / "dur(u)" を返す（キャッシュ鍵の to_ffmpeg("u") と、
+      静的 Transform の「u に依存するか」の判定 to_ffmpeg("0") != to_ffmpeg("1") 用。
+      ffmpeg には存在しない関数名なので、万一フィルタへ漏れても黙って別の値に
+      ならず ffmpeg が止める）
+    - eval_at は ValueError（表示秒が分からないと数値にできない）
+    """
+    def __init__(self, kind):
+        self.kind = kind
+
+    def to_ffmpeg(self, u_expr):
+        dur = getattr(u_expr, "dur", None)
+        if dur is None:
+            return f"{self.kind}({u_expr})"
+        return u_expr.sec if self.kind == "sec" else str(dur)
+
+    def eval_at(self, u_value):
+        dur = getattr(u_value, "dur", None)
+        if dur is None:
+            raise ValueError(
+                "秒で書いた式（elapsed / remaining / ramp / keyframes_sec）は、"
+                "Object の表示秒が決まるまで数値評価できません")
+        return float(u_value) * dur if self.kind == "sec" else dur
+
+
 class _BinOp(Expr):
     """二項演算ノード"""
     def __init__(self, op, left, right):
@@ -654,6 +717,28 @@ def sign(x):
 def random(seed=0):
     """疑似乱数 [0, 1)（ffmpegランタイムで評価）"""
     return _make_func("random", [_to_expr(seed)])
+
+
+# --- 秒で書く時間（表示区間の中の経過秒） ---
+
+def elapsed():
+    """表示開始からの経過秒（0 〜 表示秒）を返す Expr。
+
+    u（0..1）と違い、Object の表示秒を変えても式を書き直さなくてよい。
+    lambda の中でも外でも使える。
+
+    使用例:
+        obj.time(6) <= fade(clip(elapsed() / 0.4, 0, 1))    # 最初の 0.4 秒で現れる
+    """
+    return _TimeVar("sec")
+
+def remaining():
+    """表示終了までの残り秒（表示秒 〜 0）を返す Expr。
+
+    使用例:
+        obj.time(6) <= fade(clip(remaining() / 0.4, 0, 1))  # 最後の 0.4 秒で消える
+    """
+    return _TimeVar("dur") - _TimeVar("sec")
 
 
 # --- DSL糖衣: パーセント記法 ---

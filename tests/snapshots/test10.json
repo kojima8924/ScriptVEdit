@@ -12,9 +12,9 @@
     "-i",
     "color=c=purple:s=1280x720:d=5:r=30",
     "-i",
-    "__cache__/artifacts/checkpoint/294bde45/f0600d2784a9d483.mkv",
+    "__cache__/artifacts/checkpoint/294bde45/eb8fa545519d97d0.mkv",
     "-i",
-    "__cache__/artifacts/checkpoint/ac9b64e5/5f2d6de044d5065c.mkv",
+    "__cache__/artifacts/checkpoint/ac9b64e5/d5b9b98be616807f.mkv",
     "-filter_complex",
     "[1:v]trim=end=5.066666666666666[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,5)'[v1];[2:v]trim=end=5.066666666666666[obj2];[v1][obj2]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,5)'[v2]",
     "-map",
@@ -29,7 +29,7 @@
     "test10.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/checkpoint/294bde45/f0600d2784a9d483.mkv": [
+    "__cache__/artifacts/checkpoint/294bde45/eb8fa545519d97d0.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -53,8 +53,8 @@
       "bgra",
       "-an",
       "-t",
-      "5",
-      "__cache__/artifacts/checkpoint/294bde45/f0600d2784a9d483.mkv"
+      "5.033333",
+      "__cache__/artifacts/checkpoint/294bde45/eb8fa545519d97d0.mkv"
     ],
     "__cache__/artifacts/checkpoint/ac9b64e5/24dbf834a131a5c5.png": [
       "ffmpeg",
@@ -74,7 +74,7 @@
       "rgba",
       "__cache__/artifacts/checkpoint/ac9b64e5/24dbf834a131a5c5.png"
     ],
-    "__cache__/artifacts/checkpoint/ac9b64e5/5f2d6de044d5065c.mkv": [
+    "__cache__/artifacts/checkpoint/ac9b64e5/d5b9b98be616807f.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -98,8 +98,8 @@
       "bgra",
       "-an",
       "-t",
-      "5",
-      "__cache__/artifacts/checkpoint/ac9b64e5/5f2d6de044d5065c.mkv"
+      "5.033333",
+      "__cache__/artifacts/checkpoint/ac9b64e5/d5b9b98be616807f.mkv"
     ]
   }
 }

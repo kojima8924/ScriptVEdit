@@ -405,6 +405,35 @@ _SPECS = [
                 render_kwargs={"start": 1, "end": 3},
                 doc="normalize_audio(mode='linear'): main は volume=<MEASURED_GAIN>dB"
                     "（loudnorm なし）、cache に全編の測定パス（部分レンダでも -t は総尺）"),
+    ProjectSpec("test100", ["test100_stills.py"],
+                doc="stills: 時刻表つきの静止画列を入力1本に（concat → qtrle）/ "
+                    "time() で伸ばした分は最後の絵を保持（tpad stop_mode=clone）"),
+    ProjectSpec("test101", ["test101_frames.py"],
+                doc="frames: draw(i) のコマを標準入力から qtrle へ / "
+                    "checkpoint は入力の最後のコマを保持してから焼く"),
+    ProjectSpec("test108", ["test108_explode_hold.py"], needs=("morph",),
+                doc="explode_to: delay / duration（前後は最初・最後のコマを tpad で複製）/ "
+                    "fade=False / toward / expand 自動（鍵に画面寸法）"),
+    ProjectSpec("test109", ["test109_assemble_point.py"], needs=("morph",),
+                doc="assemble_from: from_point と duration（集まった後は保持）"),
+    ProjectSpec("test110", ["test110_morph_timing.py"], needs=("morph",),
+                doc="morph_to: delay / duration と fit"),
+    ProjectSpec("test111", ["test111_counter_format.py"], needs=("font",),
+                doc="counter: 桁区切り・小数・イージング・32ビット超"
+                    "（桁数と符号ごとの drawtext を enable で切替）"),
+    ProjectSpec("test112", ["test112_subtitles_fontsdir.py"],
+                doc="subtitles / karaoke: alpha=1 と fontsdir"),
+    ProjectSpec("test113", ["test113_text_layout.py"], needs=("font",),
+                doc="text: line_spacing / text_align / y_align と、text への glow（gbrap）"),
+    ProjectSpec("test114", ["test114_seconds_expr.py"],
+                doc="秒で書く時間: ramp / keyframes_sec / elapsed / remaining"
+                    "（式に t-start がそのまま入る）"),
+    ProjectSpec("test115", ["test115_tint.py"],
+                doc="tint: 色の塗り替え（定数は lutrgb、式は geq。アルファは素通し）"),
+    ProjectSpec("test116", ["test116_duck_hold.py"],
+                doc="duck_under(hold=): 検出用の枝を保持つきの包絡（aeval）へ / "
+                    "video_sequence(...).time() の合成尺",
+                assets=("audio/効果音.mp3", "video/flowerbg_noaudio.mp4")),
     # --- 以下は実レンダ専用（dry_run では踏めない経路） ---
     ProjectSpec("test92", ["test92_formula_scale.py"], snapshot=False,
                 configure=_cfg(width=640, height=360, fps=15), needs=("web",),

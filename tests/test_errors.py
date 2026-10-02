@@ -645,8 +645,10 @@ def check_video_with_time_uses_specified_duration():
                 return False, f"-tがコマンドにない"
             t_idx = cmd.index("-t")
             t_val = float(cmd[t_idx + 1])
-            if t_val != 2.5:
-                return False, f"-tの値が2.5でない: {t_val}"
+            # 焼くのは閉区間の窓を覆う枚数（time(2.5)・30fps なら 76 枚 = 2.533333 秒。
+            # checkpoint.py の _bake_t_arg）。素材の実長（約 5 秒）ではなく time() の値で決まる
+            if t_val != 2.533333:
+                return False, f"-tの値が time(2.5) の 76 枚ぶん（2.533333）でない: {t_val}"
         return True, f"time指定=2.5が正しく使用される"
     finally:
         if os.path.exists(temp_path):
@@ -1870,14 +1872,16 @@ def check_typewriter_bad_cps():
 
 
 def check_counter_float_format():
-    """counter: format=%f（小数）→ ValueError"""
+    """counter: 未対応の変換指定（%s 等）・ゼロ埋めと小数の併用 → ValueError"""
     _mk_project()
-    try:
-        counter(0, 10, format="%.1f")
-        return False, "例外が発生しませんでした"
-    except ValueError as e:
-        msg = str(e)
-        return (True, msg.split("\n")[0]) if "整数" in msg else (False, msg)
+    for fmt, key in (("%s", "変換指定"), ("%08.2f", "併用"), ("%d %d", "1個")):
+        try:
+            counter(0, 10, format=fmt)
+            return False, f"例外が発生しませんでした: {fmt}"
+        except ValueError as e:
+            if key not in str(e):
+                return False, str(e)
+    return True, "未対応の書式を拒否"
 
 
 def check_counter_apostrophe_format():
@@ -2624,7 +2628,7 @@ def check_keyframes_too_many_points():
 
 
 def check_counter_reaches_target():
-    """counter: %{eif}式に四捨五入(+0.5*sign)が入り目標値に到達する"""
+    """counter: 値の進行度が最後のコマで 1 に達し、四捨五入して目標値に到達する"""
     layer = (
         "from scriptvedit import *\n"
         "c = counter(0, 100, format='%d', x=0.5, y=0.5, size=48)\n"
@@ -2638,10 +2642,11 @@ def check_counter_reaches_target():
         p.layer(tmp, priority=0)
         cmd = p.render("_tmp_counter.mp4", dry_run=True)
         s = " ".join(cmd["main"])
-        # 四捨五入項 +0.5 が eif 式に含まれること（100 が表示されるようになる）
-        if "eif" in s and "+0.5" in s:
-            return True, "四捨五入項 +0.5 を確認"
-        return False, f"四捨五入項が見つからない: {s[:160]}"
+        # eif の式が round() で、進行度の分母が 尺 - 1フレーム（4 - 1/30 秒）で
+        # あること（最後のコマで u=1 → 100 が表示される）
+        if "eif" in s and "round(" in s and "/3.966666" in s:
+            return True, "round と 1フレーム短い分母を確認"
+        return False, f"最後のコマで到達する式になっていない: {s[:200]}"
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -4847,7 +4852,7 @@ ALL_TESTS = [
     ("text border式拒否", check_text_border_expr_rejected),
     ("text shadow形状不正", check_text_shadow_bad_shape),
     ("typewriter cps不正", check_typewriter_bad_cps),
-    ("counter 小数format", check_counter_float_format),
+    ("counter 未対応format", check_counter_float_format),
     ("counter アポストロフィformat", check_counter_apostrophe_format),
     ("subtitles ファイル不在", check_subtitles_missing_file),
     ("subtitles 拡張子不正", check_subtitles_bad_ext),
@@ -4899,7 +4904,7 @@ ALL_TESTS = [
     ("audio_sequence crossfade過大", check_audio_sequence_short_crossfade),
     ("move_along点数上限", check_move_along_too_many_points),
     ("keyframes点数上限", check_keyframes_too_many_points),
-    ("counter目標到達(+0.5)", check_counter_reaches_target),
+    ("counter目標到達(最後のコマ)", check_counter_reaches_target),
     ("typewriter半開区間", check_typewriter_halfopen_enable),
     ("ken_burns overshootクランプ", check_ken_burns_overshoot_clamp),
     # --- 合成・時間操作（mask/blend_mode/speed/video_sequence 等） ---
@@ -6087,6 +6092,203 @@ ALL_TESTS += [
     ("flip bool以外", check_flip_non_bool),
     ("未知Transformを拒否", check_unknown_transform_rejected),
     ("sfx at=True拒否", check_sfx_at_bool_rejected),
+]
+
+
+# --- text 系 + 終端フレーム Effect / compute、text_image の引数エラー ---
+
+def _expect_text_image_hint(action, *needles):
+    """action() が text_image() を案内する ValueError になること"""
+    try:
+        action()
+        return False, "例外が発生しませんでした（黙って無視されている）"
+    except ValueError as e:
+        msg = str(e)
+    lacking = [n for n in ("text_image",) + needles if n not in msg]
+    return (False, f"メッセージに {lacking} が無い: {msg}") if lacking else (True, msg)
+
+
+def check_text_terminal_frame_effects_rejected():
+    """text / typewriter / counter <= morph_to / explode_to / assemble_from → ValueError"""
+    import warnings as _warnings
+    _mk_project()
+    img = _require_asset("images/shape_badge.png")
+    makers = (lambda: sv.text("文字", size=48), lambda: sv.typewriter("文字", size=48),
+              lambda: sv.counter(0, 10, size=48))
+    last = ""
+    for make in makers:
+        for name, eff in (("explode_to", lambda: sv.explode_to()),
+                          ("morph_to", lambda: sv.morph_to(Object(img))),
+                          ("assemble_from", lambda: sv.assemble_from(Object(img)))):
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore")
+                ok, last = _expect_text_image_hint(
+                    lambda: make().time(1) <= eff(), name)
+            if not ok:
+                return False, f"{name}: {last}"
+    return True, last
+
+
+def check_text_terminal_effect_rejected_at_plan_time():
+    """effects を直接触った text も、計画時に黙って None を返さず ValueError"""
+    p = _mk_project()
+    t = sv.text("直接", size=48)
+    t.time(1)
+    t.effects.append(Effect("explode_to"))
+    return _expect_text_image_hint(lambda: p._plan_object_checkpoints(t), "explode_to")
+
+
+def check_text_as_terminal_target_rejected():
+    """morph_to(target=text系) / assemble_from(source=text系) → ValueError"""
+    _mk_project()
+    ok, msg = _expect_text_image_hint(lambda: sv.morph_to(sv.text("的", size=48)))
+    if not ok:
+        return ok, msg
+    return _expect_text_image_hint(lambda: sv.assemble_from(sv.text("元", size=48)))
+
+
+def check_text_compute_rejected():
+    """text().compute() → 'text://… Protocol not found' ではなく ValueError"""
+    _mk_project()
+    ok, msg = _expect_text_image_hint(
+        lambda: sv.text("素材化", size=48).compute(), "compute()")
+    if not ok:
+        return ok, msg
+    return _expect_text_image_hint(
+        lambda: sv.counter(0, 5, size=48).compute(1.0), "compute()")
+
+
+def check_text_image_argument_errors():
+    """text_image: 引数エラーは関数名つきの ValueError / TypeError（素の例外を漏らさない）"""
+    pytest.importorskip("PIL", reason="Pillow が無い環境")
+    _mk_project()
+    cases = [
+        (dict(content=""), ValueError, "content が空"),
+        (dict(content="a", align="middle"), ValueError, "align"),
+        (dict(content="a", missing="skip"), ValueError, "missing"),
+        (dict(content="{size=abc|x}", markup=True), ValueError, "size は数値"),
+        (dict(content="{x}", markup=True), ValueError, "書式|文字"),
+        (dict(content="a", styles=["x"]), TypeError, "styles は"),
+        (dict(content=[("a", {"colour": "red"})]), ValueError, "未知の書式キー"),
+        (dict(content="幅", size=100, max_width=20), ValueError, "max_width"),
+    ]
+    for kwargs, exc, needle in cases:
+        kwargs.setdefault("size", 40)
+        try:
+            sv.text_image(**kwargs)
+            return False, f"{kwargs}: 例外が発生しませんでした"
+        except (ValueError, TypeError) as e:
+            msg = str(e)
+            if type(e) is not exc:
+                return False, f"{kwargs}: {type(e).__name__}（期待 {exc.__name__}）: {msg}"
+            if not msg.startswith("text_image:") or needle not in msg:
+                return False, f"{kwargs}: メッセージが不適切: {msg}"
+    return True, f"{len(cases)} 件"
+
+
+ALL_TESTS += [
+    ("text+終端フレームEffect拒否", check_text_terminal_frame_effects_rejected),
+    ("text+終端Effect 計画時も拒否", check_text_terminal_effect_rejected_at_plan_time),
+    ("text をmorph target に不可", check_text_as_terminal_target_rejected),
+    ("text.compute() 拒否", check_text_compute_rejected),
+    ("text_image 引数エラー", check_text_image_argument_errors),
+]
+
+
+# --- tint / 秒で書く式（ramp / keyframes_sec）/ duck_under(hold=) の引数エラー ---
+
+def _expect_each_raises(cases):
+    """cases: [(説明, 呼び出し, 例外型, メッセージに含まれる語)]。全件が期待どおり落ちること"""
+    for label, call, exc, needle in cases:
+        try:
+            call()
+        except exc as e:
+            if needle not in str(e):
+                return False, f"{label}: メッセージが不適切: {e}"
+        except Exception as e:
+            return False, f"{label}: 例外の型が違います: {type(e).__name__}: {e}"
+        else:
+            return False, f"{label}: 例外が発生しませんでした"
+    return True, f"{len(cases)} 件"
+
+
+def check_tint_argument_errors():
+    """tint: 色・amount の範囲・mode の不正値 → ValueError"""
+    return _expect_each_raises([
+        ("未知の色名", lambda: sv.tint("nosuchcolor"), ValueError, "未対応の色名"),
+        ("桁の足りない16進", lambda: sv.tint("#12345"), ValueError, "16進カラー"),
+        ("色が None", lambda: sv.tint(None), ValueError, "色名か16進"),
+        ("amount > 1", lambda: sv.tint("red", 1.5), ValueError, "amount"),
+        ("amount < 0", lambda: sv.tint("red", -0.1), ValueError, "amount"),
+        ("amount が NaN", lambda: sv.tint("red", float("nan")), ValueError, ""),
+        ("未知の mode", lambda: sv.tint("red", mode="screen"), ValueError, "mode"),
+    ])
+
+
+def check_ramp_argument_errors():
+    """ramp: a >= b・負値・非数値・from_end の向き・easing の型"""
+    return _expect_each_raises([
+        ("a > b", lambda: sv.ramp(2, 1), ValueError, "<"),
+        ("a == b", lambda: sv.ramp(1, 1), ValueError, "<"),
+        ("負の秒", lambda: sv.ramp(-1, 1), ValueError, "0 以上の秒"),
+        ("文字列の秒", lambda: sv.ramp("0", 1), ValueError, "0 以上の秒"),
+        ("無限大", lambda: sv.ramp(0, float("inf")), ValueError, "0 以上の秒"),
+        ("from_end で a < b", lambda: sv.ramp(0, 0.5, from_end=True),
+         ValueError, "from_end"),
+        ("easing が文字列", lambda: sv.ramp(0, 1, easing="ease_out_cubic"),
+         TypeError, "イージング関数"),
+    ])
+
+
+def check_keyframes_sec_argument_errors():
+    """keyframes_sec: 点数・奇数個・負の秒・NaN・タプルの形・上限・easing の型"""
+    return _expect_each_raises([
+        ("引数なし", lambda: sv.keyframes_sec(), ValueError, "最低2つ"),
+        ("1点だけ", lambda: sv.keyframes_sec((0, 0)), ValueError, "最低2つ"),
+        ("奇数個の数値", lambda: sv.keyframes_sec(0, 0, 1), ValueError, "偶数個"),
+        ("負の秒", lambda: sv.keyframes_sec((0, 0), (-1, 1)), ValueError, "0 以上の秒"),
+        ("値が NaN", lambda: sv.keyframes_sec((0, 0), (1, float("nan"))),
+         ValueError, "有限の数値"),
+        ("3要素タプル", lambda: sv.keyframes_sec((0, 0), (1, 1, 1)),
+         ValueError, "2要素タプル"),
+        ("129点", lambda: sv.keyframes_sec(*[(i, 0) for i in range(129)]),
+         ValueError, "最大128点"),
+        ("easing が数値", lambda: sv.keyframes_sec((0, 0), (1, 1), easing=3),
+         TypeError, "イージング関数"),
+    ])
+
+
+def check_seconds_expr_without_display_seconds():
+    """秒の式を表示秒の無い文脈で数値評価 → ValueError（誤った値を黙って返さない）"""
+    return _expect_each_raises([
+        ("ramp を素の u で評価", lambda: sv.ramp(1, 2).eval_at(0.5), ValueError, ""),
+        ("elapsed を素の u で評価", lambda: sv.elapsed().eval_at(0.5), ValueError, ""),
+    ])
+
+
+def check_duck_under_hold_errors():
+    """duck_under: hold の負値・文字列・NaN・None → ValueError / TypeError"""
+    _mk_project()
+    v = Object("v.wav")
+    return _expect_each_raises([
+        ("負の hold", lambda: duck_under(v, hold=-1), (ValueError, TypeError), "hold"),
+        ("文字列の hold", lambda: duck_under(v, hold="400"),
+         (ValueError, TypeError), "hold"),
+        ("NaN の hold", lambda: duck_under(v, hold=float("nan")),
+         (ValueError, TypeError), "hold"),
+        ("None の hold", lambda: duck_under(v, hold=None),
+         (ValueError, TypeError), "hold"),
+        ("bool の hold", lambda: duck_under(v, hold=True),
+         (ValueError, TypeError), "hold"),
+    ])
+
+
+ALL_TESTS += [
+    ("tint 引数エラー", check_tint_argument_errors),
+    ("ramp 引数エラー", check_ramp_argument_errors),
+    ("keyframes_sec 引数エラー", check_keyframes_sec_argument_errors),
+    ("秒の式: 表示秒なしの数値評価", check_seconds_expr_without_display_seconds),
+    ("duck_under hold 引数エラー", check_duck_under_hold_errors),
 ]
 
 

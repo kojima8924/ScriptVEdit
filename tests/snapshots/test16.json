@@ -14,7 +14,7 @@
     "-i",
     "assets/audio/bgm_loop.mp3",
     "-i",
-    "__cache__/artifacts/checkpoint/ac9b64e5/06b2db11ea682919.mkv",
+    "__cache__/artifacts/checkpoint/ac9b64e5/7fc31c1333ad4562.mkv",
     "-i",
     "assets/audio/効果音.mp3",
     "-filter_complex",
@@ -36,7 +36,7 @@
     "test16.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/checkpoint/ac9b64e5/06b2db11ea682919.mkv": [
+    "__cache__/artifacts/checkpoint/ac9b64e5/7fc31c1333ad4562.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -60,8 +60,8 @@
       "bgra",
       "-an",
       "-t",
-      "3",
-      "__cache__/artifacts/checkpoint/ac9b64e5/06b2db11ea682919.mkv"
+      "3.033333",
+      "__cache__/artifacts/checkpoint/ac9b64e5/7fc31c1333ad4562.mkv"
     ]
   }
 }

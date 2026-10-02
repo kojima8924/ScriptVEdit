@@ -187,3 +187,29 @@ def outline(width=2, color="white"):
         raise ValueError(f"outline: width は 1〜16 の整数で指定してください: {width!r}")
     _parse_color_rgb(color)  # 構築時に色を検証
     return Effect("outline", width=width, color=color)
+
+
+_TINT_MODES = ("multiply", "fill")
+
+
+def tint(color, amount=1.0, *, mode="multiply"):
+    """色を塗り替えるEffect（アルファは変えない）。白い線画を任意の色にできる。
+
+    color: 色名 or 16進（#RRGGBB / 0xRRGGBB）
+    amount: 効きの強さ 0〜1（0=元のまま / 1=完全に適用）。Expr / lambda なら時間で変わる
+        （定数は lutrgb、式は geq。式のほうが遅い）
+    mode:
+        "multiply"（既定）… 元の色に color を掛ける。白 → color、黒 → 黒のまま、
+            灰色の濃淡は保たれる。tint("black", 0.5) は半分の明るさへ暗くする
+        "fill" … 元の色に関係なく color へ寄せる（黒い線画も color になる。濃淡は消える）
+    color_shift（色相・彩度・明度）では作れない「白 → 赤」をこれで作る。
+    """
+    r, g, b = _parse_color_rgb(color)
+    if mode not in _TINT_MODES:
+        raise ValueError(
+            f"tint: mode は {' / '.join(_TINT_MODES)} のいずれかで指定してください: {mode!r}")
+    a = _resolve_param(amount)
+    if isinstance(a, Const):
+        _require_number("tint", "amount", a.value, 0.0, 1.0)
+    # color は正規化した16進で持つ（"red" と "#ff0000" で同じ鍵・同じ出力にする）
+    return Effect("tint", color=f"#{r:02x}{g:02x}{b:02x}", amount=a, mode=mode)

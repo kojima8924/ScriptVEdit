@@ -46,8 +46,10 @@ __all__ = [
     "explode_to", "assemble_from", "group", "tile",
     "wipe", "zoom", "color_shift", "shake",
     "chroma_key", "vignette", "pixelize", "glow", "lut", "glitch",
-    "perspective_warp", "lens", "ken_burns", "drop_shadow", "outline",
+    "perspective_warp", "lens", "ken_burns", "drop_shadow", "outline", "tint",
     "slideshow", "transition", "video_sequence",
+    # 絵の列を1本の動画（入力1本）にする
+    "stills", "frames",
     # 合成・コンポジション
     "mask", "mask_wipe", "opacity", "blend_mode", "rounded", "pip",
     "blur_background_fill", "progress_bar",
@@ -98,10 +100,14 @@ __all__ = [
     # シーケンス・キーフレーム
     "phase", "sequence_param", "repeat", "bounce", "alternate", "staircase",
     "keyframes",
+    # 秒で書く時間（表示区間の中の経過秒）
+    "elapsed", "remaining", "ramp", "keyframes_sec",
     # テンプレートラッパー
     "subtitle", "subtitle_box", "bubble", "diagram",
     # 数式（KaTeX同梱）
     "formula", "formula_lines",
+    # 文字を透過 PNG に焼く（PIL）
+    "text_image",
     # 図形ビルダー
     "circle", "rect", "arrow", "label", "spotlight",
     # プラグイン機構
@@ -151,7 +157,8 @@ _preload("scriptvedit.state")
 from scriptvedit.expr import (  # noqa: F401
     Const, E, Expr, P, PI, Var, abs, acos, and_, asin, atan, atan2, between, case,
     cbrt, ceil, clamp, clip, cos, cosh, deg2rad, eq_, exp, floor, frac, gt, gte, if_, lerp,
-    log, log10, lt, lte, max, min, mod, neq, not_, or_, pow, rad2deg, random, round, sign,
+    elapsed, log, log10, lt, lte, max, min, mod, neq, not_, or_, pow, rad2deg, random,
+    remaining, round, sign,
     sin, sinh, smoothstep, sqrt, step, tan, tanh, trunc
 )
 from scriptvedit.easing import (  # noqa: F401
@@ -162,7 +169,7 @@ from scriptvedit.easing import (  # noqa: F401
     ease_in_out_sine, ease_in_quad, ease_in_quart, ease_in_quint, ease_in_sine, ease_out_back,
     ease_out_bounce, ease_out_circ, ease_out_cubic, ease_out_elastic, ease_out_expo,
     ease_out_quad, ease_out_quart, ease_out_quint, ease_out_sine, ease_spring, keyframes,
-    linear, phase, repeat, sequence_param, staircase, steps
+    keyframes_sec, linear, phase, ramp, repeat, sequence_param, staircase, steps
 )
 _preload("scriptvedit.validate")
 # FFmpegError は利用者が except で捕まえる公開例外（レンダ失敗の原因と
@@ -197,7 +204,7 @@ from scriptvedit.effects.terminal import (  # noqa: F401
 )
 from scriptvedit.effects.visual import (  # noqa: F401
     chroma_key, drop_shadow, glitch, glow, ken_burns, lens, lut, outline, perspective_warp,
-    pixelize, vignette
+    pixelize, tint, vignette
 )
 from scriptvedit.effects.composite import (  # noqa: F401
     blend_mode, blur_background_fill, mask, mask_wipe, opacity, pip, progress_bar, rounded
@@ -211,11 +218,17 @@ from scriptvedit.audio import (  # noqa: F401
 from scriptvedit.media import (  # noqa: F401
     slideshow, transition, video_sequence
 )
+from scriptvedit.stillseq import (  # noqa: F401
+    frames, stills
+)
 from scriptvedit.web import (  # noqa: F401
     arrow, bubble, circle, diagram, label, rect, slide, spotlight, subtitle, subtitle_box
 )
 from scriptvedit.formula import (  # noqa: F401
     formula, formula_lines
+)
+from scriptvedit.textimage import (  # noqa: F401
+    text_image
 )
 from scriptvedit.plugins import (  # noqa: F401
     PluginError, effect_plugin, load_plugin, load_plugins, plugin_manifest, unregister_plugin

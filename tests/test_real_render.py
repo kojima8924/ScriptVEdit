@@ -86,6 +86,16 @@ def _assert_output(path):
         return
     assert os.path.exists(path), f"出力が生成されていません: {path}"
     assert os.path.getsize(path) > 0, f"出力が空です: {path}"
+    if path.endswith(".webp"):
+        # ffmpeg / ffprobe はアニメーション WebP をデコードできない
+        # （"image data not found"）。コンテナの構造でコマの有無を確かめる。
+        with open(path, "rb") as f:
+            data = f.read()
+        assert data[:4] == b"RIFF" and data[8:12] == b"WEBP", (
+            f"WebP のヘッダがありません: {path}")
+        assert data.count(b"ANMF") > 0 or b"VP8" in data[12:], (
+            f"WebP にコマがありません: {path}")
+        return
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
          "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", path],

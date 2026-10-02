@@ -24,8 +24,8 @@ import builtins as _builtins
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _is_bakeable, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _split_ops, _validate_morph_position
 from scriptvedit.ffmpeg import _decoder_input_args
-from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions, _optimize_filter_chain
-from scriptvedit.objects import Object
+from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions, _hold_source_filters, _optimize_filter_chain
+from scriptvedit.objects import Object, _text_terminal_effect_message
 from scriptvedit.state import _BAKE_PIX_FMT, _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS, _detect_media_type
 
 
@@ -70,7 +70,8 @@ def _build_checkpoint_video_cmd(source, media_type, transforms, effects,
     base_dims = _get_base_dimensions(temp)
     filters = _build_transform_filters(temp)
     pre_filters = _build_video_pre_filters(temp)
-    filters = pre_filters + filters
+    # stills() / frames() の生成物は最後のコマを保持してから焼く（-t が尺を切る）
+    filters = pre_filters + _hold_source_filters(source) + filters
     eff_filters, _ = _build_effect_filters(temp, 0, dur, base_dims=base_dims)
     filters.extend(eff_filters)
     filters = _optimize_filter_chain(filters)
@@ -90,15 +91,95 @@ def _build_checkpoint_video_cmd(source, media_type, transforms, effects,
         # 実レンダのコマンドが食い違う**。加えて -vf は映像しか加工しない
         # ため、trim をベイクしても音声は切られず A/V がずれていた。
         "-an",
-        "-t", str(dur), cache_path,
+        "-t", _bake_t_arg(dur, fps), cache_path,
     ])
     return cmd
 
 
-def _build_morph_webm_cmd(frame_pattern, cache_path, duration, fps):
+def _bake_frame_count(fps, dur):
+    """動画チェックポイントに焼く枚数 = ceil(fps*尺 + 0.5)。
+
+    overlay の enable 窓は閉区間 between(t, 開始, 開始+尺) で、開始は tpad が
+    「開始に最も近いフレーム」へ送る。窓に入る枚数は
+    floor(fps*(開始+尺)) - round(fps*開始) + 1 で、開始の端数が半フレーム未満のとき
+    最大 ceil(fps*尺 + 0.5) 枚になる（尺が 30 フレームちょうどなら 31 枚、
+    30.6 フレームなら 32 枚）。1e-9 は 0.1*30 = 3.0000000000000004 のような
+    浮動小数の端数で1枚増えるのを防ぐ。
+    """
+    return _builtins.max(
+        1, int(_math.ceil(float(fps) * float(dur) + 0.5 - 1e-9)))
+
+
+def _bake_t_arg(dur, fps):
+    """動画チェックポイントの -t に書く尺（_bake_frame_count 枚ぶん）。
+
+    -t を表示尺そのままにすると、焼いた動画は round(fps*尺) 枚で（FFmpeg 8 実測:
+    出力の -t は「枚数 = t*fps の四捨五入」で切る。-t 1.0 → 30 枚、1.016667 → 31 枚、
+    1.036667 → 31 枚、1.05 → 32 枚）、閉区間の窓の最後の1枚（開始 + 尺ちょうどの
+    フレーム）が足りず、EOF（eof_action=pass）で背景が1フレームだけ見えた
+    （実測: 30fps・time(1) の静止画 + fade を焼くと 30 枚。焼かない場合は 31 枚映る）。
+    各プロジェクトは同じ絵の静止画を2フレーム手前から敷いて隠していた。
+    必要な枚数 N を N/fps 秒として書く（四捨五入の境目から半フレーム離れるので
+    浮動小数の誤差で枚数が変わらない）。増える1枚は u=1（Effect の到達点）で
+    評価される。フィルタ側の尺（u の正規化）は変えない。小数6桁へ丸めて端数を書かない。
+    素材が動画で先に終わる場合は増えない（焼かない動画と同じ扱い）。
+    """
+    return str(round(_bake_frame_count(fps, dur) / float(fps), 6))
+
+
+def _terminal_frame_plan(op, dur, fps):
+    """終端フレーム生成Effect の枚数の内訳 (n_delay, n_active, n_stop) を返す。
+
+    焼く動画は「最初のコマの複製 n_delay 枚 + 生成するコマ n_active 枚 +
+    最後のコマの複製 n_stop 枚」で、合計は常に _morph_frame_count + 1
+    （閉区間の enable 窓を覆う枚数。_build_morph_webm_cmd の docstring 参照）。
+    PIL で作るのは n_active 枚だけで、複製は ffmpeg の tpad が行う
+    （静止している間のコマを粒子計算・距離場計算で焼かない）。
+
+    op.params の delay（動き出すまでの秒）/ duration（動く秒数。None は残り全部）で
+    決まる。どちらも無ければ (0, ceil(fps*尺), 1) ＝ 従来の形。
+    尺に収まらない指定は ValueError（dry_run でも実レンダでも同じ所で止める）。
+
+    delay / duration を指定した計画では、生成するコマを必ず2枚以上にする
+    （最初のコマ＝進行度 0、最後のコマ＝進行度 1）。1枚だと唯一のコマが進行度 0
+    （元の絵）で、それが「最後のコマ」として尺の終わりまで複製され、到達点
+    （モーフ先の絵・散り終えた状態）に一度もならない（duration が1フレーム以下、
+    delay が尺の終わりぎりぎりのときに起きた）。足りない分は複製を減らして作る
+    （delay が尺の終わりに掛かるときは待ちを1コマ詰める）。合計の枚数は変わらない。
+    指定なしで尺そのものが1フレーム以下の Object は従来どおり1枚（元の絵）だけ作る。
+    """
+    n_base = _morph_frame_count(fps, dur)
+    params = getattr(op, "params", None) or {}
+    delay = params.get("delay") or 0
+    active = params.get("duration")
+    if not delay and active is None:
+        return 0, n_base, 1
+    name = getattr(op, "name", "終端フレーム生成Effect")
+    if delay >= dur:
+        raise ValueError(
+            f"{name}: delay={delay} が Object の尺 {dur} 秒以上です"
+            f"（動く時間が残りません。time() を伸ばすか delay を縮めてください）")
+    if active is not None and delay + active > dur + 1e-9:
+        raise ValueError(
+            f"{name}: delay + duration = {delay + active} 秒が Object の尺 "
+            f"{dur} 秒を超えています（time() を伸ばすか値を縮めてください）")
+    n_total = n_base + 1
+    # 動く区間に2枚残す（n_total は必ず2以上）
+    n_delay = _builtins.min(int(_builtins.round(float(fps) * delay)), n_total - 2)
+    if active is None:
+        n_active = n_base - n_delay
+    else:
+        n_active = int(_math.ceil(float(fps) * active - 1e-9))
+    n_active = _builtins.max(2, _builtins.min(n_active, n_total - n_delay))
+    return n_delay, n_active, n_total - n_delay - n_active
+
+
+def _build_morph_webm_cmd(frame_pattern, cache_path, duration, fps, op=None):
     """PNG連番 → alpha映像 のffmpegコマンドを構築
 
     末尾に1フレーム複製して出力する（tpad=stop_mode=clone）。
+    op に delay / duration があれば、最初のコマ・最後のコマの複製枚数が変わる
+    （_terminal_frame_plan）。
 
     理由: overlay の enable 窓は閉区間 between(t, start, start+dur) で、
     覆うフレーム数は floor(fps*dur)+1。一方このクリップは
@@ -109,10 +190,20 @@ def _build_morph_webm_cmd(frame_pattern, cache_path, duration, fps):
     複製フレームは到達先画像そのものなので、伸ばしても見た目は変わらない。
     窓の外に出る余剰フレームは enable で表示されない。
     """
-    n_frames = _morph_frame_count(fps, duration)
+    n_delay, n_active, n_stop = _terminal_frame_plan(op, duration, fps)
+    if n_delay == 0 and n_stop == 1:
+        tpad = "tpad=stop_mode=clone:stop=1"
+    else:
+        opts = []
+        if n_delay:
+            opts.append(f"start={n_delay}:start_mode=clone")
+        if n_stop:
+            opts.append(f"stop={n_stop}:stop_mode=clone")
+        tpad = "tpad=" + ":".join(opts) if opts else "null"
+    n_frames = n_delay + n_active + n_stop - 1
     return ["ffmpeg", "-y", "-framerate", str(fps),
             "-i", frame_pattern,
-            "-vf", "tpad=stop_mode=clone:stop=1",
+            "-vf", tpad,
             "-c:v", "ffv1", "-level", "3",
             # morphのPNG連番(RGBA)をそのまま格納する。yuva444pだとここで
             # RGBA→YUV変換が入り、PILの描画結果と往復一致しなくなる
@@ -147,8 +238,15 @@ def _checkpoint_bake_duration(project, obj, original_source):
     has_time_live = any(
         getattr(e, "name", None) in _TIME_LIVE_EFFECTS for e in obj.effects)
     if is_video and has_time_live:
-        info = project._probe_media(original_source)
-        base = info.get("duration") if info else None
+        # 生成物（stills / frames / slideshow 等）は生成コマンドを組んだ時点の合成尺を
+        # 使い、probe しない。probe は未生成（cold）だと失敗して下の _resolved_length
+        # （同じ合成尺）へ落ち、生成済み（warm）だとコンテナが丸めた値（46/30 秒 →
+        # 1.533333）を返すので、ベイク尺 = チェックポイントの鍵が cold / warm で
+        # 食い違う（実測: stills + speed + fade の dry_run が実レンダの前後で不一致）。
+        base = getattr(obj, "_generated_length", None)
+        if base is None:
+            info = project._probe_media(original_source)
+            base = info.get("duration") if info else None
         if base is None:
             base = getattr(obj, "_resolved_length", None) or obj.duration
         if base:
@@ -194,7 +292,15 @@ def _plan_object_checkpoints(project, obj):
       resume_args: _find_resume_point へそのまま渡す引数タプル
     """
     if obj.media_type == "text":
-        return None  # テキスト系は実体ファイルを持たずベイク対象外
+        # テキスト系は実体ファイルを持たずベイク対象外。終端フレーム Effect
+        # （morph_to / explode_to / assemble_from）はベイクでしか実現できないので、
+        # ここで黙って None を返すと Effect ごと無視される。構築時
+        # （Object._append_effect）にも同じ検査があり、ここは effects を直接
+        # 触る経路のための最後の砦。
+        for e in obj.effects:
+            if e.name in _TERMINAL_FRAME_EFFECTS:
+                raise ValueError(_text_terminal_effect_message(e.name))
+        return None
     ops = _build_unified_ops(obj)
     bakeable_ops, live_ops = _split_ops(ops)
     if not bakeable_ops:
@@ -218,6 +324,7 @@ def _plan_object_checkpoints(project, obj):
     current_source = original_source
     current_media_type = obj.media_type
     steps = []
+    terminal_bake = None   # 終端フレーム生成Effect の (op, 入力画像)。audit が読む
 
     def _cp_builder(src, mt, transforms, effects, path, cp_dur):
         """チェックポイントコマンドの遅延ビルダー（現在値をクロージャへ固定）"""
@@ -283,15 +390,17 @@ def _plan_object_checkpoints(project, obj):
                     current_source, sp_idx, "モーフ入力フレーム抽出")
                 current_media_type = "image"
             morph_path = _morph_cache_path(current_source, sp_op, dur, fps)
+            _terminal_frame_plan(sp_op, dur, fps)   # 尺に収まらない指定はここで止める
+            terminal_bake = (sp_op, current_source)
             steps.append({
                 "kind": "morph", "sp_idx": sp_idx, "path": morph_path,
                 "label": "モーフキャッシュ保存", "policy": policy,
                 "op": sp_op, "src": current_source, "dur": dur, "fps": fps,
-                "build_cmd": (lambda mp=morph_path:
+                "build_cmd": (lambda mp=morph_path, o=sp_op:
                               _build_morph_webm_cmd(
                                   os.path.join("__morph_frames__",
                                                "frame_%05d.png"),
-                                  mp, dur, fps)),
+                                  mp, dur, fps, o)),
             })
             current_source = morph_path
             current_media_type = "video"
@@ -311,15 +420,17 @@ def _plan_object_checkpoints(project, obj):
                 img_path = _plan_frame_extract(
                     img_path, sp_idx, "粒子入力フレーム抽出")
             part_path = _particle_cache_path(img_path, sp_op, dur, fps)
+            _terminal_frame_plan(sp_op, dur, fps)   # 尺に収まらない指定はここで止める
+            terminal_bake = (sp_op, img_path)
             steps.append({
                 "kind": "particle", "sp_idx": sp_idx, "path": part_path,
                 "label": "粒子キャッシュ保存", "policy": policy,
                 "op": sp_op, "src": img_path, "dur": dur, "fps": fps,
-                "build_cmd": (lambda pp=part_path:
+                "build_cmd": (lambda pp=part_path, o=sp_op:
                               _build_morph_webm_cmd(
                                   os.path.join("__particle_frames__",
                                                "frame_%05d.png"),
-                                  pp, dur, fps)),
+                                  pp, dur, fps, o)),
             })
             current_source = part_path
             current_media_type = "video"
@@ -351,6 +462,7 @@ def _plan_object_checkpoints(project, obj):
                     + [op for t, op in live_ops if t == "effect"]),
         "dur": dur,
         "live_effects": [op for t, op in live_ops if t == "effect"],
+        "terminal_bake": terminal_bake,
     }
     return {
         "steps": steps,
@@ -383,6 +495,11 @@ def _apply_checkpoint_final_state(project, obj, final):
             info = project._probe_media(audio_source)
             obj._has_audio = bool(info.get("has_audio")) if info else False
         obj._audio_source = audio_source
+    if final.get("terminal_bake") is not None:
+        obj._terminal_bake = final["terminal_bake"]
+    if obj._pre_checkpoint_ops is None:
+        # 焼く前の op を控える（p.audit() が text_image の画面上の実寸を求めるのに使う）
+        obj._pre_checkpoint_ops = (list(obj.transforms), list(obj.effects))
     obj.source = final["source"]
     obj.media_type = final["media_type"]
     obj.transforms = list(final["transforms"])

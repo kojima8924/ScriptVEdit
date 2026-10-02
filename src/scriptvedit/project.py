@@ -20,14 +20,14 @@ from scriptvedit.context import (
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.audio import _duck_targets, _probe_audio_length
 from scriptvedit.cache import _is_pending_cache_path, _resolve_layer_cache_quality, _web_cache_path
-from scriptvedit.expr import Expr, max, min
+from scriptvedit.expr import Expr, _UValue, max, min
 from scriptvedit.ffmpeg import FFmpegError, _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _normalize_ffmpeg_cmd, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
-from scriptvedit.filters.audio import _MIX_AUDIO_FORMAT, _SIDECHAIN_FORMAT, _SIDECHAIN_MIX_FORMAT, _build_audio_effect_filters, _build_audio_pre_filters
+from scriptvedit.filters.audio import _MIX_AUDIO_FORMAT, _SIDECHAIN_FORMAT, _SIDECHAIN_MIX_FORMAT, _build_audio_effect_filters, _build_audio_pre_filters, _sidechain_hold_filter
 from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _get_base_dimensions, _optimize_filter_chain, _unwrap_raw_stream_ref, _visible_window
 from scriptvedit.objects import Object, _web_frames_dir
 from scriptvedit.assets import resolve_layer_path
 from scriptvedit.plugins import _autoload_plugins
-from scriptvedit.state import _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _NORMALIZE_AUDIO_MODES, _PRESETS, _detect_media_type, _suggest_hint
+from scriptvedit.state import _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _NORMALIZE_AUDIO_MODES, _PRESETS, _TERMINAL_TIMING_KEYS, _detect_media_type, _suggest_hint
 from scriptvedit.timeline import (
     Pause, Scene, _AnchorMarker, _ScenePad, _check_until_zero_duration)
 from scriptvedit.validate import _require_number, _require_time, _validate_ffmpeg_color
@@ -41,7 +41,7 @@ from scriptvedit.parallel import _parallel_chunk_bounds, _parallel_chunk_count, 
 from scriptvedit.loudness import _LINEAR_GAIN_PLACEHOLDER, _LOUDNESS_MEASURE_FILTER, _collect_loudness_cmds, _ensure_linear_gain, _format_gain_db, _processing_peak
 from scriptvedit.checkpoint import (
     _build_morph_webm_cmd, _collect_checkpoint_cmds, _morph_frame_count,
-    _step_context,
+    _step_context, _terminal_frame_plan,
     _apply_checkpoint_final_state as _apply_checkpoint_final_state_impl,
     _ensure_checkpoints as _ensure_checkpoints_impl,
     _plan_object_checkpoints as _plan_object_checkpoints_impl,
@@ -83,6 +83,9 @@ class Project:
         self.duration = None
         self._configured_duration = None
         self.background_color = "black"
+        # configure(background_color=...) で明示されたか（audit が「単色の背景の上の
+        # 文字」と判断してよいかの材料。既定の黒のままなら背景は未定とみなす）
+        self._background_color_set = False
         self.objects = []
         self._layers = []  # [(start_idx, end_idx, priority)]
         self._anchors = {}  # anchor name → time
@@ -155,6 +158,7 @@ class Project:
         if "background_color" in kwargs:
             kwargs["background_color"] = _validate_ffmpeg_color(
                 "configure", kwargs["background_color"])
+            self._background_color_set = True
         # width/height: 正の整数（0や負はFFmpegの s=0x720 等で失敗するため構築時に弾く）
         for key in ("width", "height"):
             if key in kwargs:
@@ -753,13 +757,20 @@ class Project:
         self._layer_unknown_audio_sources[filename] = unknown_audio_sources
 
     def _fill_auto_durations(self, start_idx, end_idx):
-        """duration_auto=Trueのオブジェクトにlength()でdurationを確定"""
+        """duration_auto=Trueのオブジェクトにlength()でdurationを確定
+
+        video_sequence の仮の尺（Object._duration_provisional）もここで入れ直す
+        （生成後に足した speed / trim / compute(duration=) を尺へ反映する）。
+        入れ直すのは1回だけ: チェックポイントが時間系 Effect を焼いて外した後に
+        もう一度 length() を取ると、尺が元へ戻ってしまう。
+        """
         for obj in self.objects[start_idx:end_idx]:
             if (isinstance(obj, Object)
                     and obj._duration_auto
-                    and obj.duration is None
+                    and (obj.duration is None or obj._duration_provisional)
                     and obj._until_anchor is None):
                 obj.duration = obj.length()
+                obj._duration_provisional = False
 
     def _calc_total_duration(self):
         """各レイヤーの最大終了時刻を返す（show含む）"""
@@ -1047,7 +1058,10 @@ class Project:
         if strict:
             from importlib import import_module as _import_module
             _sva = _import_module("scriptvedit.audit")
-            warns = [f for f in _sva.audit_project(self)
+            # 透過出力（alpha=True・連番PNG）では background_color が使われないので、
+            # 「単色の背景の上の文字」の格下げをさせない
+            warns = [f for f in _sva.audit_project(
+                         self, transparent=self._output_is_transparent(output_path))
                      if f["severity"] == "warning"]
             if warns:
                 raise RuntimeError(
@@ -1132,7 +1146,8 @@ class Project:
         audit_line = None
         try:
             from importlib import import_module as _import_module
-            _findings = _import_module("scriptvedit.audit").audit_project(self)
+            _findings = _import_module("scriptvedit.audit").audit_project(
+                self, transparent=self._output_is_transparent(output_path))
             if _findings:
                 _w = sum(1 for f in _findings if f["severity"] == "warning")
                 _i = sum(1 for f in _findings if f["severity"] == "info")
@@ -1215,6 +1230,13 @@ class Project:
         if out_html is not None:
             return _svi.render_timeline(self, out_html, title=title)
         return _svi.report_text(self)
+
+    def _output_is_transparent(self, output_path):
+        """この出力が透過（背景が background_color でなく透明）になるか。
+
+        alpha=True の webm / webp と連番 PNG（常に透過）が該当する。
+        render() が audit へ渡し、text-no-decoration の格下げを止めるのに使う。"""
+        return bool(self._resolve_output_format(output_path)["alpha"])
 
     def audit(self, *, strict=False, quiet=False):
         """動画の品質lint。findings のリストを返す（レンダはしない）。
@@ -1390,28 +1412,44 @@ class Project:
         fps = step["fps"]
         path = step["path"]
         with tempfile.TemporaryDirectory() as tmpdir:
-            n_frames = _morph_frame_count(fps, dur)
+            # 作るのは動く区間のコマだけ。delay の間と duration の後のコマは
+            # ffmpeg が最初・最後のコマを複製する（_terminal_frame_plan）
+            _n_delay, n_frames, _n_stop = _terminal_frame_plan(op, dur, fps)
+            if n_frames == _morph_frame_count(fps, dur):
+                active_sec = dur
+            else:
+                active_sec = n_frames / float(fps)
             # blend Exprを数値関数に変換
             blend_expr = op.params.get("blend")
             if blend_expr is not None and isinstance(blend_expr, Expr):
-                blend_fn = lambda t, _e=blend_expr: _e.eval_at(t)
+                # _UValue: 秒で書いた式（ramp 等）が表示秒を読めるようにする
+                blend_fn = lambda t, _e=blend_expr, _d=active_sec: _e.eval_at(_UValue(t, _d))
             else:
                 blend_fn = None
-            gen_kw = {k: v for k, v in op.params.items() if k != "blend"}
+            gen_kw = {k: v for k, v in op.params.items()
+                      if k != "blend" and k not in _TERMINAL_TIMING_KEYS}
             if step["kind"] == "morph":
                 from scriptvedit.morph import generate_rgba_frames
-                generate_rgba_frames(
+                crossfade = generate_rgba_frames(
                     step["src"], op._morph_target.source,
                     tmpdir, n_frames, blend_fn=blend_fn, **gen_kw)
+                if crossfade:
+                    # 生成は成功するが絵は意図と違う（形が動かない）ので末尾にも再掲する
+                    _warn(self, f"morph_to（{os.path.basename(str(step['src']))} → "
+                                f"{os.path.basename(str(op._morph_target.source))}）: "
+                                f"{crossfade}")
             else:
                 from scriptvedit.morph import (generate_explode_frames,
                                    generate_assemble_frames)
                 gen = (generate_explode_frames if op.name == "explode_to"
                        else generate_assemble_frames)
-                gen(step["src"], tmpdir, n_frames, blend_fn=blend_fn, **gen_kw)
+                # 自動 expand（expand 省略）の上限に画面寸法を渡す。素材の中心が
+                # 画面内にある限り、画面の外になる範囲までキャンバスを広げない
+                gen(step["src"], tmpdir, n_frames, blend_fn=blend_fn,
+                    expand_limit=(self.width, self.height), **gen_kw)
             frame_pattern = os.path.join(tmpdir, "frame_%05d.png")
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            cmd = _build_morph_webm_cmd(frame_pattern, path, dur, fps)
+            cmd = _build_morph_webm_cmd(frame_pattern, path, dur, fps, op)
             print(f"{step['label']}: {path}")
             _run_ffmpeg_to_cache(cmd, path, timeout=600,
                                  context=_step_context(step, obj))
@@ -1928,7 +1966,19 @@ class Project:
                 # sidechaincompress はサイドチェイン入力の EOF で
                 # メイン(BGM)も終端しうる。検出用枝のみ無音で
                 # 延長し、ナレーション終了後は原音量で継続させる。
-                if len(taps) == 1:
+                p = duck.params
+                # hold（保持）: 検出用の枝を保持つきの包絡へ置き換える。包絡は
+                # 1本のモノラルで作るので、相手が1つでも 48kHz モノラルへまとめる。
+                # apad の**後**に置く（相手が止んだ後の無音の間も保持を数えるため）
+                hold = p.get("hold", 0)
+                hold_tail = ""
+                if hold:
+                    hold_tail = "," + _sidechain_hold_filter(
+                        p["threshold"], p["attack"], p["release"], hold)
+                if len(taps) == 1 and hold:
+                    filter_parts.append(
+                        f"{taps[0]}{_SIDECHAIN_MIX_FORMAT},apad{hold_tail}[dside{ai}]")
+                elif len(taps) == 1:
                     # 相手が1つ: チャンネル構成は素材のまま、周波数だけ本線へ揃える
                     filter_parts.append(
                         f"{taps[0]}{_SIDECHAIN_FORMAT},apad[dside{ai}]")
@@ -1946,9 +1996,8 @@ class Project:
                         side_refs.append(mono_ref)
                     filter_parts.append(
                         f"{''.join(side_refs)}amix=inputs={len(side_refs)}"
-                        f":normalize=0,apad[dside{ai}]")
+                        f":normalize=0,apad{hold_tail}[dside{ai}]")
                 my_ref = audio_labels[ai]
-                p = duck.params
                 filter_parts.append(
                     f"{my_ref}[dside{ai}]sidechaincompress="
                     f"threshold={p['threshold']}:ratio={p['ratio']}"

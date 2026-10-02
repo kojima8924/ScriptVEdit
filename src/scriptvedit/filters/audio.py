@@ -7,7 +7,7 @@ import math as _math
 from scriptvedit.context import current_project
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.expr import Const
+from scriptvedit.expr import Const, _UStr
 
 
 # 音声を混ぜる前に全入力を揃える共通形式（48kHz・ステレオ・float planar）。
@@ -38,6 +38,44 @@ _SIDECHAIN_FORMAT = "aformat=sample_fmts=fltp:sample_rates=48000"
 #   ステレオは (L+R)/2 になり、link=average の検出（|L| と |R| の平均）と
 #   左右が同相の音で一致する。モノラルは変換されず元の音量のまま。
 _SIDECHAIN_MIX_FORMAT = "aresample=48000:ochl=mono:rematrix_maxval=1"
+
+
+# duck_under(hold=…) の包絡を作るときのサンプリング周波数（_SIDECHAIN_MIX_FORMAT の出力）
+_SIDECHAIN_HOLD_RATE = 48000
+
+# hold 中に保つ「直前の発声の平均的な検出レベル」の時定数（秒）
+_SIDECHAIN_HOLD_AVG_SEC = 0.2
+
+
+def _sidechain_hold_filter(threshold, attack, release, hold):
+    """duck_under の検出用枝（48kHz モノラル・apad 済み）に保持つきの包絡を作る aeval。
+
+    sidechaincompress には保持（hold）が無く、release だけでは読点や文の間
+    （0.3〜0.6 秒）のたびに BGM が戻りかける。ここで検出用の枝そのものを
+    「保持つきの包絡」（正の直流に近い信号）へ置き換えてから渡す。
+    aeval の st() / ld() の変数はサンプルをまたいで残る（FFmpeg 8 で実測）ので、
+    1サンプルごとに次の3つを更新する:
+      ld(0) … 包絡 s（二乗値）。sidechaincompress（detection=rms）と同じ一次の追従
+              s += (x² − s) × (x² > s ? ka : kr)、ka / kr = 1/(ms × rate / 4000)
+      ld(1) … 保持の残りサンプル数。s が threshold² を超えている間は hold へ巻き戻す
+      ld(2) … 発声中の s の平均 m（時定数 _SIDECHAIN_HOLD_AVG_SEC）。保持が切れたら 0
+    出力は sqrt(max(s, m))。発声中は s がそのまま出るので下げ幅は hold 無しと
+    ほぼ同じ（谷が m まで埋まる分だけ実測で約 1dB 深い）。相手が止むと m を
+    hold ms だけ保ち、その後 0 へ落ちて sidechaincompress の release で戻る。
+    式の中の「*0+」は、st() の戻り値を捨てて順に評価させるための書き方。
+    """
+    rate = _SIDECHAIN_HOLD_RATE
+    ka = _builtins.min(1.0, 1.0 / (attack * rate / 4000.0)) if attack > 0 else 1.0
+    kr = _builtins.min(1.0, 1.0 / (release * rate / 4000.0)) if release > 0 else 1.0
+    km = 1.0 / (_SIDECHAIN_HOLD_AVG_SEC * rate)
+    thr2 = threshold * threshold
+    n = int(_builtins.round(hold * rate / 1000.0))
+    expr = (
+        f"st(0\\,ld(0)+(val(0)*val(0)-ld(0))*if(gt(val(0)*val(0)\\,ld(0))\\,{ka!r}\\,{kr!r}))*0"
+        f"+st(1\\,if(gt(ld(0)\\,{thr2!r})\\,{n}\\,ld(1)-1))*0"
+        f"+st(2\\,if(gt(ld(1)\\,0)\\,ld(2)+(ld(0)-ld(2))*if(gt(ld(0)\\,{thr2!r})\\,{km!r}\\,0)\\,0))*0"
+        f"+sqrt(max(ld(0)\\,ld(2)))")
+    return f"aeval='{expr}':c=same"
 
 
 def _atempo_chain_rates(rate):
@@ -131,7 +169,9 @@ def _build_audio_effect_filters(obj, dur):
     for e in obj.audio_effects:
         if e.name == "avolume":
             value_expr = e.params.get("value", Const(1))
-            u_expr = f"clip({_VOLUME_T_EXPR}/{dur}\\,0\\,1)"
+            # _UStr: 秒で書く式（elapsed / ramp / keyframes_sec）用に経過秒も渡す
+            u_expr = _UStr(f"clip({_VOLUME_T_EXPR}/{dur}\\,0\\,1)", dur,
+                           sec=f"clip({_VOLUME_T_EXPR}\\,0\\,{dur})")
             ffmpeg_str = value_expr.to_ffmpeg(u_expr)
             if not isinstance(value_expr, Const):
                 # 時間で変わる音量は、フレームを細かく刻んでから評価する。

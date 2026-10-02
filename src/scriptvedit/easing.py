@@ -5,7 +5,8 @@ import math as _math
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.effects.paths import _MAX_PATH_POINTS, _piecewise_scalar_expr
-from scriptvedit.expr import Const, E, _to_expr, abs, clip, cos, floor, if_, lerp, lt, mod, pow, sin, sqrt
+from scriptvedit.expr import Const, E, _to_expr, abs, clip, cos, elapsed, floor, if_, lerp, lt, mod, pow, remaining, sin, sqrt
+from scriptvedit.state import _NAMED_EASINGS
 
 
 # --- イージング関数 ---
@@ -180,6 +181,14 @@ def ease_in_out_bounce(t):
     branch1 = (Const(1) - ease_out_bounce(Const(1) - Const(2) * t)) / Const(2)
     branch2 = (Const(1) + ease_out_bounce(Const(2) * t - Const(1))) / Const(2)
     return if_(lt(t, 0.5), branch1, branch2)
+
+# 名前で指定できるイージング（counter(easing="ease_out_cubic") 等）を登録する。
+# ここより上で定義した「u を1つ受け取る」関数だけが対象。この下の
+# ease_cubic_bezier / ease_spring は関数を返すファクトリなので名前では渡せない。
+_NAMED_EASINGS.update({
+    _name: _fn for _name, _fn in list(globals().items())
+    if callable(_fn) and (_name == "linear" or _name.startswith("ease_"))})
+
 
 # Cubic Bezier (CSS互換)
 def ease_cubic_bezier(x1, y1, x2, y2, segments=16):
@@ -416,3 +425,92 @@ def keyframes(*args, easing=None):
         # 区分線形補間の実体は effects/paths の共通実装（生成される Expr は同一）
         return _piecewise_scalar_expr(u, points, easing)
     return _inner
+
+
+# --- 秒で書く区間・キーフレーム ---
+
+def _require_seconds(func, name, value):
+    """秒の引数（0 以上の有限の数値）を検証する"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or not _math.isfinite(value) or value < 0:
+        raise ValueError(
+            f"{func}: {name} は 0 以上の秒（数値）で指定してください: {value!r}")
+
+
+def ramp(a, b, easing=None, *, from_end=False):
+    """表示区間の中の「a 秒から b 秒の間に 0→1」になる Expr を返す。
+
+    a 秒より前は 0、b 秒より後は 1。秒は Object の表示開始から数える。
+    u（0..1）で書く phase() と違い、表示秒を変えても動く時刻が変わらない。
+    戻り値は Expr なので、そのまま Effect の引数にも、lambda の中の式にも使える。
+
+    a, b: 秒（0 以上、a < b）
+    easing: 0→1 の進み方に掛けるイージング関数（ease_out_cubic 等）
+    from_end: True なら a, b を「表示終了の何秒前か」で数える（a > b）。
+        ramp(0.5, 0, from_end=True) は最後の 0.5 秒で 0→1
+
+    使用例:
+        obj.time(6) <= fade(ramp(0, 0.4))                           # 最初の 0.4 秒で現れる
+        obj.time(6) <= fade(1 - ramp(0.4, 0, from_end=True))        # 最後の 0.4 秒で消える
+        obj.time(6) <= wipe("left", progress=ramp(1.2, 1.6))        # 1.2〜1.6 秒で現れる
+        obj.time(6) <= scale(lambda u: lerp(1.0, 1.3, ramp(2, 3, ease_out_cubic)))
+    """
+    _require_seconds("ramp", "a", a)
+    _require_seconds("ramp", "b", b)
+    if easing is not None and not callable(easing):
+        raise TypeError(
+            f"ramp: easing はイージング関数（ease_out_cubic 等）で指定してください: {easing!r}")
+    if from_end:
+        if a <= b:
+            raise ValueError(
+                f"ramp: from_end=True では a（終了の {a} 秒前）> b（{b} 秒前）が必要です")
+        local = clip((Const(a) - remaining()) / Const(a - b), 0, 1)
+    else:
+        if a >= b:
+            raise ValueError(f"ramp: a({a}) < b({b}) が必要です")
+        local = clip((elapsed() - Const(a)) / Const(b - a), 0, 1)
+    return easing(local) if easing is not None else local
+
+
+def keyframes_sec(*args, easing=None):
+    """秒で書くキーフレーム補間（keyframes の時刻を秒にしたもの）。Expr を返す。
+
+    時刻は Object の表示開始からの秒。最初のキーより前・最後のキーより後は
+    端の値で止まる。表示秒より後のキーには届かない（エラーにはならない）。最大128点。
+    戻り値は Expr なので、そのまま Effect の引数にも、lambda の中の式にも使える。
+
+    使用例:
+        obj.time(6) <= fade(keyframes_sec((0, 0), (0.25, 1), (5.5, 1), (6, 0)))
+        obj.time(6) <= scale(keyframes_sec(0, 1.0, 1.5, 1.3, 3.0, 1.0, easing=ease_in_out_sine))
+    """
+    if len(args) == 0:
+        raise ValueError("keyframes_sec: 最低2つのキーフレームが必要です")
+    if isinstance(args[0], tuple):
+        raw = list(args)
+        for pt in raw:
+            if not isinstance(pt, tuple) or len(pt) != 2:
+                raise ValueError(
+                    f"keyframes_sec: 各キーは (秒, 値) の2要素タプルが必要です: {pt!r}")
+    else:
+        if len(args) % 2 != 0:
+            raise ValueError(
+                "keyframes_sec: フラット形式では偶数個の引数が必要です（t0, v0, t1, v1, ...）")
+        raw = [(args[i], args[i + 1]) for i in range(0, len(args), 2)]
+    if len(raw) < 2:
+        raise ValueError("keyframes_sec: 最低2つのキーフレームが必要です")
+    if len(raw) > _MAX_PATH_POINTS:
+        raise ValueError(
+            f"keyframes_sec: キーフレームは最大{_MAX_PATH_POINTS}点までです（指定={len(raw)}）")
+    if easing is not None and not callable(easing):
+        raise TypeError(
+            f"keyframes_sec: easing はイージング関数で指定してください: {easing!r}")
+    points = []
+    for t, v in raw:
+        _require_seconds("keyframes_sec", "時刻", t)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                or not _math.isfinite(v):
+            raise ValueError(f"keyframes_sec: 値は有限の数値で指定してください: {v!r}")
+        points.append((float(t), float(v)))
+    points.sort(key=lambda p: p[0])
+    # 区分線形補間の実体は keyframes と同じ共通実装（横軸だけ u → 経過秒）
+    return _piecewise_scalar_expr(elapsed(), points, easing)

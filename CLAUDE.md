@@ -36,7 +36,7 @@ Python の DSL で動画を構成し、ffmpeg でレンダリングするライ�
   （または `narrate()`）。describe の constraints（`object_registered_at_creation`）にも載せてある。
 - **priority が同じ Object は登録順に重なる**（`sorted(key=priority)` が安定ソートなので、
   `p.layer()` を呼んだ順・レイヤー内は作った順で、後が上）。
-- パッケージ本体は `src/scriptvedit/`（48モジュール）。`pip install -e .` で
+- パッケージ本体は `src/scriptvedit/`（50モジュール）。`pip install -e .` で
   どのディレクトリからでも `from scriptvedit import *`。
 
 ## 2. 最初に読むもの（最重要）
@@ -58,8 +58,8 @@ plugin / project_method / transform。
 
 - `usage` … 概念・main スクリプト雛形・レイヤー雛形・DSL・Expr・**プラグイン雛形**・CLI
 - `constraints` … 守らないと壊れる制約（severity: error/warning/info）
-- `effects`(40) / `transforms`(8) / `audio_effects`(7) / `factories`(32) /
-  `objects`(19) / `object_methods`(9) / `project_methods`(14) / `expr`(98) / `plugins`(3)
+- `effects`(41) / `transforms`(8) / `audio_effects`(7) / `factories`(35) /
+  `objects`(19) / `object_methods`(9) / `project_methods`(14) / `expr`(102) / `plugins`(3)
   （件数は変動する。正は `describe` の実測で、整合は tests/test_issue17_docs.py が検証する）
 
 各 Effect エントリには `bakeable` フィールドがあり、キャッシュに焼けるかが分かる。
@@ -165,7 +165,7 @@ pad（SEGVバリア, §4.1）が付かないコマンドになる。**formula + 
 「いま何が未生成か」ではない。だから `__cache__` に何があっても出力コマンドは同じで、
 **実レンダの後にキャッシュを消さずスナップショットを回してよい**。
 
-この契約を守っているのは次の5つの収集経路。**新しい中間生成物を足すときも必ず揃えること**
+この契約を守っているのは次の6つの収集経路。**新しい中間生成物を足すときも必ず揃えること**
 （1つでも「存在すればコマンドを出さない」を入れると、実レンダの有無でスナップショットが落ちる）:
 
 | 経路 | 場所 |
@@ -175,6 +175,7 @@ pad（SEGVバリア, §4.1）が付かないコマンドになる。**formula + 
 | レイヤーキャッシュ | `layercache.py` の `_collect_cache_cmds`（生成は `cache='make'` のときだけ。存在は見ない） |
 | compute / from_project / xfade 生成物 | `objects.py` の `compute` / `from_project`、`media.py` の `_finalize_generated_object` |
 | ラウドネス測定（`normalize_audio(mode="linear")`） | `loudness.py` の `_collect_loudness_cmds`（測定結果 JSON の有無は見ない） |
+| `stills()` / `frames()` の動画 | `stillseq.py` の `_finalize_hold_object`（dry_run 分岐が存在チェックより前。`frames()` の `draw` は dry_run では呼ばない） |
 
 compute / from_project / xfade の経路だけが存在チェックを dry_run 分岐より**前**に置いており、それが
 「実レンダ後に test18 / test24 / test57 / test74 が落ちる」罠の正体だった
@@ -348,11 +349,63 @@ test16 / test17 の実レンダでもデコード後の音声 MD5 が一致）�
   保持する（`tpad` の `stop_mode=clone`。1フレーム足して必ず覆う）。保持は Object 自身の尺
   （長い方の stream）までで、`time(d)` で素材より長く伸ばした分は保持しない。
   `__cache__` の生成物・存在しない素材・`loop()` 付きは対象外（probe しない）。
+  **例外は `stills()` / `frames()` の生成物**（`cache.py` の `_is_hold_artifact_path`。
+  `__cache__/artifacts/stills/`・`frames/`）: 絵の列なので `time(d)` で伸ばした分も最後の絵を
+  保持する。素材の尺は `Object._generated_length`（生成コマンドを組んだ時点で確定）から取り、
+  probe しないので dry_run と実レンダで同じ文字列になる。Effect を焼く経路
+  （checkpoint / compute）は一時 Object に尺が届かないので、`_hold_source_filters` が
+  `tpad=stop=-1:stop_mode=clone` を時間系の前処理の直後に入れる（`-t` が尺を切る）。
+  **判定は Object の属性ではなくパス**で行う（焼いた後は source が checkpoint へ差し替わる）。
+  時間系の live Effect（speed / freeze_frame）と焼ける Effect を併用すると、チェックポイントは
+  素材の尺ぶんしか焼かれない（`_checkpoint_bake_duration`）ので、`_video_tail_hold` は
+  差し替え前の元素材（`Object._audio_source`）のパスも見て、`_resolved_length`
+  （焼いた尺に live Effect を畳んだ値）より長い分を保持する。そのベイク尺は
+  `_generated_length` があれば probe せずそれを使う（生成済みの .mov を probe すると
+  46/30 秒が 1.533333 に丸まり、チェックポイントの鍵が cold / warm で食い違う）。
 - **保持は開始の `tpad` と同じ `tpad` に書く**。2段に分けると、前段の `tpad` が下流へ伝える
   終端の時刻を詰め物の分ずらさないので、後段のクローンが過去の時刻に出て overlay に
   捨てられる（FFmpeg 8 実測: 0.412 秒開始の 0.2 秒素材のクローンが pts 0.2 秒）。
 
 回帰は `tests/test_enable_float_fuzz.py`（音声の方が長い素材を並べる実レンダを含む）。
+
+### 4.11 文字まわりの3つの罠（subtitles の alpha・glow の画素形式・drawtext の `%`）
+
+- **`subtitles` フィルタは既定でアルファを触らない。** テキスト Object の入力は完全に透明な
+  キャンバス（`color=c=black@0.0`）なので、`alpha=1` が無いと RGB だけ描かれてアルファが 0 の
+  まま残り、overlay しても何も映らない（`subtitles()` / `karaoke()` が丸ごと映らなかった）。
+  `text.py` の `_build_text_filters` は必ず `:alpha=1` を付ける。
+- **`gblur` / `blend` はパックドの rgba を受け取れない。** `format=rgba,split→gblur→blend` と
+  書くと形式は折衝まかせになり、下流が YUV 系を好む経路（live の overlay 直結。焼かれない
+  `text()` など）では blend が yuva で動く。`all_mode=screen` が色差（無彩色で 0.5）にも掛かって
+  白がマゼンタに化ける。`_fx_glow` の入口は **`format=gbrap`**（プレーナ RGB）で固定してある。
+  チェックポイントへ焼く経路は出力が bgra なので元から gbrap に折衝されており、出力はバイト一致
+  （キャッシュ鍵は据え置き）。**split → blend を組む Effect を足すときは入口を gbrap にすること。**
+- **drawtext の inline `text=` に `\%` と書くと "Stray %" で文字列全体が描かれない。** AVOption の
+  解釈でバックスラッシュが1段はがれるので、文字の `%` は `\\%`、バックスラッシュは `\\\\`
+  （`text.py` の `_escape_counter_literal`。`textfile=` の中身は1段でよい）。
+- `counter()` の値の進行度だけは `_u_expr(start, 尺 - 1フレーム - 1µs)`（`_counter_progress`）で、
+  最後のコマで 1 に達する（通常の u は (N-1)/N までしか行かず `to` に届かなかった）。
+  詰めるのは u の分母だけで、`_UStr` が運ぶ表示秒・経過秒は Object の尺そのもの
+  （1 フレーム以下の尺で返す `"1"` も `_UStr`。素の str だと easing の秒の式が落ちる）。
+  **出力コマ数は 総尺×fps の四捨五入**なので、総尺が格子に乗らない動画の末尾（30fps の
+  `time(1.01)` は 30 コマ）では最後の1コマが出ない。そのときは分母を「最後に出力されるコマ」
+  まで詰める（食い違いが1フレーム以内のときだけ。意図して途中を切った場合は詰めない）。
+  位置・アルファの u は他と同じ定義のまま。`%{eif}` は 32ビットの int しか印字できないので、
+  桁区切り・小数・32ビット超は「桁数と符号ごとの drawtext を enable で切り替える」
+  （`_build_counter_filters`）。回帰は `tests/test_text_fixes.py`（画素で確認）。
+
+### 4.12 `movie=` の RGB 画像をグレーにした枝の colorspace=gbr が下流へ伝わる
+
+`mask` / `mask_wipe` のマスク（RGB の PNG）を `format=gray` にした枝には「colorspace=gbr」の
+タグが残り、blend → alphamerge → overlay と下流のフレームへ伝わる。透明な下地へ重ねる
+レイヤーキャッシュ（`cache='make'` の既定品質。VP9 yuva420p）ではエンコーダが
+`SRGB color space requires profile 1 or 3` で落ちた（焼かれない `text()` に mask_wipe を
+掛けたレイヤーで実測。画素は元から既定の行列で変換されていて、誤っていたのはタグだけ）。
+回避策は **グレーにした直後に `setparams=colorspace=unknown`**（`filters/video.py` の `_MASK_GRAY`）。
+マスクの寸法合わせは deprecated の `scale2ref` ではなく **`scale=rw:rh`**（第2入力が寸法の基準。
+基準側は出力されないので、アルファは `alphaextract,split` で2本に分ける）。全フレームの画素が
+scale2ref と一致する（`tests/test_mask_scale_ref.py`）。**`movie=` の画像を別の枝へ混ぜる
+Effect を足すときも同じ手当てを入れること。**
 
 ## 5. 設計規約（コードを変更するときに守ること）
 
@@ -375,6 +428,47 @@ Effect は2種類ある。
 
 `morph_to` / `explode_to` / `assemble_from` は終端フレーム生成 Effect
 （`_TERMINAL_FRAME_EFFECTS`）で、bakeable な ops の末尾に1つだけ置ける。
+
+**焼く枚数は「閉区間の enable 窓を覆う枚数」にする**（`checkpoint.py`）。overlay の窓は
+`between(t, 開始, 開始+尺)` の閉区間で、尺がフレームの整数倍だと「開始 + 尺」ちょうどの
+フレームも窓に入る。足りないと EOF（`eof_action=pass`）で背景が1フレーム見える。
+
+- 動画チェックポイントは `_bake_frame_count` = `ceil(fps*尺 + 0.5)` 枚。`-t` には
+  枚数/fps を書く（`_bake_t_arg`）。**`-t` に表示尺そのままを書かないこと**: FFmpeg 8 の
+  出力の `-t` は「枚数 = t*fps の四捨五入」で切るので（実測: `-t 1.0` → 30 枚、
+  `1.016667` → 31 枚、`1.036667` → 31 枚）、`time(1)` の静止画 + Effect が 30 枚になり、
+  焼かない場合（31 枚）より1枚短かった。増える1枚は u=1 で評価される。
+  枚数の決め方を変えたら `cache.py` の `_CHECKPOINT_TAIL_VER` を上げる。
+- 終端フレーム生成 Effect は `ceil(fps*尺) + 1` 枚（`_terminal_frame_plan`）。内訳は
+  「最初のコマの複製（`delay`）＋ 生成するコマ（`duration`。省略は残り全部）＋ 最後の
+  コマの複製」で、PIL が作るのは生成するコマだけ。複製は `tpad` の `start` / `stop`
+  （枚数指定）で行う。`delay` / `duration`（`state.py` の `_TERMINAL_TIMING_KEYS`）は
+  フレーム生成（`morph.py`）へ渡さない。**`delay` / `duration` を指定した計画では、
+  生成するコマを必ず2枚以上にする**（進行度 0 と 1）。1枚だと唯一のコマ（進行度 0 ＝元の絵）が
+  最後のコマとして複製され、到達点に一度もならない（`duration` が1コマ以下・`delay` が
+  尺の終わりぎりぎりで起きた）。
+- **窓は閉区間なので、順に並べた境目の1枚は前後どちらの Object も映る。** 焼いた Effect も
+  これに揃った（以前は焼いた動画が1枚短く、境目は後ろの Object だけだった。live の Effect と
+  静止画は元からこの挙動）。後ろが前を覆わない並びでは前の絵が1枚重なって見える。
+  README の「表示の窓と境目の1枚」に利用者向けの説明がある。
+- **`compute()` はこの対象外**（生成物の `length()` が1フレーム伸びると、`time()` の
+  既定尺と後続の並びが動くため）。
+
+粒子（`explode_to` / `assemble_from`）の `expand` は既定 `None`（自動）。余白は実際の
+軌道から求め、上限に Project の画面寸法を使う（`project.py` が `expand_limit` を渡す）。
+**出力が画面寸法で変わるのはこの場合だけなので、鍵（`_particle_cache_path`）にも
+`expand` を省略したときだけ `pframe=` を入れる。** `morph.py` の描画結果を変えたら
+`_MORPH_RENDER_VER` を上げる。
+
+**終端フレーム生成 Effect が足す余白は対称・偶数にし、anchor からは引く。**
+粒子の `expand` と sdf モーフの整列の余白は焼いた動画のキャンバスを広げるが、実レンダでしか
+決まらないので `pad_size` では伝えられない。`filters/video.py` の `_terminal_inner_dims` が
+「余白を除いた元の絵の箱」（`Object._terminal_bake` の入力画像。morph は2枚の共通キャンバス）を
+定数で返し、`_build_move_exprs` が辺・角の anchor を `(w-元の幅)/2` で補正する
+（余白を片側だけに足したり、焼いた後の寸法を別の決め方にすると位置がずれる）。
+入力がキャッシュ生成物（前処理を焼いた中間物）のときは dry_run で寸法が取れず従来の式になる
+（`_get_media_dimensions` の方針。実レンダでは補正が入る）。自動の余白を奇数にすると
+overlay の位置が1画素ずれ、4:2:0 出力で元の絵の色差が半画素にじむので偶数にそろえる。
 
 ### 中間生成物は映像専用（音声は常に元素材から取る）
 
@@ -419,6 +513,11 @@ Effect は2種類ある。
   相手1つなら `_SIDECHAIN_FORMAT`（周波数だけ揃える）、複数なら `_SIDECHAIN_MIX_FORMAT`
   （48kHz モノラルへダウンミックス）を通してから `amix`。複数を揃えずに合算すると
   結果が先頭の相手の形式に従い、並び順で検出レベルが 3dB 変わる（実測）。
+- **`duck_under(hold=ms)` は検出用の枝を保持つきの包絡へ置き換える**（`filters/audio.py` の
+  `_sidechain_hold_filter`。`aeval` の `st()` / `ld()` はサンプルをまたいで残る）。
+  sidechaincompress に保持は無く、release だけでは読点ごとに BGM が戻る。包絡は相手が1つでも
+  48kHz モノラル（`_SIDECHAIN_MIX_FORMAT`）で作り、**`apad` の後**に置く（相手が止んだ後の
+  無音の間も保持を数えるため）。`hold=0` のグラフは従来と同一。回帰は `tests/test_duck_hold.py`。
 - 48000 は `normalize_audio()` の `sample_rate` 既定値・libopus の固定値と同じ。
 
 ### `normalize_audio(mode="linear")` は測定パス → 一定の増幅（`loudness.py`）
@@ -453,6 +552,45 @@ Effect は2種類ある。
 - ピークの多い素材を大きく持ち上げると、リミッターが削る分だけ統合ラウドネスが目標より
   低くなる（実測: TTS の声＋BGM を +8.8dB、ピークを最大 5dB 抑えて -14.46 LUFS）。
   **補正の再測定はしていない**（仕様は「target − 測定値」の一定増幅）。
+
+### 絵の列は1本の動画にまとめる（`stillseq.py` の `stills()` / `frames()`）
+
+全面 PNG を1枚ずつ Object にすると、どの入力も 0 秒から流れて出番まで捨てられるので
+手間が「枚数 × 尺」に比例する（実測: 100枚×6秒で ffmpeg のメモリ 31GB。入力 300〜600 本で
+コマンド長が WinError 206）。`stills()` は concat demuxer、`frames()` は標準入力の生 RGBA から
+**qtrle（argb）の .mov を1本**作り、Object を1個返す（同じ 100枚×6秒が 68 秒・1.2GB・4.6MB）。
+
+- **符号化は qtrle 固定**（FFV1 にしない）。可逆で alpha を持ち、前のコマと同じ画素を飛ばすので
+  同じ絵の続く区間がほぼ 0 バイト（実測 3600 コマ: qtrle 1.0MB / FFV1 353MB / VP9 4.4MB だが
+  書き出し 40 倍遅く非可逆）。キーフレームは先頭だけ（`-g` を大きく。-g 300 で 5 倍に膨らむ）。
+  .mov のタイムベースは 1/fps で割り切れる（§4.7 の丸めが起きない）。
+- **ffconcat の各 `file` に `option framerate` を書く**。無いと画像のタイムベースが 1/25 になり、
+  30fps で切り替わりが1コマずれる（実測 200 か所中 27 か所）。`duration` は µs へ丸めた
+  開始時刻の差で書く（1件ずつ丸めた尺を足させない）。
+- **切り替わりは「境目の累積秒」を最も近いフレームへ丸める**（`_stills_schedule`。秒は 10 進の
+  有理数で足す）。1枚ずつ丸めて足すと誤差が積もる。丸めた結果は `obj.starts` /
+  `obj.frame_counts`。鍵には秒ではなくフレーム数を入れる（同一出力なら同一鍵）。
+- リスト（.ffconcat）は絶対パスを含むので、生成の直前に毎回書く（鍵は内容由来で、素材の
+  置き場所が変わっても同じ。古いリストを命中させない）。動画本体は命中ガードあり
+  （再生成に全コマの描画が要る。原子的に書き、0 バイトは命中扱いにしない）。
+- **`stills()` の生成コマンドには `-reinit_filter 0` が要る**。画素形式の違う画像（RGB の PNG と
+  RGBA の PNG、パレット、グレースケール）が混ざると、既定では形式が変わるたびにフィルタグラフが
+  作り直され、fps フィルタの抱えていた前の絵のコマが捨てられる。`-frames:v` は末尾に再掲した
+  最後の絵で埋まるので枚数は合い、exit 0 のまま絵の消えた動画が出来る（FFmpeg 8.0 実測:
+  RGB + RGBA の 3 コマずつが 6 コマとも2枚目）。符号化の違う画像（PNG + JPEG）はデコーダが
+  最初の画像のもので固定されて落ちるので、検証で拒否する（`_check_same_codec`。先頭バイトで判定）。
+- **コマ数を確かめてから確定する**（`_commit_verified`。ffprobe の `nb_frames`）。ffmpeg は入力の
+  途中で絵が落ちても exit 0 で終わることがあり、短い動画が一度確定すると命中し続ける。
+  `frames()` で「ffmpeg が先に落ちた」と見なすのは**標準入力への書き込みの失敗だけ**
+  （`draw` の呼び出しごと `except OSError` で包むと、`draw` の中の FileNotFoundError を握りつぶす）。
+- `stills()` の画像の指紋は `_src_signature` ではなく **`_file_fingerprint` を直接**使う（全画像の
+  実在を検証で要求しているので常に内容で見られる。`__cache__` 配下の自作ページ PNG を
+  パス署名にすると、書き直しても古い動画が命中する）。fps は有理数の表記（`_fps_text`）で
+  鍵とコマンドの両方に入れ、画像と同じ寸法の `size` は指定なしと同じ扱い（同一出力なら同一鍵）。
+- **`frames()` の鍵は呼び出し側の `key` だけ**（+ コマ数・fps・size）。`draw` のコード指紋は
+  混ぜない: バイトコード指紋（plugins.py の方式）は内側の lambda / 内包表記がメモリアドレスつきで
+  現れ、レイヤーは Plan / Render で2回 exec されるので鍵が2回で食い違う。
+- 最後のコマの保持は §4.10 を参照（判定はパス）。
 
 ### キャッシュ鍵（フィンガープリント）
 
@@ -538,7 +676,11 @@ CRLF で書くと FFmpeg 8 の drawtext が textfile の `\r\n` を改行2回と
 同じ理由で、VOICEVOX の鍵に混ぜるエンジン署名（接続先 + `/version`）は
 `<cache_dir>/engine_sig.json` に控え、**エンジンに届かない間だけ**その控えで鍵を作る
 （キャッシュに当たれば使い、合成が要るときだけ ConnectionError）。届けば必ず実測が勝ち、
-控えも上書きする。ffp.json（撤廃済み）の罠は「古い永続値が実測より優先される」ことで、
+控えも上書きする。`tts_marks()` の `<鍵>.marks.json`（合成に使った audio_query の控え。
+wav と同じ鍵なので、エンジンの版が変われば使われない）も同じ扱いで、`_read_marks_query` が
+形を検証し、壊れていれば問い合わせ直す。**合成と時刻計算のクエリは `_voicevox_query` の
+1か所で作る**（別々に組むと、調整が片方にだけ漏れて語の時刻が wav とずれる）。
+ffp.json（撤廃済み）の罠は「古い永続値が実測より優先される」ことで、
 これは「実測できない間だけ最後の実測値を使う」逆向きの使い方なので、罠には当たらない。
 **控えを実測より優先する使い方に変えないこと。**
 
@@ -549,6 +691,48 @@ CRLF で書くと FFmpeg 8 の drawtext が textfile の `\r\n` を改行2回と
 同じ初期値で置くこと。** 足りない属性は呼び出し側の `getattr(..., None)` に救われて
 長く潜伏し、誰かが直接属性アクセスを1行足した瞬間に
 その経路（text / progress_bar / キャッシュ再生レイヤー）だけ AttributeError になる。
+
+### text 系（drawtext）は焼けない。文字を画像にするのは `text_image()`（`textimage.py`）
+
+`media_type == "text"`（text / typewriter / counter / subtitles / progress_bar）は実体ファイルを
+持たず、`_plan_object_checkpoints` はベイク対象外として None を返す。ベイクでしか実現できない
+終端フレーム Effect（`_TERMINAL_FRAME_EFFECTS`）と `compute()` は、**黙って無視せず ValueError で
+`text_image()` を案内する**（構築時の `Object._append_effect` と計画時の両方。文言は
+`objects.py` の `_text_terminal_effect_message` の1か所）。
+
+`text_image()` の規則:
+
+- **PNG は構築時（レイヤー exec 中）に描く**。dry_run でも描く（`asset()` の取り込みと同じ扱い。
+  source が常に実在するので寸法を probe でき、dry_run と実レンダでコマンドが食い違わない）。
+  `formula()` のように実レンダ直前まで遅らせない。
+- 鍵は「折り返し後の配置・書式・フォントファイルの**内容指紋**・Pillow の版・`_TEXT_IMAGE_VER`」。
+  配置に現れない引数（折り返しが起きない `max_width`、1行のときの `line_spacing`、
+  `border=0` のときの `border_color` など）は鍵に入らない（同一出力なら同一鍵）。
+  字の無い区間（空文字・改行だけ）は書式を登録しない。太さは `_variation_coords` が
+  **軸の値**へ正規化してから鍵に入れる（`weight="Bold"` と `weight=700` は同じ鍵。
+  既定の軸の値と同じ指定は指定なしと同じ鍵）。
+  描き方を変えたら `_TEXT_IMAGE_VER` を上げる。
+- **スナップショット（`tests/projects.py` の `_SPECS`）には載せない。** 鍵がフォントファイルの
+  内容指紋と Pillow の版を含み、PNG のパスも、それを入力にした morph / particle /
+  checkpoint の鍵も環境ごとに変わるため。コマンドの形は `tests/test_text_image.py` の
+  dry_run テスト（PNG が画像入力になる・粒子の生成物へ差し替わる・繰り返して同じ出力）で、
+  エラーケースは `tests/test_errors.py` の `check_text_*` で守る。
+- 行頭禁則の追い出しは `_KINSOKU_MAX_PULL` 単位まで。禁則字でない単位に届かなければ
+  送らずに元の位置で折る（上限が無いと「！！！！！」で1行1字の行を量産する）。
+  半角の語は全部の字が禁則字のときだけ禁則扱い（`.env` は語）。長音・リーダは禁則に入れない。
+- 豆腐の判定は **cmap が正**（`_cmap_lookup`。format 4 / 12 を自前で読む）。画素が
+  `.notdef` と同じかどうかは cmap を読めないフォントだけのフォールバック
+  （MS ゴシックの `□` U+25A1 は cmap に在るのに絵が `.notdef` と同じで、画素だけだと誤判定する）。
+- 命中判定は「存在すれば」ではなく `_cached_png_ok`（PNG として開けて・寸法が合い・`verify()` が通る）。
+  切り詰められた残骸は書き直される。書き込みは `_write_png_atomic`。
+- レイアウトは `ImageFont.Layout.BASIC` に固定（raqm の有無で字送りが変わると同じ鍵で違う絵になる）。
+- 色つきの字を透明な RGBA へ `ImageDraw.text` で直接描かない（縁の画素の RGB が黒へ寄る）。
+  色ごとの L マスクへ描いてから `_tint` で着色して重ねる。
+- 可変フォントの wght は fvar を自前で読んでタグで探す（PIL の `get_variation_axes()` は
+  表示名しか返さない）。
+- `p.audit()` への申告は `Object._text_image`（dict）。チェックポイントが resize / scale を焼くと
+  op が Object から外れるので、`_apply_checkpoint_final_state` が焼く前の op を
+  `Object._pre_checkpoint_ops` に控え、audit はそこから画面上の倍率を求める。
 
 ### 検査系（viz.py / p.inspect()）は本体の規則を再実装しない
 
@@ -589,6 +773,23 @@ overlay の中央配置は `(W-pad_size[0])/2` で計算される
 - **音声側の u 正規化だけは `_u_expr` を通らない**（`filters/audio.py` が
   `clip(if(isnan(t),0,t)/{dur},0,1)` を直書きする。NaN の包みは §4.8）。adelay 前のオブジェクトローカル時間なので
   `start` を引かないのが正しいが、**定義箇所が2つある**ことは意識しておくこと。
+- **u の式は `_UStr`（`expr.py`。str の派生）で渡す。** 秒で書く式（`elapsed()` / `remaining()` /
+  `ramp()` / `keyframes_sec()`。ノードは `_TimeVar`）は u だけでは組めないので、`_UStr` が
+  表示秒 `dur` と経過秒の式 `sec`（`clip(t-start,0,dur)`。u×dur へ戻さない）を一緒に運ぶ。
+  `_u_expr` と音声側の直書きはどちらも `_UStr` を返す。**u の式を自前で組んで `to_ffmpeg` へ
+  渡す箇所を足すときは `_UStr(式, dur)` に包むこと**（素の str だと秒のノードは記号
+  `sec(…)` を返し、ffmpeg が Unknown function で止まる。黙って別の値にはならない）。
+  数値評価（`eval_at`）は `_UValue(u, dur)` を渡す（scale の pad 見積もり・native fade の判定・
+  morph の blend）。素の float だと秒のノードは ValueError。
+- **生成物の尺は `Object._generated_length`**（`media.py` の `_finalize_generated_object` が置く
+  合成尺）。`length()` はこれがあれば生成物を probe しない: Plan pass では未生成で probe できず
+  （`video_sequence(...).time()` が初回レンダで落ちていた）、Render pass では在るので、probe に
+  頼ると cold / warm で尺が数 ms 食い違い Plan/Render の構造差になる。
+  **source を差し替える処理はこの値も差し替えること**: `compute(duration=d)` は d へ
+  （静止画なら None へ）置き直す。古い合成尺が残ると `length()` が黙って元の尺を返す。
+  `video_sequence` が入れる `duration` は仮の値（`Object._duration_provisional`）で、
+  `_fill_auto_durations` がレイヤー実行後に `length()` で1回だけ入れ直す（後から足した
+  speed / trim / compute に追従。`time(d)` / `show(d)` / スライス / `* n` で明示したら外れる）。
 - **`_resolve_obj_duration`**（`project.py`）は `obj.length()` ベース。
   trim / atempo を反映した加工後の尺を返す（チェックポイントのベイクと同一基準）。
   0 は返さない（`clip((t-start)/0,…)` のゼロ除算で ffmpeg が EINVAL になるため、
@@ -677,7 +878,7 @@ drawtext / subtitles のパス・文字列エスケープ（filtergraph イン�
 ## 6. 機能を追加するときの判断フロー
 
 1. **まず `python -m scriptvedit describe` で既存機能を確認する。**
-   40 の Effect と 98 の Expr が既にある。車輪の再発明を避ける。
+   41 の Effect と 102 の Expr が既にある。車輪の再発明を避ける。
 2. **その動画プロジェクト固有の一発ネタ → `plugins/*.py` に `@effect_plugin`。**
    コアを汚さない。`plugins/` は自動読込され、`from scriptvedit import *` で使える。
    雛形は `describe` の `usage.plugin_template` にある。参考実装:

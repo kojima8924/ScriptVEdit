@@ -26,7 +26,7 @@ from scriptvedit.validate import _require_number, _validate_ffmpeg_color
 
 # --- オーディオ系ファクトリ ---
 
-def duck_under(*others, ratio=8, threshold=0.05, attack=20, release=250):
+def duck_under(*others, ratio=8, threshold=0.05, attack=20, release=250, hold=0):
     """sidechaincompress で others（ナレーション等）再生中に自音量を下げるAudioEffect。
 
     others は同じProjectに存在する音声Object（Narration は自動で .audio）を
@@ -34,11 +34,22 @@ def duck_under(*others, ratio=8, threshold=0.05, attack=20, release=250):
     複数渡すと、どれか1つでも鳴っている間は下がる（サイドチェーンは各 other を
     合算した1本）。検出は各 other の形式統一（48kHz・ステレオ化）より前の音声で
     行うので、モノラルのナレーションも元の音量のまま threshold と比べられる
-    （複数のときは合算のため各 other を 48kHz モノラルへダウンミックスする）。"""
+    （複数のときは合算のため各 other を 48kHz モノラルへダウンミックスする）。
+
+    hold: 相手が止んでから戻り始めるまでの保持時間（ms。既定 0 = 保持なし）。
+    release だけだと読点や文の間のたびに音量が戻りかける（release を長くすると
+    今度は声の無い場面でもなかなか戻らない）。hold を指定すると、相手の検出レベルが
+    threshold を下回ってから hold ms の間は「直前の発声の平均的な検出レベル」を
+    保ち、その後 release で戻る。hold より短い間では戻らない。
+    hold > 0 のときは検出用の枝を 48kHz モノラルへまとめ、包絡（attack / release は
+    sidechaincompress と同じ係数）を保持つきで作ってから sidechaincompress へ渡す
+    （filters/audio.py の _sidechain_hold_filter）。"""
+    _require_number("duck_under", "hold", hold, 0, None)
     targets = _normalize_duck_targets(others)
     # params["other"] は常に Object のタプル（読む側は _duck_targets 経由で扱う）
     return AudioEffect("duck_under", other=targets, ratio=ratio,
-                       threshold=threshold, attack=attack, release=release)
+                       threshold=threshold, attack=attack, release=release,
+                       hold=hold)
 
 
 def _normalize_duck_targets(others):

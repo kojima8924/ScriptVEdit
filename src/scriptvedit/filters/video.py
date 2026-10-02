@@ -11,7 +11,7 @@ from fractions import Fraction
 from scriptvedit.context import current_project
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.expr import Const, Expr
+from scriptvedit.expr import Const, Expr, _UStr, _UValue
 from scriptvedit.state import _REVERSE_MAX_SEC
 from scriptvedit.validate import _parse_color_rgb
 
@@ -74,7 +74,10 @@ def _u_expr(start, dur, var="t"):
     geq/blend 等 framesync 系は大文字 "T"（小文字 t は未定義）。
     カンマは filtergraph 用に "\\," へエスケープ済み。
     """
-    return f"clip(({var}-{start})/{dur}\\,0\\,1)"
+    # 戻り値は _UStr（str の派生）。秒で書く式（elapsed / ramp / keyframes_sec）が
+    # 読む「経過秒」は u×dur へ戻さず、t-start をそのまま 0..dur へ clip して渡す。
+    return _UStr(f"clip(({var}-{start})/{dur}\\,0\\,1)", dur,
+                 sec=f"clip({var}-{start}\\,0\\,{dur})")
 
 
 # geq の RGB 素通し接頭辞（アルファのみ加工する geq 式の共通部分。
@@ -255,6 +258,18 @@ def _t_enable_from(start, fps):
     return _t_floor(n / float(fps) - _T_ENABLE_EPS)
 
 
+def _fps_fraction(fps):
+    """fps を有理数にする（29.97 → 2997/100、30000/1001 の float → 30000/1001）。
+
+    _tpad_first_frame と stillseq.py（stills / frames の丸め・鍵・コマンド表記）が
+    同じ読み方をするための単一の定義。
+    """
+    frac = Fraction(fps).limit_denominator(1001)
+    if abs(float(frac) - float(fps)) >= 1e-9:
+        frac = Fraction(fps)
+    return frac
+
+
 def _tpad_first_frame(start, fps):
     """tpad=start_duration=_t_floor(start) が中身の1枚目を送るフレーム番号。
 
@@ -264,10 +279,7 @@ def _tpad_first_frame(start, fps):
     fps は Project の fps（素材の fps が違うときは近似になる）。
     """
     us = Fraction(repr(_t_floor(start)))
-    frac = Fraction(fps).limit_denominator(1001)
-    if abs(float(frac) - float(fps)) >= 1e-9:
-        frac = Fraction(fps)
-    return _math.floor(us * frac + Fraction(1, 2))
+    return _math.floor(us * _fps_fraction(fps) + Fraction(1, 2))
 
 
 def _video_tail_hold(obj):
@@ -283,9 +295,41 @@ def _video_tail_hold(obj):
     （dry_run では未生成で probe できず、キャッシュの有無でコマンドが変わるため。
     checkpoint 等は映像だけを焼くので、そもそも尺が食い違わない）。
     ループする音声（loop()）を持つ Object も対象外（尺が素材で決まらない）。
+
+    例外は stills() / frames() の生成物（_is_hold_artifact_path）。これは「絵の列」
+    なので、time(d) で素材より長く伸ばした分も最後の絵を出し続ける（字幕ページの
+    最後の1枚が、音声の終わりまで残る）。__cache__ の生成物を対象外にした理由
+    （probe できない）は当たらない: 素材の尺は生成コマンドを組んだ時点で確定していて
+    Object._generated_length にあり、probe せずに済むので、未生成の dry_run でも
+    生成後でも同じ値になる。Effect を焼く経路（checkpoint / compute）では入力が
+    一時 Object になり尺が届かないので、_hold_source_filters が同じ保持を入れる。
+
+    Effect を焼いた後（source がチェックポイントへ差し替わった後）も対象にする。
+    時間系の live Effect（speed / freeze_frame 等）と焼ける Effect を併用すると、
+    チェックポイントは表示尺ではなく素材の尺ぶんしか焼かれず
+    （_checkpoint_bake_duration）、伸ばした区間が背景になっていた（speed だけなら
+    焼かないので保持され、挙動が食い違った）。差し替え前の元素材は
+    Object._audio_source に残る（_apply_checkpoint_final_state が必ず置く）ので、
+    それが stills / frames の生成物なら、焼いた尺に live Effect を畳んだ
+    Object._resolved_length を素材の尺として保持を出す。時間系の live Effect が
+    無いときは焼いた尺 = 表示尺なので保持は 0 になる（焼く側が保持済み）。
+    どちらの値も計画の段階で決まり probe しないので、dry_run と実レンダで変わらない。
     """
     if obj.media_type != "video" or obj.duration is None:
         return 0.0
+    if _is_hold_artifact_path(obj.source):
+        natural = getattr(obj, "_generated_length", None)
+        if not natural:
+            return 0.0
+        hold = float(obj.duration) - _fold_time_effects(natural, obj.effects)
+        return hold if hold > 1e-6 else 0.0
+    origin = getattr(obj, "_audio_source", None)
+    if origin and _is_hold_artifact_path(origin):
+        shown = getattr(obj, "_resolved_length", None)
+        if not shown:
+            return 0.0
+        hold = float(obj.duration) - float(shown)
+        return hold if hold > 1e-6 else 0.0
     if _is_cache_artifact_path(obj.source) or not os.path.exists(obj.source):
         return 0.0
     if any(getattr(e, "name", None) == "loop" for e in obj.audio_effects):
@@ -303,6 +347,22 @@ def _video_tail_hold(obj):
         return 0.0
     hold = _builtins.min(float(obj.duration), natural) - _fold_time_effects(vd, obj.effects)
     return hold if hold > 1e-6 else 0.0
+
+
+def _hold_source_filters(source):
+    """Effect を焼くコマンド（checkpoint / compute）で、入力の最後のコマを保持するフィルタ。
+
+    stills() / frames() の生成物（_is_hold_artifact_path）を入力にするときだけ
+    ["tpad=stop=-1:stop_mode=clone"] を返す（それ以外は空）。時間系の前処理
+    （trim / speed 等）の後、Transform / Effect の前に入れる。保持は無限に続くが、
+    焼くコマンドは必ず -t で尺を切る。こうしておくと、time(d) で素材より長く表示する
+    Object に fade などを焼いても、焼いた動画が d 秒ぶんあり、伸ばした区間でも
+    Effect が進む（本レンダ側で後から足すと、焼いた最後のコマが止まったまま残る）。
+    パスだけで決まるので dry_run と実レンダで同じ文字列になる。
+    """
+    if _is_hold_artifact_path(source):
+        return ["tpad=stop=-1:stop_mode=clone"]
+    return []
 
 
 def _t_ceil(x):
@@ -599,7 +659,7 @@ def _fx_scale(e, eff_idx, ctx):
             n_grid = 4999 if _expr_has_oscillatory(scale_expr) else 100
             try:
                 max_s = _builtins.max(
-                    scale_expr.eval_at(i / n_grid)
+                    scale_expr.eval_at(_UValue(i / n_grid, ctx.dur))
                     for i in range(n_grid + 1))
             except Exception as exc:
                 raise ValueError(
@@ -730,11 +790,19 @@ def _fx_pixelize(e, eff_idx, ctx):
 
 
 def _fx_glow(e, eff_idx, ctx):
-    """グロー（split→gblur→blend=screen の複合チェーン。発光合成）"""
+    """グロー（split→gblur→blend=screen の複合チェーン。発光合成）
+
+    入口は format=gbrap（プレーナ RGB）で固定する。gblur と blend はパックド
+    の rgba を受け取れないので、format=rgba だと形式の折衝に任され、下流が
+    YUV 系を好む経路（live の overlay 直結。text() など焼かれない Object）では
+    blend が yuva で動く。screen 合成を色差（U/V。無彩色で 0.5）にも掛けるので、
+    白が 1-(1-0.5)^2=0.75 側へ寄ってマゼンタに化ける（FFmpeg 8.0 実測）。
+    チェックポイントへ焼く経路は出力が bgra なので元から gbrap に折衝されており、
+    出力は format=rgba のときとバイト一致（＝キャッシュ鍵は据え置き）。"""
     r = e.params.get("radius", 10)
     it = e.params.get("intensity", 1.0)
     p = f"{ctx.label_prefix}e{eff_idx}"
-    ctx.filters.append("format=rgba")
+    ctx.filters.append("format=gbrap")
     ctx.filters.append(
         f"split[{p}a][{p}b];"
         f"[{p}b]gblur=sigma={r}[{p}c];"
@@ -827,6 +895,42 @@ def _fx_drop_shadow(e, eff_idx, ctx):
                         ctx.pad_size[1] + top + bottom)
 
 
+def _fx_tint(e, eff_idx, ctx):
+    """色の塗り替え（定数は lutrgb、Expr は geq。どちらもアルファは素通し）"""
+    # lutrgb も geq も式の値を切り捨てて書くので、どちらも round() で四捨五入する
+    # （白 × 0.5 = 127.5 が 127 へ落ちるのを防ぐ）。定数と式で同じ amount なら
+    # 同じ画素になるよう、2つの経路は同じ順序の演算にしてある:
+    #   multiply … 元の色 × (1 - a × (1 - color/255))
+    #   fill     … 元の色 × (1 - a) + a × color
+    # （演算の順序が違うと .5 の境目で 1 階調ずれ、時間で変わる tint の終点が
+    #   定数の tint と一致しなくなる。tests/test_tint.py が画素で確かめる）
+    amount = e.params.get("amount", Const(1.0))
+    rgb = _parse_color_rgb(e.params["color"])
+    fill = e.params.get("mode", "multiply") == "fill"
+    ctx.filters.append("format=rgba")
+    if isinstance(amount, Const):
+        a = float(amount.value)
+        parts = []
+        for ch, c in zip("rgb", rgb):
+            if fill:
+                parts.append(f"{ch}='clip(round(val*{1 - a!r}+{a * c!r})\\,0\\,255)'")
+            else:
+                parts.append(
+                    f"{ch}='clip(round(val*{1 - a * (1 - c / 255)!r})\\,0\\,255)'")
+        ctx.filters.append("lutrgb=" + ":".join(parts))
+        return
+    # geq の時間変数は大文字 T（fade / wipe と同じ）
+    a_str = f"clip({amount.to_ffmpeg(_u_expr(ctx.start, ctx.dur, 'T'))}\\,0\\,1)"
+    parts = []
+    for ch, c in zip("rgb", rgb):
+        src = f"{ch}(X\\,Y)"
+        if fill:
+            parts.append(f"{ch}='round({src}*(1-{a_str})+{a_str}*{c})'")
+        else:
+            parts.append(f"{ch}='round({src}*(1-{a_str}*{1 - c / 255!r}))'")
+    ctx.filters.append("geq=" + ":".join(parts) + ":a='alpha(X\\,Y)'")
+
+
 def _fx_outline(e, eff_idx, ctx):
     """縁取り（alpha膨張ベース。色付けした複製のalphaを膨張させ本体をoverlay）"""
     # alpha膨張（dilationをwidth回連結）ベースの縁取り。
@@ -852,20 +956,34 @@ def _fx_mask(e, eff_idx, ctx):
     """画像マスク（輝度をアルファとして乗算）"""
     # 画像の輝度をアルファとして乗算。追加 -i 入力の配線を避けるため
     # movie= ソースをチェーン内サブグラフで読み込む。
-    # マスクは scale2ref で素材サイズへ自動スケールし、
+    # マスクは scale=rw:rh（寸法の基準＝素材のアルファ）で素材サイズへ自動スケールし、
     # blend='A*B/255' で元アルファと乗算 → alphamerge で書き戻す。
     img = _escape_ffpath(e.params["image"])
     p = f"{ctx.label_prefix}e{eff_idx}"
     ctx.filters.append("format=rgba")
     ctx.filters.append(
         f"split[{p}a][{p}b];"
-        f"[{p}b]alphaextract[{p}oa];"
+        f"[{p}b]alphaextract,split[{p}oa][{p}oar];"
         f"movie=filename={img}[{p}mi];"
-        f"[{p}mi][{p}oa]scale2ref[{p}ms][{p}oa2];"
-        f"[{p}ms]format=gray[{p}mg];"
-        f"[{p}oa2][{p}mg]blend=all_expr='A*B/255':eof_action=repeat[{p}na];"
+        f"[{p}mi][{p}oar]scale=rw:rh[{p}ms];"
+        f"[{p}ms]{_MASK_GRAY}[{p}mg];"
+        f"[{p}oa][{p}mg]blend=all_expr='A*B/255':eof_action=repeat[{p}na];"
         f"[{p}a][{p}na]alphamerge"
     )
+
+
+# mask / mask_wipe のマスク画像をグレーへ直すフィルタ。
+# - マスクは `scale=rw:rh`（第2入力＝素材のアルファを寸法の基準にする）で素材の
+#   寸法へ合わせてからここへ入る。FFmpeg 8 で deprecated になった scale2ref と
+#   全フレームの画素が一致することを実測済み（tests/test_mask_scale_ref.py）。
+#   scale2ref と違い基準側を出力しないので、アルファは alphaextract の直後に
+#   split して、片方を寸法の基準・もう片方を blend へ渡す。
+# - setparams=colorspace=unknown: マスク（RGB の PNG）由来の「colorspace=gbr」の
+#   タグを外す。外さないと、このタグがグレーの枝 → blend → alphamerge → overlay と
+#   下流へ伝わり、透明な下地へ重ねるレイヤーキャッシュ（VP9 yuva420p）の
+#   エンコーダが「SRGB color space requires profile 1 or 3」で落ちる。
+#   画素は変わらない（変換行列は元から既定のまま。タグだけが誤っていた。実測）。
+_MASK_GRAY = "format=gray,setparams=colorspace=unknown"
 
 
 def _fx_mask_wipe(e, eff_idx, ctx):
@@ -886,12 +1004,12 @@ def _fx_mask_wipe(e, eff_idx, ctx):
     ctx.filters.append("format=rgba")
     ctx.filters.append(
         f"split[{p}a][{p}b];"
-        f"[{p}b]alphaextract[{p}oa];"
+        f"[{p}b]alphaextract,split[{p}oa][{p}oar];"
         f"movie=filename={img},loop=loop=-1:size=1,fps={m_fps},"
         f"setpts=N/({m_fps}*TB)[{p}mi];"
-        f"[{p}mi][{p}oa]scale2ref[{p}ms][{p}oa2];"
-        f"[{p}ms]format=gray[{p}mg];"
-        f"[{p}oa2][{p}mg]blend="
+        f"[{p}mi][{p}oar]scale=rw:rh[{p}ms];"
+        f"[{p}ms]{_MASK_GRAY}[{p}mg];"
+        f"[{p}oa][{p}mg]blend="
         f"all_expr='if(lte(B\\,255*({prog_str}))\\,A\\,0)'"
         f":eof_action=repeat[{p}na];"
         f"[{p}a][{p}na]alphamerge"
@@ -990,6 +1108,7 @@ _FX_BUILDERS = {
     "ken_burns": _fx_ken_burns,
     "drop_shadow": _fx_drop_shadow,
     "outline": _fx_outline,
+    "tint": _fx_tint,
     "mask": _fx_mask,
     "mask_wipe": _fx_mask_wipe,
     "opacity": _fx_opacity,
@@ -1043,6 +1162,37 @@ _ANCHOR_OFFSETS = {
 }
 
 
+def _terminal_inner_dims(obj):
+    """終端フレーム生成Effect を焼いた Object の「余白を除いた元の絵の箱」の寸法。
+
+    explode_to / assemble_from の expand（省略時は自動）と sdf モーフの整列の余白は、
+    焼いた動画のキャンバスを左右・上下それぞれ対称に広げる。overlay の `w` / `h` は
+    余白込みなので、move の anchor が中心以外（topleft / left / right / top / bottom）の
+    とき、そのまま使うと絵が余白ぶんずれる（画面外へ出ることもある）。
+    余白は実レンダでしか決まらないため、式には元の箱の寸法だけを定数で入れ、
+    余白は `(w-元の幅)/2` として ffmpeg に求めさせる（余白 0 なら従来と同じ位置）。
+
+    元の箱: explode_to / assemble_from は粒子にする画像、morph_to は2枚を中央で
+    重ねた共通キャンバス（幅・高さそれぞれ大きい方。morph.load_images と同じ）。
+    対象外・寸法が取れないとき（dry_run 中のキャッシュ生成物は常に不明扱い。
+    _get_media_dimensions 参照）は (None, None) を返し、呼び出し側は従来の式にする。
+    """
+    bake = getattr(obj, "_terminal_bake", None)
+    if bake is None:
+        return None, None
+    op, src = bake
+    w, h = _get_media_dimensions(src)
+    if w is None:
+        return None, None
+    target = getattr(getattr(op, "_morph_target", None), "source", None)
+    if getattr(op, "name", None) == "morph_to" and target is not None:
+        tw, th = _get_media_dimensions(target)
+        if tw is None:
+            return None, None
+        w, h = _builtins.max(w, tw), _builtins.max(h, th)
+    return w, h
+
+
 def _build_move_exprs(obj, start, dur, pad_size=None):
     """objのeffectsからmoveを探し、overlay用のx_expr/y_exprを返す
     pad_size: (max_w, max_h) padで固定サイズ化済みの場合、定数で位置を計算
@@ -1085,10 +1235,20 @@ def _build_move_exprs(obj, start, dur, pad_size=None):
         off_x, off_y = _ANCHOR_OFFSETS[anchor_val]
         sizes_x = {"half": half_w, "full": full_w}
         sizes_y = {"half": half_h, "full": full_h}
+        # 終端フレーム生成Effect が足した余白（粒子の expand・sdf モーフの整列の余白）は
+        # 対称なので、中心基準（half）は余白があっても絵の位置が変わらない。
+        # 辺・角の基準は「余白を除いた元の絵の箱」に合わせる（_terminal_inner_dims）。
+        inner_w, inner_h = (None, None) if pad_size else _terminal_inner_dims(obj)
+        if inner_w is not None:
+            sizes_x = {"half": half_w, "full": f"(w+{inner_w})/2"}
+            sizes_y = {"half": half_h, "full": f"(h+{inner_h})/2"}
+            edge_x, edge_y = f"-(w-{inner_w})/2", f"-(h-{inner_h})/2"
+        else:
+            edge_x = edge_y = ""
         x_result = f"trunc({base_x}-{sizes_x[off_x]})" if off_x \
-            else f"trunc({base_x})"
+            else f"trunc({base_x}{edge_x})"
         y_result = f"trunc({base_y}-{sizes_y[off_y]})" if off_y \
-            else f"trunc({base_y})"
+            else f"trunc({base_y}{edge_y})"
 
     # shake Effect: overlay座標にsin/cosオフセットを加算
     shake_effect = None
@@ -1161,7 +1321,7 @@ def _try_native_fade(alpha_expr, start, dur):
     samples = []
     try:
         for i in range(N + 1):
-            value = float(alpha_expr.eval_at(i / N))
+            value = float(alpha_expr.eval_at(_UValue(i / N, dur)))
             if not _math.isfinite(value):
                 return None
             # geq経路と同じclip後の値を比較する。
@@ -1359,7 +1519,7 @@ def _build_video_pre_filters(obj, label_prefix="pre"):
 
 
 # --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛。scripts/check_import_cycles.py で計測）---
-from scriptvedit.cache import _fold_time_effects, _is_cache_artifact_path, _is_pending_cache_path
+from scriptvedit.cache import _fold_time_effects, _is_cache_artifact_path, _is_hold_artifact_path, _is_pending_cache_path
 from scriptvedit.ffmpeg import _decoder_input_args
 from scriptvedit.plugins import _EFFECT_PLUGINS, _build_plugin_effect_filters
 from scriptvedit.text import _build_text_filters, _escape_ffpath

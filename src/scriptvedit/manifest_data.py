@@ -27,7 +27,7 @@ _MANIFEST_CATEGORY_MEMBERS = {
     "視覚効果": [
         "fade", "wipe", "zoom", "color_shift", "shake", "chroma_key", "vignette",
         "pixelize", "glow", "lut", "glitch", "perspective_warp", "lens",
-        "ken_burns", "drop_shadow", "outline",
+        "ken_burns", "drop_shadow", "outline", "tint",
     ],
     "変形効果": ["scale", "move", "rotate_to", "move_along", "path_bezier",
                  "throw", "inertia", "look_at"],
@@ -37,11 +37,13 @@ _MANIFEST_CATEGORY_MEMBERS = {
                  "atrim", "atempo", "adelete"],
     "生成効果": ["morph_to", "explode_to", "assemble_from"],
     "テキスト・字幕": ["text", "typewriter", "counter", "subtitles", "karaoke",
-                       "subtitle", "subtitle_box", "bubble", "diagram"],
+                       "subtitle", "subtitle_box", "bubble", "diagram",
+                       "text_image"],
     "数式": ["formula", "formula_lines"],
     "オーディオ": ["avolume", "duck_under", "loop", "audio_sequence",
                    "sfx", "audio_viz", "voice", "narrate", "normalize_audio"],
-    "シーケンス生成": ["slideshow", "transition", "video_sequence", "slide"],
+    "シーケンス生成": ["slideshow", "transition", "video_sequence", "slide",
+                       "stills", "frames"],
     "同期・タイムライン": ["anchor", "pause", "scene", "beat_sync", "marker"],
     "グループ": ["group", "tile"],
     "図形ビルダー": ["circle", "rect", "arrow", "label", "spotlight"],
@@ -162,6 +164,43 @@ _MANIFEST_EASE_CURVES = {
 _MANIFEST_EASE_DIRS = {"in": "イーズイン（加速）", "out": "イーズアウト（減速）",
                        "in_out": "イーズインアウト（加速→減速）"}
 
+_PARTICLE_PARAM_META = {
+    "max_pixels": {"type": "int", "default": 2000, "min": 1,
+                   "desc": "粒の数の上限（不透明な画素から無作為に間引く）。"
+                           "推奨: 文字は 8000〜12000（既定の 2000 は疎ら）"},
+    "speed": {"type": "number", "default": 200.0,
+              "desc": "放射方向の初速 px（進行度 0→1 の間に進む距離。粒ごとに "
+                      "0.5〜1.5 倍）。推奨 250〜450。toward / from_point を"
+                      "指定したときは横ぶれの大きさ"},
+    "gravity": {"type": "number", "default": 300.0,
+                "desc": "重力 px（+ で下へ。進行度 1 で 0.5×gravity 落ちる）。"
+                        "0 で無重力。toward / from_point では道すじのたるみ"},
+    "spread": {"type": "number", "default": 1.0, "min": 0,
+               "desc": "初速のばらつき（0 で純粋な放射状）。推奨 0.5〜1.0"},
+    "swirl": {"type": "number", "default": 0.0,
+              "desc": "重心まわりの回転 rad（正で時計回り）。推奨 0（なし）〜1.5"},
+    "particle_size": {"type": "int", "default": 2, "min": 1,
+                      "desc": "粒（円）の半径 px。推奨 2（1080p）"},
+    "seed": {"type": "int", "default": 42, "desc": "乱数の種（同じ値なら同じ絵）"},
+    "dissolve": {"type": "number", "default": 0.25, "min": 0, "max": 1,
+                 "desc": "元の絵 → 粒へ切り替える進行度の区間（0〜dissolve）。"
+                         "推奨 0.08〜0.15（小さいほど早く粒になる）"},
+    "expand": {"type": "int", "default": None, "min": 0,
+               "desc": "素材の周りに足す透明の余白 px。None（既定）は自動: "
+                       "粒が実際に飛ぶ範囲から決める（左右と上下で別。ほぼ消えた粒は"
+                       "数えず、画面の外になる分は足さない）。数値を渡すと四方に同じ幅"},
+    "fade": {"type": "bool", "default": True,
+             "desc": "True は粒が進行度に合わせて薄れて消える。False は薄れず、"
+                     "散った位置に残る（散らしたまま止めて見せる）"},
+    "delay": {"type": "number", "default": 0, "min": 0,
+              "desc": "動き出すまでの秒数。その間は最初のコマを出すだけで、"
+                      "粒子のコマは作らない（静止の間を blend で作るより速い）"},
+    "duration": {"type": "number", "default": None,
+                 "desc": "動く秒数（None は残り全部）。終わった後は最後のコマを "
+                         "Object の尺の終わりまで保持する"},
+}
+
+
 # パラメータのメタ情報の上書き（型/説明/範囲/choices）。
 # 自動導出（既定値の型・_resolve_param の有無）で足りない箇所だけを宣言する。
 _MANIFEST_PARAM_META = {
@@ -232,6 +271,67 @@ _MANIFEST_PARAM_META = {
                                  "desc": "行の揃え"},
     ("formula_lines", "duration"): {"type": "number", "default": None, "min": 0.01,
                                     "desc": "表示秒数（省略時は .time(秒) で指定）"},
+    # 文字を透過 PNG に焼く（PIL）
+    ("text_image", "content"): {
+        "type": "any", "required": True,
+        "desc": "文字列、または区間のリスト [(\"文字\", {書式}), ...]。改行は \\n。"
+                "書式のキーは color / size / font / font_index / weight"},
+    ("text_image", "size"): {"type": "number", "default": 64, "min": 1, "max": 2000,
+                             "desc": "文字サイズpx（drawtext の fontsize と同じ em の大きさ）"},
+    ("text_image", "font"): {"type": "string", "default": None,
+                             "desc": "フォントファイルパス（省略時は text() と同じ既定の探索。"
+                                     "環境変数 SCRIPTVEDIT_FONT で上書き可）"},
+    ("text_image", "font_index"): {"type": "int", "default": 0, "min": 0,
+                                   "desc": ".ttc の中の書体番号（0 始まり）"},
+    ("text_image", "weight"): {
+        "type": "any", "default": None,
+        "desc": "可変フォントの太さ。数値は wght 軸の値（例 700）、文字列は名前つき"
+                "インスタンス（例 'Bold'）。可変フォントでなければ ValueError"},
+    ("text_image", "color"): {"type": "ffcolor", "default": "white",
+                              "desc": "文字色（色名 / 色名@alpha / #RRGGBB[AA]）"},
+    ("text_image", "markup"): {
+        "type": "bool", "default": False,
+        "desc": "True で content の文字列を簡易マークアップとして読む。{書式|文字} "
+                "（例 '犯人は、{red|正規表現が1本}'）。エスケープは \\{ \\} \\\\ の3つ"},
+    ("text_image", "styles"): {
+        "type": "any", "default": None,
+        "desc": "名前つき書式の辞書（例 {'r': {'color': 'red', 'weight': 900}}）。"
+                "区間 (\"文字\", 'r') とマークアップ {r|文字} から名前で使う"},
+    ("text_image", "line_spacing"): {"type": "number", "default": 1.5, "min": 0.1, "max": 20,
+                                     "desc": "行送り（ベースラインの間隔）÷ その行の文字サイズ"},
+    ("text_image", "align"): {"type": "choice", "default": "left",
+                              "choices": ["left", "center", "right"],
+                              "desc": "行ごとの揃え"},
+    ("text_image", "max_width"): {
+        "type": "number", "default": None, "min": 1,
+        "desc": "自動折り返しの幅px（省略時は折り返さない）。全角はどこでも、欧文は語の"
+                "切れ目で折り返す。行頭禁則は句読点と閉じ括弧の類だけ"},
+    ("text_image", "border"): {"type": "int", "default": 0, "min": 0, "max": 500,
+                               "desc": "縁取りの太さpx（0で無効）"},
+    ("text_image", "border_color"): {"type": "ffcolor", "default": "black",
+                                     "desc": "縁取りの色"},
+    ("text_image", "shadow"): {"type": "any", "default": [0, 0],
+                               "desc": "影のずらし (x, y) px（(0,0)で無効）"},
+    ("text_image", "shadow_color"): {"type": "ffcolor", "default": "black@0.6",
+                                     "desc": "影の色"},
+    ("text_image", "shadow_blur"): {"type": "number", "default": 0, "min": 0, "max": 500,
+                                    "desc": "影のぼかし半径px（shadow=(0,0) でも光彩として出る）"},
+    ("text_image", "background"): {"type": "ffcolor", "default": None,
+                                   "desc": "下地の色（キャンバス全面。省略時は透明）"},
+    ("text_image", "background_radius"): {"type": "number", "default": 0, "min": 0,
+                                          "desc": "下地の角丸の半径px"},
+    ("text_image", "padding"): {
+        "type": "any", "default": None,
+        "desc": "文字のまわりの余白px（数値か (横, 縦)）。省略時は 縁取り + 影 + size の15%"},
+    ("text_image", "canvas"): {
+        "type": "any", "default": None,
+        "desc": "キャンバスを (幅, 高さ) px に固定（文字は縦中央・横は align）。"
+                "morph_to の2枚を同じ寸法にするとき用"},
+    ("text_image", "missing"): {
+        "type": "choice", "default": "error", "choices": ["error", "warn", "ignore"],
+        "desc": "フォントに無い字（豆腐）があったときの扱い（error は ValueError）"},
+    ("text_image", "duration"): {"type": "number", "default": None, "min": 0.01,
+                                 "desc": "表示秒数（省略時は .time(秒) で指定）"},
     # 既定値が None のため型を推定できない引数
     ("speed", "factor"): {"type": "number", "min": 0.1, "desc": "再生速度倍率（2.0で2倍速）"},
     ("zoom", "from_value"): {"type": "number", "desc": "開始スケール"},
@@ -248,10 +348,26 @@ _MANIFEST_PARAM_META = {
                          "desc": "縁取り（アウトライン）の太さpx（0で無効）"},
     ("text", "shadow"): {"type": "any", "default": [0, 0],
                          "desc": "影のオフセット (x, y) px（(0,0)で無効。例 (2, 2)）"},
+    ("text", "line_spacing"): {"type": "int", "default": 0,
+                               "desc": "複数行の行間に足すpx（負値で詰める）"},
+    ("text", "text_align"): {"type": "choice", "default": "left",
+                             "choices": ["left", "center", "right"],
+                             "desc": "複数行の行ごとの揃え（ブロック全体の位置は anchor と x/y）"},
+    ("text", "y_align"): {"type": "choice", "default": "text",
+                          "choices": ["text", "baseline", "font"],
+                          "desc": "y の縦の基準。text=いちばん背の高い字の上端 / "
+                                  "baseline=1行目のベースライン / font=フォントの行の上端"},
     ("typewriter", "border"): {"type": "int", "default": 0, "min": 0,
                                "desc": "縁取りの太さpx（0で無効）"},
     ("typewriter", "shadow"): {"type": "any", "default": [0, 0],
                                "desc": "影のオフセット (x, y) px（(0,0)で無効）"},
+    ("counter", "format"): {"type": "string", "default": "%d",
+                            "desc": "printf 風の書式。%d / %0Nd（ゼロ埋め）/ %,d（桁区切り）/ "
+                                    "%.Nf（小数）/ %,.Nf。前後に固定の文字を書ける"
+                                    "（文字の % は %%。' は不可）"},
+    ("counter", "easing"): {"type": "any", "default": None,
+                            "desc": "値の進み方。None=等速 / イージング名（'ease_out_cubic' 等）/ "
+                                    "u を受け取る関数・Expr（0→1 の進行度を返す）"},
     ("counter", "border"): {"type": "int", "default": 0, "min": 0,
                             "desc": "縁取りの太さpx（0で無効）"},
     ("counter", "shadow"): {"type": "any", "default": [0, 0],
@@ -297,6 +413,36 @@ _MANIFEST_PARAM_META = {
     ("wipe", "direction"): {"type": "choice", "choices": ["left", "right", "up", "down"]},
     ("blend_mode", "mode"): {"type": "choice", "choices": None},   # None → enums から解決
     ("slideshow", "transition"): {"type": "choice", "choices": None},
+    # 絵の列を1本の動画にする（stillseq.py）
+    ("stills", "items"): {
+        "type": "any", "required": True,
+        "desc": "[(画像パス, 表示秒), …]。total を指定したときは [(画像パス, 開始秒), …]"
+                "（昇順・最初は 0）。画像は全部同じ寸法"},
+    ("stills", "total"): {"type": "number", "default": None, "min": 0, "unit": "秒",
+                          "desc": "総尺。指定すると items の秒を開始秒として読む"
+                                  "（最後の絵は total まで）"},
+    ("stills", "size"): {"type": "any", "default": None,
+                         "desc": "(幅, 高さ) px。省略時は画像の寸法そのまま。"
+                                 "指定すると縦横比を保って収め、余白は透明"},
+    ("stills", "fps"): {"type": "number", "default": None, "min": 1, "max": 1000,
+                        "desc": "省略時は Project の fps"},
+    ("frames", "draw"): {
+        "type": "any", "required": True,
+        "desc": "draw(i) → PIL.Image か、形 (高さ, 幅, 4)・uint8 の RGBA numpy 配列。"
+                "i は 0 始まりのコマ番号（時刻は i / fps 秒）"},
+    ("frames", "n_frames"): {"type": "int", "default": None, "min": 1,
+                             "desc": "コマ数（duration とどちらか一方）"},
+    ("frames", "duration"): {"type": "number", "default": None, "min": 0, "unit": "秒",
+                             "desc": "秒数（n_frames とどちらか一方。最も近いコマ数へ丸める）"},
+    ("frames", "key"): {
+        "type": "any", "required": True,
+        "desc": "キャッシュ鍵（必須）。文字列か JSON にできる値。draw のコードは鍵に"
+                "入らないので、描き方や元データを変えたら key を変える"},
+    ("frames", "size"): {"type": "any", "default": None,
+                         "desc": "(幅, 高さ) px。省略時は Project の解像度。"
+                                 "draw はこの寸法で描く"},
+    ("frames", "fps"): {"type": "number", "default": None, "min": 1, "max": 1000,
+                        "desc": "省略時は Project の fps"},
     # transition は Object のみ受ける（実装は文字列パスを TypeError で拒否）
     ("transition", "obj_a"): {"type": "object", "required": True,
                               "desc": "前半の Object（Transform/Effect 未適用の素材）"},
@@ -374,6 +520,9 @@ _MANIFEST_PARAM_META = {
                                "desc": "音量を下げ始める速さ（ミリ秒）"},
     ("duck_under", "release"): {"type": "number", "default": 250, "min": 0,
                                 "desc": "音量を戻す速さ（ミリ秒）"},
+    ("duck_under", "hold"): {"type": "number", "default": 0, "min": 0,
+                             "desc": "相手が止んでから戻り始めるまでの保持時間（ミリ秒。"
+                                     "0=保持なし）。読点や文の間で BGM が戻るのを防ぐ"},
     # Project.configure(**kwargs) の各キー（_CONFIGURE_KEYS。**kwargs なので
     # シグネチャからは導出できず、宣言しないと params が空になる）
     ("Project.configure", "width"): {
@@ -418,7 +567,15 @@ _MANIFEST_PARAM_META = {
                              "desc": "マスク画像パス（輝度をアルファに乗算）"},
     ("mask_wipe", "image_path"): {"type": "string", "required": True,
                                   "desc": "グラデーション画像パス（掃引マスク）"},
-    ("subtitles", "srt_file"): {"type": "string", "required": True, "desc": ".srt ファイルパス"},
+    ("subtitles", "srt_file"): {"type": "string", "required": True,
+                                "desc": "字幕ファイルパス（.srt / .ass / .vtt）"},
+    ("subtitles", "style"): {"type": "string", "default": None,
+                             "desc": "ASS の force_style 文字列（例 'FontName=Meiryo,FontSize=28'）"},
+    ("subtitles", "fontsdir"): {"type": "string", "default": None,
+                                "desc": "フォントを名前で探すフォルダ（同梱フォント用。"
+                                        "システムのフォントに加えて探す）"},
+    ("karaoke", "fontsdir"): {"type": "string", "default": None,
+                              "desc": "style['font'] の名前を探すフォルダ（subtitles と同じ）"},
     # 実装（effects/terminal.py）は Object 以外を TypeError で拒否する。
     # 文字列パスは受け付けない（Object(...) で包んでから渡す）
     ("morph_to", "target"): {"type": "object", "required": True,
@@ -427,6 +584,43 @@ _MANIFEST_PARAM_META = {
     ("assemble_from", "source"): {"type": "object", "required": True,
                                   "desc": "集合元の画像 Object（パス文字列は不可: "
                                           "Object('src.png') で包む）"},
+    # --- morph_to(**morph_params)。既定値は morph.py の関数シグネチャと同じ
+    #     （tests/test_terminal_fx.py が突き合わせる）---
+    ("morph_to", "method"): {"type": "choice", "default": "sdf",
+                             "choices": ["sdf", "transport"],
+                             "desc": "sdf=輪郭（アルファ）の距離場で形を補間（既定。文字・図形向き）/ "
+                                     "transport=最適輸送で画素を動かす（内部の部品が動く。重い）。"
+                                     "省略して transport 専用のキーを渡すと transport"},
+    ("morph_to", "align"): {"type": "bool", "default": True,
+                            "desc": "[sdf] 不透明部の重心を合わせてから補間する"},
+    ("morph_to", "fit"): {"type": "bool", "default": None,
+                          "desc": "[sdf] 不透明部の外接矩形（位置と大きさ）を合わせながら補間する。"
+                                  "None（既定）は自動: 幅か高さが 1.15 倍を超えて違う組だけ合わせる"
+                                  "（幅の違う文字列で端の文字が途中で欠けるのを防ぐ）"},
+    ("morph_to", "edge_softness"): {"type": "number", "default": 1.0, "min": 0,
+                                    "desc": "[sdf] 輪郭のぼかし幅 px"},
+    ("morph_to", "color_ease"): {"type": "int", "default": 1, "min": 0, "max": 3,
+                                 "desc": "[sdf] 色の進行に smoothstep を掛ける回数"
+                                         "（大きいほど両端の色を保つ）"},
+    ("morph_to", "color_path"): {"type": "choice", "default": "oklch",
+                                 "choices": ["oklch", "oklab"],
+                                 "desc": "[sdf] 色の通り道。oklch=色相を回す / oklab=直線"},
+    ("morph_to", "max_pixels"): {"type": "int", "default": 2000, "min": 1,
+                                 "desc": "[transport] 最適輸送のサンプル数（重さは3乗で効く）"},
+    ("morph_to", "delay"): _PARTICLE_PARAM_META["delay"],
+    ("morph_to", "duration"): _PARTICLE_PARAM_META["duration"],
+    # --- explode_to / assemble_from(**particle_params) ---
+    **{(fn, key): meta
+       for fn in ("explode_to", "assemble_from")
+       for key, meta in _PARTICLE_PARAM_META.items()},
+    ("explode_to", "toward"): {
+        "type": "any", "default": None,
+        "desc": "(dx, dy)。放射ではなく、素材の中心からこれだけずれた1点へ粒が集まって消える"
+                "（px。右と下が正）。spread は粒の出発のばらつき、swirl は渦"},
+    ("assemble_from", "from_point"): {
+        "type": "any", "default": None,
+        "desc": "(dx, dy)。素材の中心からこれだけずれた1点から粒が出て、絵に集まる"
+                "（px。右と下が正）"},
     ("narrate", "text_content"): {"type": "string", "required": True, "desc": "読み上げテキスト"},
     ("voice", "text"): {"type": "string", "required": True, "desc": "読み上げテキスト"},
     # TTS バックエンド（None で自動選択: env SCRIPTVEDIT_TTS_BACKEND → VOICEVOX 起動判定 → edge）
@@ -471,9 +665,49 @@ _MANIFEST_NOTES = {
     ],
     "text": ["size は定数のみ。lambda/Expr を渡すと FFmpeg 8 で SEGV するため拒否される",
              "x/y/alpha は Expr/lambda 可（アニメーション可能）",
-             "border=2 の縁取りや shadow=(2, 2) の影で細い文字の可読性を上げられる"],
+             "border=2 の縁取りや shadow=(2, 2) の影で細い文字の可読性を上げられる",
+             "複数行は text_align で行ごとの揃え、line_spacing で行間を決められる",
+             "glow() を掛けても色は変わらない（白い文字は白く光る）"],
     "typewriter": ["size は定数のみ（text と同じ制約）"],
-    "counter": ["size は定数のみ（text と同じ制約）"],
+    "stills": [
+        "何枚あっても ffmpeg への入力は1本。全面 PNG を1枚ずつ Object にすると"
+        "手間が「枚数×尺」に比例し、数百枚ではコマンド長の上限も超える",
+        "切り替わりは境目の時刻を最も近いフレームへ丸める（誤差は積もらない）。"
+        "丸めた結果は obj.starts（各絵の開始秒）/ obj.frame_counts / obj.length()",
+        "音声は obj.starts[i] に合わせて置く（列を @ t で置いたら t + obj.starts[i]）",
+        "time() で総尺より長く表示すると最後の絵が残る（普通の動画は背景が見える）",
+        "alpha を保つ。画像は全部同じ寸法・同じ形式であること（違えば ValueError。"
+        "PNG と JPEG は混ぜられない。RGB の PNG と RGBA の PNG は混ぜてよい）",
+        "生成物は __cache__/artifacts/stills/<鍵>.mov（可逆の qtrle。同じ絵が続く区間は"
+        "ほぼ 0 バイト）。鍵は各画像の内容指紋・各絵のフレーム数・fps・size",
+    ],
+    "frames": [
+        "draw のコードは鍵に入らない。同じ key なら draw を呼ばずに前回の動画を使うので、"
+        "描き方や元データを変えたら key を変える（版番号や元データを key に入れる）",
+        "draw は実レンダでキャッシュが無いときだけ呼ばれる（dry_run では呼ばれない）",
+        "time() で尺より長く表示すると最後のコマが残る。alpha を保つ",
+        "生成物は __cache__/artifacts/frames/<鍵>.mov（可逆の qtrle。前のコマと同じ画素は"
+        "書かないので、動かない部分の多い絵ほど小さい）",
+    ],
+    "text_image": [
+        "Pillow 9.1 以上が必要（pip install \"Pillow>=9.1\"）。戻り値は画像 Object（配置は move(x=, y=, anchor=)）",
+        "morph_to / explode_to / assemble_from の入力・target・source に使える"
+        "（text() 系には掛けられない）。morph の2枚は canvas= で同じ寸法にする",
+        "区間が font を変えたとき、weight と font_index は基本書式から引き継がない",
+        "行の縦位置は基本書式のフォントのメトリクスで決まり、字によって行がガタつかない",
+        "p.audit() は文字サイズ・縁取りの有無・はみ出しを画面上の実寸"
+        "（resize / scale の倍率込み）で検査する",
+        "生成物は __cache__/artifacts/textimage/<鍵>.png（鍵は文字列・書式・"
+        "フォントの内容指紋・Pillow の版）",
+    ],
+    "counter": ["size は定数のみ（text と同じ制約）",
+                "最初のコマは from_、最後のコマは必ず to を表示する"
+                "（総尺がフレーム格子に乗らない動画の末尾でも、出力される最後のコマが to。"
+                "configure(duration=) / render(end=) で途中を切った場合は切った時点の値）",
+                "|値|×10^小数桁 が 2^53（約 9.007e15）未満なら全桁が正しい。"
+                "定数の from_ / to がこれを超えると ValueError",
+                "32ビットを超える整数・桁区切り・小数は、桁数と符号ごとの drawtext を"
+                "切り替えて表示する（フィルタが数個に増える）"],
     "reverse": ["実効尺は最大30秒（全フレームをメモリに保持するため）。超えると ValueError",
                 "live Effect（bakeable ではない）"],
     "speed": ["映像の実効尺が 元尺/factor になる（length()/自動尺に反映）",
@@ -484,11 +718,32 @@ _MANIFEST_NOTES = {
     "morph_to": ["bakeable ops の末尾に1つだけ置ける（終端フレーム生成Effect）",
                  "target は Object のみ（パス文字列は TypeError）。画像 media_type 限定",
                  "target に Transform/Effect が付いていると ValueError"
-                 "（生成処理は素の source しか読まないため）"],
-    "explode_to": ["bakeable ops の末尾に1つだけ置ける（終端フレーム生成Effect）"],
+                 "（生成処理は素の source しか読まないため）",
+                 "sdf は輪郭（アルファ）で形を補間する。背景が透明な画像が前提で、"
+                 "全面不透明・全体が半透明の素材や、2枚の不透明部が重ならない組は"
+                 "形が動かずクロスフェードになる（生成時に警告。"
+                 "p.audit() は morph-sdf-crossfade を出す）",
+                 "morph_to(b, delay=0.5, duration=1.5) で「0.5 秒待って 1.5 秒で変形、"
+                 "残りは b を保持」。前後に同じ絵の静止画を別に置かなくてよい",
+                 "sdf の整列の余白は対称に付き、move の anchor は2枚を中央で重ねた"
+                 "共通キャンバス（余白を除く）が基準。動く区間は最低2コマ作るので、"
+                 "duration が1コマ以下でも最後は target の絵になる"],
+    "explode_to": ["bakeable ops の末尾に1つだけ置ける（終端フレーム生成Effect）",
+                   "expand は既定（None）で自動。粒が素材の矩形で箱型に切れない",
+                   "余白（expand）は対称に付き、move の anchor は余白を除いた元の絵の箱が基準"
+                   "（topleft 等でも静止画として置いたときと同じ位置に映る）",
+                   "散らしたまま残すには fade=False。duration=秒 と組み合わせると、"
+                   "散り終えた状態を Object の尺の終わりまで保持する",
+                   "静止の間は blend ではなく delay=秒 で作る（その間のコマを粒子計算で焼かない）",
+                   "重さは「余白込みのキャンバス面積 × 動くコマ数」。"
+                   "目安は 12000 粒・1080p・2 秒で 15 秒前後（2回目からはキャッシュ）"],
     "assemble_from": ["bakeable ops の末尾に1つだけ置ける（終端フレーム生成Effect）",
                       "source は Object のみ（パス文字列は TypeError）。画像 media_type 限定",
-                      "source に Transform/Effect が付いていると ValueError"],
+                      "source に Transform/Effect が付いていると ValueError",
+                      "expand は既定（None）で自動。fade=False で粒が最初から濃いまま集まる",
+                      "余白（expand）は対称に付き、move の anchor は余白を除いた source の絵の箱が基準",
+                      "assemble_from(src, duration=1.6) で 1.6 秒で集まり、"
+                      "残りは集まった絵を保持する"],
     "rotate": ["時間依存の式（u を含む式）は不可。時間変化する回転は rotate_to() を使う"],
     "flip": ["flip() は左右反転、flip(vertical=True) は上下反転だけ。"
              "両方（180度回転と同じ絵）は flip(horizontal=True, vertical=True) と明示する",
@@ -503,7 +758,8 @@ _MANIFEST_NOTES = {
              "（タイムラインの絶対時刻）→ Project の総尺"],
     "keyframes": ["時刻は秒ではなく u（0..1。表示区間の進行度）。obj.time(4) なら u=0.5 は"
                   "表示開始から2秒後。範囲外の時刻は端の値で止まるだけでエラーにならないので、"
-                  "秒のまま渡すと u=1 より後のキーは黙って届かない",
+                  "秒のまま渡すと u=1 より後のキーは黙って届かない。"
+                  "秒で書くなら keyframes_sec（区間1つなら ramp）",
                   "最低2点・最大128点"],
     "sfx": ["at は数値1つでも数値のリストでもよい（at=2.5 と at=[2.5] は同一・同じキャッシュ鍵）",
             "p.audit() の重なり判定は [0, 最後の at + 素材長] ではなく各発音区間で行う"],
@@ -516,9 +772,16 @@ _MANIFEST_NOTES = {
                 "backend=None は自動選択（VOICEVOX 起動中なら voicevox、無ければ edge）。"
                 "エンジン停止中は edge-tts があれば別の声で合成され（無ければ RuntimeError）、"
                 "VOICEVOX のキャッシュは使われない",
+                "**tts_kwargs は voice と同じ（readings / pre_silence / post_silence / "
+                "pause_length / pause_scale / intonation / volume_scale / kana など）。"
+                "readings は読み上げにだけ効き、字幕は元の文のまま",
                 "subtitle_textで読み上げと表示文を分離でき、subtitle_max_charsは日本語禁則対応",
                 "subtitle_safe_areaは領域に収まる字幕矩形の位置を画面内へクランプする"],
     "duck_under": ["sidechainは自動で無音延長され、others終了後もBGMは指定尺まで続く",
+                   "hold（ms）を指定すると、相手が止んでから hold の間は直前の発声の平均的な"
+                   "検出レベルを保ち、その後 release で戻る（読点・文の間で戻らない）。"
+                   "release を長くする代わりに使う（例: release=250, hold=600）。"
+                   "hold > 0 では検出用の枝が 48kHz モノラルの包絡になる",
                    "others は複数指定できる（duck_under(n1, n2, n3)）。サイドチェーンは各 other を"
                    " amix(normalize=0) で合算した1本で、どれか1つでも鳴っている間は下がる",
                    "1つのObjectに duck_under は1回だけ（相手が複数なら1回の呼び出しにまとめる）",
@@ -529,6 +792,12 @@ _MANIFEST_NOTES = {
                    "（ステレオは (L+R)/2）してから合算する",
                    "p.audit() の audio-overlap-no-duck は「BGM 役（duck_under / loop を持つ音声）と、"
                    "それがダックしていない音声」の1秒以上の重なりを数える（前景同士は数えない）"],
+    "video_sequence": ["返却Objectのdurationは合成尺（sum(実長) - t_dur*(n-1)）へ自動設定される。"
+                       "time() を呼ばなくてよく、引数なしの time() も通る"
+                       "（生成物が未生成の初回レンダでも、合成尺は入力の probe で確定している）",
+                       "自動設定された duration は仮の値。後から speed() / trim() を足すか "
+                       "compute(duration=d) で焼き直すと、レイヤー実行後に加工後の尺へ入れ直される"
+                       "（time(d) / show(d) で明示した尺は変えない）"],
     "audio_sequence": ["返却Objectのdurationは連結後の実尺へ自動設定される",
                        "Narrationを渡すと字幕もcrossfade込みで配置され、数値@へ追従する",
                        "連結前に各入力を 48kHz・ステレオへ揃える（acrossfade の出力形式は"
@@ -562,7 +831,14 @@ _MANIFEST_NOTES = {
               "backend=None（既定）はエンジン停止中は edge-tts があれば別の声で合成され"
               "（無ければ RuntimeError）、VOICEVOX のキャッシュは使われない",
               'backend="edge" なら pip install edge-tts で使える（オンライン必須）',
-              "speaker の意味はバックエンドごとに違う（数値ID / 音声名）"],
+              "speaker の意味はバックエンドごとに違う（数値ID / 音声名）",
+              "**tts_kwargs は scriptvedit.tts.tts() へそのまま渡る: cache_dir / host / port、"
+              '語の読み替え readings={"金": "カネ"}（合成に渡す文だけ。全バックエンド可）、'
+              "VOICEVOX 専用の pre_silence / post_silence（前後の無音・秒）/ "
+              "pause_length / pause_scale（句読点の間）/ intonation / volume_scale / "
+              "kana（AquesTalk 風カナ）。指定した項目だけがキャッシュ鍵に入る",
+              "語が読まれ始める秒は scriptvedit.tts.tts_marks(同じ引数).time_of('語')"
+              "（VOICEVOX 専用。wav の先頭からの秒）"],
     "beat_sync": ["scipy が必要（未インストールなら ImportError）",
                   "beats / onsets は秒。keyframes の時刻は u（0..1）なので、"
                   "scriptvedit.beat.beats_to_keyframes へ渡す前に表示尺で割る"
@@ -573,7 +849,8 @@ _MANIFEST_NOTES = {
                       "（レイヤー内の Object は作った順で、後が上）"],
     "slide": ["HTML レンダリングに web 経路（Playwright 等）を使う"],
     "lut": [".cube 形式のみ"],
-    "subtitles": ["SRT の文字コードは UTF-8"],
+    "subtitles": ["SRT の文字コードは UTF-8",
+                  "フォントは名前で探す。システムに無いフォントは fontsdir で渡す"],
 }
 
 # エントリごとの最小例
@@ -595,16 +872,38 @@ _MANIFEST_EXAMPLES = {
     "wipe": "img <= wipe(direction='left')",
     "text": "t = text('こんにちは', x=0.5, y=0.2, size=48, color='white')\nt.time(3) <= fade(lambda u: u)",
     "typewriter": "typewriter('タイプ表示', cps=12).time(4)",
-    "counter": "counter(0, 100, format='%d%%').time(3)",
-    "subtitles": "subtitles('subs.srt', style={'size': 36})",
+    "text_image": ("t = text_image([('犯人は、', {}), ('正規表現が1本', {'color': 'red'})],\n"
+                   "               size=72, border=4, max_width=1600)\n"
+                   "t.time(3) <= move(x=0.5, y=0.5, anchor='center')\n"
+                   "boom = text_image('崩壊', size=160, border=6, padding=60)\n"
+                   "boom.time(2) <= explode_to(max_pixels=8000, expand=300)"),
+    "counter": ("counter(0, 100, format='%d%%').time(3)\n"
+                "counter(0, 1234567, format='¥%,d', easing='ease_out_cubic', border=3).time(3)"),
+    "subtitles": "subtitles('subs.srt', style='FontName=Meiryo,FontSize=36', fontsdir=here('fonts'))",
     "blend_mode": "obj <= blend_mode('screen')",
     "mask": "obj <= mask('mask_circle.png')",
     "opacity": "obj <= opacity(0.5)",
+    "tint": ("line <= tint('red')                       # 白い線画を赤に\n"
+             "line.time(3) <= tint('#ffcc00', amount=ramp(1.0, 1.5))   # 1.0〜1.5 秒で色が付く\n"
+             "icon <= tint('blue', mode='fill')         # 黒い線画も青に"),
+    "ramp": ("obj.time(6) <= fade(ramp(0, 0.4) * (1 - ramp(0.4, 0, from_end=True)))\n"
+             "obj.time(6) <= wipe('left', progress=ramp(1.2, 1.6, ease_out_cubic))"),
+    "keyframes_sec": "obj.time(6) <= fade(keyframes_sec((0, 0), (0.25, 1), (5.5, 1), (6, 0)))",
     "speed": "clip_.time(4) <= speed(2.0)   # 2倍速",
     "reverse": "clip_ <= reverse()",
     "morph_to": "img <= morph_to(Object(asset('images/target.png')))",
     "slideshow": "slideshow(['a.png', 'b.png', 'c.png'], each=3.0, transition='fade')",
     "transition": "transition(obj_a, obj_b, kind='wipeleft', duration=1.0)",
+    "stills": ("pages = stills([('p1.png', 6.4), ('p2.png', 7.1), ('p3.png', 5.0)])\n"
+               "pages.time(20)            # 総尺 18.5 秒より長い分は最後の絵が残る\n"
+               "voice2 = Object('v2.wav') @ pages.starts[1]   # 2枚目の開始に音声を合わせる\n"
+               "stills([('a.png', 0), ('b.png', 3.2), ('c.png', 9)], total=12)   # 開始秒で書く形"),
+    "frames": ("def draw(i):                       # i はコマ番号（時刻は i / fps 秒）\n"
+               "    im = Image.new('RGBA', (1920, 1080), (0, 0, 0, 0))\n"
+               "    ImageDraw.Draw(im).rectangle([100, 500, 100 + i * 20, 560], fill='white')\n"
+               "    return im\n"
+               "bar = frames(draw, duration=2.0, key=['bar', 1])   # 描き方を変えたら key を変える\n"
+               "bar.time(5)                        # 2 秒より後は最後のコマが残る"),
     "keyframes": "img <= scale(keyframes((0, 1.0), (0.5, 1.5), (1, 1.0), easing=ease_in_out_sine))",
     "avolume": "bgm <= avolume(0.3)",
     "loop": ("bgm <= loop() & duck_under(narration_audio)   # time() は呼ばない（総尺までループ）\n"
@@ -685,6 +984,18 @@ _MANIFEST_CONSTRAINTS = [
         "text": "text/typewriter/counter の size は定数のみ。fontsize に式を渡すと "
                 "FFmpeg 8 で SEGV(0xC0000005) するため、Expr/lambda は構築時に拒否される。"
                 "文字サイズを変化させたい場合は scale() Effect で拡大縮小する。",
+    },
+    {
+        "id": "text_no_terminal_frame_effect",
+        "topic": "テキスト",
+        "severity": "error",
+        "applies_to": ["text", "typewriter", "counter", "morph_to", "explode_to",
+                       "assemble_from", "text_image"],
+        "text": "text/typewriter/counter（drawtext 系。実体の画像を持たない）には "
+                "morph_to / explode_to / assemble_from を掛けられず、compute() もできない"
+                "（どちらも ValueError）。文字を粒子化・モーフするときは "
+                "text_image() で透過 PNG の画像 Object にしてから適用する。"
+                "morph_to の target / assemble_from の source も同じ。",
     },
     {
         "id": "reverse_max_30s",
@@ -982,6 +1293,7 @@ _MANIFEST_EXPR_GROUPS = {
     "イージング": ["linear", "ease_cubic_bezier", "ease_spring", "steps", "apply_easing"],
     "シーケンス・キーフレーム": ["phase", "sequence_param", "repeat", "bounce",
                                  "alternate", "staircase", "keyframes"],
+    "秒で書く時間": ["elapsed", "remaining", "ramp", "keyframes_sec"],
 }
 
 

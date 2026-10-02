@@ -51,6 +51,16 @@ voicevox はさらに「正規化した接続先 endpoint + エンジンの /ver
 原子的に保存する。エンジンが止まっていて届かないときは、その保存値で鍵を作り、
 キャッシュに当たればそのまま使う（プロセス内で1回だけ警告）。キャッシュに無く
 合成が要るときだけ、従来どおりの ConnectionError になる。
+
+VOICEVOX だけの調整（audio_query を書き換える。既定 None は「触らない」）:
+    pre_silence / post_silence : 文の前後の無音（秒。エンジン既定 0.1）
+    pause_length / pause_scale : 句読点の間を固定秒に／倍率で
+    intonation / volume_scale  : 抑揚／音量
+    kana                       : AquesTalk 風カナで読みとアクセントを指定
+    readings={"金": "カネ"}    : 合成に渡す文だけ語を読み替える（全バックエンド可）
+語の時刻（字幕や図を「この語が読まれた瞬間」に合わせる）:
+    m = tts_marks("金は戻らなかった。答えは、まだ無い。", backend="voicevox", speaker=13)
+    m.time_of("答えは")   # → wav の先頭から数えた秒
 """
 
 import argparse
@@ -60,6 +70,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -126,7 +137,8 @@ def _resolve_backend(backend, *, host=_DEFAULT_HOST, port=_DEFAULT_PORT):
     return backend
 
 
-def _cache_path(backend, text, speaker, speed, pitch, cache_dir, engine=None):
+def _cache_path(backend, text, speaker, speed, pitch, cache_dir, engine=None,
+                adjust=None):
     """キャッシュファイルのパスを決定する（backend+text+speaker+speed+pitch の sha256）
 
     backend を鍵に含めるのは、同じテキスト・話者でもバックエンドが違えば
@@ -136,11 +148,25 @@ def _cache_path(backend, text, speaker, speed, pitch, cache_dir, engine=None):
     同じ cache_dir で host/port やエンジン本体を切り替えても、別エンジンの
     旧音声がヒットしないよう鍵に混ぜる。None のバックエンド（edge/sapi）では
     鍵に含めない（既存キャッシュを無駄に無効化しないため）。
+
+    adjust は VOICEVOX の調整（_normalize_adjust の戻り値）。**指定された項目だけ**を
+    固定順で鍵に足すので、何も指定しなければ鍵は調整機能の導入前と同じ文字列になる。
+    kana を指定したときは text を鍵から外す（アクセント句がカナで丸ごと置き換わり、
+    元の文は出力に効かないため。同一出力なら同一鍵）。
+    text には読み替え（readings）を適用した後の「合成に渡す文」を渡すこと。
     """
+    adjust = adjust or {}
+    if adjust.get("kana") is not None:
+        text = ""
     sig = (f"backend={backend}||{text}||speaker={speaker!r}"
            f"||speed={float(speed):g}||pitch={float(pitch):g}")
     if engine is not None:
         sig += f"||engine={engine}"
+    for name, _field, tag in _VV_ADJUST_FIELDS:
+        if adjust.get(name) is not None:
+            sig += f"||{tag}={adjust[name]!r}"
+    if adjust.get("kana") is not None:
+        sig += f"||kana={adjust['kana']}"
     key = hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
     return os.path.join(cache_dir, f"{key}.wav")
 
@@ -150,8 +176,99 @@ def _is_cache_hit(cache_path):
     return os.path.exists(cache_path) and os.path.getsize(cache_path) > 0
 
 
+# VOICEVOX の audio_query を調整する引数: (引数名, クエリのフィールド名, 鍵のタグ)。
+# 鍵へ足す順番はこの並びで固定する。
+_VV_ADJUST_FIELDS = (
+    ("pre_silence", "prePhonemeLength", "pre"),
+    ("post_silence", "postPhonemeLength", "post"),
+    ("pause_length", "pauseLength", "pause"),
+    ("pause_scale", "pauseLengthScale", "pause_scale"),
+    ("intonation", "intonationScale", "intonation"),
+    ("volume_scale", "volumeScale", "volume"),
+)
+
+
+def _normalize_adjust(func, backend, *, pre_silence=None, post_silence=None,
+                      pause_length=None, pause_scale=None, intonation=None,
+                      volume_scale=None, kana=None):
+    """VOICEVOX 専用の調整引数を検査して「指定された項目だけ」の dict にする
+
+    None は「エンジンの既定のまま触らない」。指定された値は float に揃えて
+    鍵にもクエリにも入れる（エンジン既定と同じ値を明示しても別の鍵になる。
+    既定値はエンジンが決めるもので、エンジンに届かないときは分からないため）。
+    VOICEVOX 以外のバックエンドに1つでも渡されたら ValueError。
+    """
+    given = {"pre_silence": pre_silence, "post_silence": post_silence,
+             "pause_length": pause_length, "pause_scale": pause_scale,
+             "intonation": intonation, "volume_scale": volume_scale, "kana": kana}
+    given = {k: v for k, v in given.items() if v is not None}
+    if not given:
+        return {}
+    if backend != "voicevox":
+        raise ValueError(
+            f'{func}(backend="{backend}"): {" / ".join(given)} は VOICEVOX 専用です'
+            '（audio_query を書き換える調整。backend="voicevox" を明示するか、'
+            "これらの引数を外してください。語の読み替え readings はどのバックエンドでも使えます）")
+    out = {}
+    for name, _field, _tag in _VV_ADJUST_FIELDS:
+        if name not in given:
+            continue
+        v = given[name]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"{func}: {name} は数値です: {v!r}")
+        v = float(v)
+        if v != v or v in (float("inf"), float("-inf")) or v < 0:
+            raise ValueError(f"{func}: {name} は 0 以上の有限の数です: {v!r}")
+        out[name] = v
+    if "kana" in given:
+        k = given["kana"]
+        if not isinstance(k, str) or not k.strip():
+            raise ValueError(
+                f"{func}: kana は AquesTalk 風カナの文字列です"
+                f"（例 \"アタイワ'/カラノ'/ハイレツダッタ'\"）: {k!r}")
+        out["kana"] = k.strip()
+    return out
+
+
+def _apply_readings(func, text, readings):
+    """語の読み替えを適用し、(合成に渡す文, 合成文の各文字 → 元の文の文字位置) を返す
+
+    readings は {"金": "カネ"} の形。文を左から走査し、その位置で当たる語のうち
+    **最も長いもの**を1回だけ置き換える（置き換えた結果をもう一度置き換えない。
+    dict の並び順にも依らない）。置き換え後の文字はすべて元の語の先頭位置へ対応づける。
+    """
+    if readings is None:
+        return text, list(range(len(text)))
+    if not isinstance(readings, dict):
+        raise ValueError(
+            f'{func}: readings は {{"語": "読み"}} の dict です: {readings!r}')
+    for k, v in readings.items():
+        if not isinstance(k, str) or not k or not isinstance(v, str):
+            raise ValueError(
+                f"{func}: readings のキーは空でない文字列、値は文字列です: {k!r}: {v!r}")
+    keys = sorted(readings, key=lambda k: (-len(k), k))
+    out, origin, i = [], [], 0
+    while i < len(text):
+        for k in keys:
+            if text.startswith(k, i):
+                out.append(readings[k])
+                origin.extend([i] * len(readings[k]))
+                i += len(k)
+                break
+        else:
+            out.append(text[i])
+            origin.append(i)
+            i += 1
+    synth_text = "".join(out)
+    if not synth_text:
+        raise ValueError(f"{func}: readings を適用した結果、読み上げる文が空になりました")
+    return synth_text, origin
+
+
 def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
-        cache_dir=_DEFAULT_CACHE_DIR, host=_DEFAULT_HOST, port=_DEFAULT_PORT):
+        cache_dir=_DEFAULT_CACHE_DIR, host=_DEFAULT_HOST, port=_DEFAULT_PORT,
+        pre_silence=None, post_silence=None, pause_length=None, pause_scale=None,
+        intonation=None, volume_scale=None, kana=None, readings=None):
     """テキストを音声合成し、wav ファイルのパスを返す
 
     Args:
@@ -163,6 +280,22 @@ def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
         pitch:     音高（0.0 が標準）
         cache_dir: キャッシュディレクトリ
         host/port: VOICEVOX エンジンのアドレス（backend="voicevox" のときのみ有効）
+        readings:  合成に渡す文だけに掛ける語の読み替え（{"金": "カネ"}）。
+                   どのバックエンドでも使える。鍵には読み替え後の文が入るので、
+                   tts("カネは") と tts("金は", readings={"金": "カネ"}) は同じ wav
+        以下は **VOICEVOX 専用**（ほかのバックエンドに渡すと ValueError）。
+        None は「エンジンの既定のまま」で、鍵も出力も指定しないときと同じ:
+        pre_silence / post_silence: 文の前後の無音（秒。エンジン既定 0.1）
+        pause_length: 句読点の間をすべてこの秒数に固定する
+        pause_scale:  句読点の間の倍率（pause_length と併用すると固定値に掛かる）
+                      ※ pause_length / pause_scale の無い古いエンジンでは RuntimeError
+                      ※ 無音と間はどれも speed で割られる（speed=1.25 なら 0.8 倍）
+        intonation:   抑揚（intonationScale。1.0 が標準）
+        volume_scale: 音量（volumeScale。1.0 が標準）
+        kana:         AquesTalk 風カナで読みとアクセントを丸ごと指定する
+                      （句は「/」、間つきの句切りは「、」、各句にアクセント「'」が1つ必須。
+                      例 "アタイワ'/カラノ'/ハイレツダッタ'"）。指定すると text は
+                      音声に効かなくなる（鍵にも入らない）
 
     Returns:
         生成された wav ファイルのパス（キャッシュ済みなら合成せず即返す）
@@ -177,6 +310,12 @@ def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
     if not text:
         raise ValueError("tts: text が空です")
     backend = _resolve_backend(backend, host=host, port=port)
+    adjust = _normalize_adjust(
+        "tts", backend, pre_silence=pre_silence, post_silence=post_silence,
+        pause_length=pause_length, pause_scale=pause_scale, intonation=intonation,
+        volume_scale=volume_scale, kana=kana)
+    # ここから下の text は「合成に渡す文」（読み替え後）
+    text, _origin = _apply_readings("tts", text, readings)
 
     # キャッシュ鍵に使う speaker は「解決後の値」にする。
     # （speaker=None と speaker=1 が voicevox では同じ音声なので同じ鍵にしたい）
@@ -195,7 +334,7 @@ def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
         resolved = _sapi_voice(speaker)
 
     cache_path = _cache_path(backend, text, resolved, speed, pitch, cache_dir,
-                             engine=engine)
+                             engine=engine, adjust=adjust)
     # キャッシュ命中判定。CLAUDE.md §5 の「__cache__ 配下に『存在すればスキップ』
     # ガードを置かない」は、再生成がタダ（内容から一意に書き直せる）テキスト成果物
     # の話で、ここは当てはまらない: TTS の再生成には VOICEVOX エンジンの起動や
@@ -219,13 +358,14 @@ def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
         if not online:
             raise _needs_synth_error(host, port, text, engine)
         cache_path = _cache_path(backend, text, resolved, speed, pitch, cache_dir,
-                                 engine=engine)
+                                 engine=engine, adjust=adjust)
         if _is_cache_hit(cache_path):
             return cache_path
     os.makedirs(cache_dir, exist_ok=True)
 
     if backend == "voicevox":
-        _synth_voicevox(text, resolved, speed, pitch, cache_path, host, port)
+        _synth_voicevox(text, resolved, speed, pitch, cache_path, host, port,
+                        adjust=adjust)
     elif backend == "edge":
         _synth_edge(text, resolved, speed, pitch, cache_path)
     else:
@@ -428,12 +568,12 @@ def _warn_voicevox_offline_once(host, port, engine):
         stacklevel=3)
 
 
-def _needs_synth_error(host, port, text, engine):
+def _needs_synth_error(host, port, text, engine, need="合成"):
     """保存値で代用中に未キャッシュのテキストが来たときの ConnectionError"""
     snippet = text if len(text) <= 40 else text[:40] + "…"
     return ConnectionError(
         f"{_not_running_error(host, port)}\n"
-        f"  - このテキストはキャッシュに無いため合成が必要です: {snippet!r}\n"
+        f"  - このテキストはキャッシュに無いため{need}が必要です: {snippet!r}\n"
         f"    （キャッシュ済みのテキストは、前回エンジンに届いたときの署名 {engine} で"
         "再利用しています）")
 
@@ -479,9 +619,13 @@ def _request(url, *, host, port, method="GET", data=None, headers=None,
         raise _not_running_error(host, port) from e
 
 
-def _synth_voicevox(text, speaker, speed, pitch, cache_path, host, port):
-    """VOICEVOX で合成して cache_path へ wav を書き出す"""
+def _voicevox_query(text, speaker, speed, pitch, host, port, adjust=None):
+    """合成に渡す audio_query（調整を全部適用した後の dict）を作る
+
+    tts() の合成と tts_marks() の時刻計算が**同じクエリ**を使うための唯一の入口。
+    """
     base = _base_url(host, port)
+    adjust = adjust or {}
 
     # 1) audio_query: テキストから合成用クエリ(JSON)を生成
     #    長文ではクエリ生成にも時間がかかるため synthesis と同じ上限を使う
@@ -490,18 +634,572 @@ def _synth_voicevox(text, speaker, speed, pitch, cache_path, host, port):
                    method="POST", timeout=_SYNTH_TIMEOUT)
     query = json.loads(raw)
 
-    # 2) 話速・音高を調整
+    # 2) 読みの指定（AquesTalk 風カナ）: アクセント句を丸ごと差し替える
+    kana = adjust.get("kana")
+    if kana is not None:
+        kana_qs = urllib.parse.urlencode(
+            {"text": kana, "speaker": int(speaker), "is_kana": "true"})
+        try:
+            raw = _request(f"{base}/accent_phrases?{kana_qs}", host=host, port=port,
+                           method="POST", timeout=_SYNTH_TIMEOUT)
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"tts: kana を VOICEVOX が解釈できませんでした: {kana!r}\n"
+                "  AquesTalk 風カナは、句を「/」、間つきの句切りを「、」で区切り、"
+                "各句にアクセント「'」を1つ置きます"
+                "（例 \"アタイワ'/カラノ'/ハイレツダッタ'\"）\n"
+                f"{e}") from e
+        query["accent_phrases"] = json.loads(raw)
+        query["kana"] = kana
+
+    # 3) 話速・音高と、指定された調整だけを書き込む
     query["speedScale"] = float(speed)
     query["pitchScale"] = float(pitch)
+    for name, field, _tag in _VV_ADJUST_FIELDS:
+        if name not in adjust:
+            continue
+        if name in ("pause_length", "pause_scale") and field not in query:
+            # 黙って無視すると「鍵は違うのに同じ音声」になり、間が変わらない理由も
+            # 分からないので止める
+            raise RuntimeError(
+                f"tts: この VOICEVOX エンジンは {field} に対応していません"
+                f"（{name} は使えません。エンジンを更新するか、文を分けて合成し"
+                "無音を自分で挟んでください）")
+        query[field] = adjust[name]
+    return query
 
-    # 3) synthesis: クエリを渡して wav を取得
+
+def _synth_voicevox(text, speaker, speed, pitch, cache_path, host, port, adjust=None):
+    """VOICEVOX で合成して cache_path へ wav を書き出す
+
+    合成に使ったクエリは wav と同じ鍵の <鍵>.marks.json にも控える
+    （tts_marks() がエンジン無しで語の時刻を返せるようにするため）。
+    """
+    query = _voicevox_query(text, speaker, speed, pitch, host, port, adjust)
+
+    # synthesis: クエリを渡して wav を取得
     wav_bytes = _request(
-        f"{base}/synthesis?speaker={int(speaker)}", host=host, port=port,
+        f"{_base_url(host, port)}/synthesis?speaker={int(speaker)}", host=host, port=port,
         method="POST", data=json.dumps(query).encode("utf-8"),
         headers={"Content-Type": "application/json", "Accept": "audio/wav"},
         timeout=_SYNTH_TIMEOUT)
 
     _atomic_write_bytes(cache_path, wav_bytes)
+    if _valid_marks_query(query):
+        _write_marks_query(_marks_path(cache_path), query)
+
+
+# =============================================================================
+# 語の時刻（tts_marks）
+# =============================================================================
+
+# VOICEVOX は音素の長さを「24000Hz / 256 サンプル = 93.75 フレーム/秒」の整数フレームへ
+# 丸めてから波形を作る（子音と母音は別々に丸める）。秒の合計ではなくフレームの合計で
+# 数えると wav の長さとサンプル単位で一致する（0.25.2 で実測。秒の合計だと最大 40ms ずれた）。
+_VV_FRAME_RATE = 93.75
+# 疑問形（is_interrogative）の句は、合成のとき語尾に 0.15 秒のモーラが1つ足される
+_VV_UPSPEAK_LENGTH = 0.15
+_MARKS_FORMAT = 1
+
+
+def _marks_path(wav_path):
+    """wav のキャッシュパス → 同じ鍵の marks.json"""
+    return os.path.splitext(wav_path)[0] + ".marks.json"
+
+
+def _valid_marks_query(query):
+    """時刻を計算できる形の audio_query か（壊れた控えを命中扱いにしないための検査）"""
+    if not isinstance(query, dict):
+        return False
+    phrases = query.get("accent_phrases")
+    if not isinstance(phrases, list) or not phrases:
+        return False
+
+    def num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    for ap in phrases:
+        if not isinstance(ap, dict) or not isinstance(ap.get("moras"), list):
+            return False
+        moras = list(ap["moras"])
+        if ap.get("pause_mora") is not None:
+            moras.append(ap["pause_mora"])
+        for m in moras:
+            if not isinstance(m, dict) or not num(m.get("vowel_length")):
+                return False
+            if m.get("consonant_length") is not None and not num(m["consonant_length"]):
+                return False
+    speed = query.get("speedScale", 1.0)
+    return num(speed) and speed > 0
+
+
+def _write_marks_query(path, query):
+    """marks.json を原子的に書く（失敗しても合成は止めない。失うのは控えだけ）"""
+    try:
+        _atomic_write_text(path, json.dumps(
+            {"format": _MARKS_FORMAT, "query": query}, ensure_ascii=False) + "\n")
+    except OSError as e:
+        warnings.warn(f"TTS の語の時刻の控えを保存できませんでした（{path}）: {e}",
+                      stacklevel=3)
+
+
+def _read_marks_query(path):
+    """marks.json からクエリを読む（無い・壊れている・形が違うときは None ＝ 作り直す）"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("format") != _MARKS_FORMAT:
+        return None
+    query = data.get("query")
+    return query if _valid_marks_query(query) else None
+
+
+def _query_timeline(query):
+    """audio_query（調整後）から、モーラと間の開始・終了秒を出す純粋関数
+
+    Returns:
+        {"elems": [{"kind": "mora" | "pause", "text", "start", "end", "phrase"}, ...],
+         "phrases": [{"kana", "start", "end", "pause": (開始, 終了) | None}, ...],
+         "speech_start": 前の無音の終わり, "speech_end": 後ろの無音の始まり,
+         "duration": wav の長さ}
+    秒は wav の先頭から。合成と同じく音素ごとにフレームへ丸めて積む。
+    """
+    speed = float(query.get("speedScale") or 1.0)
+    pause_fixed = query.get("pauseLength")
+    pause_scale = query.get("pauseLengthScale")
+    pause_scale = 1.0 if pause_scale is None else float(pause_scale)
+
+    def frames(sec):
+        return int(round(float(sec or 0.0) / speed * _VV_FRAME_RATE))
+
+    def sec(n):
+        return n / _VV_FRAME_RATE
+
+    n = frames(query.get("prePhonemeLength"))
+    speech_start = sec(n)
+    elems, phrases = [], []
+    for pi, ap in enumerate(query["accent_phrases"]):
+        p_start = n
+        moras = ap["moras"]
+        for m in moras:
+            m_start = n
+            if m.get("consonant_length") is not None:
+                n += frames(m["consonant_length"])
+            n += frames(m["vowel_length"])
+            elems.append({"kind": "mora", "text": str(m.get("text", "")),
+                          "start": sec(m_start), "end": sec(n), "phrase": pi})
+        if ap.get("is_interrogative") and moras and (moras[-1].get("pitch") or 0) != 0:
+            # 疑問形の語尾の伸び。最後のモーラの続きとして数える
+            n += frames(_VV_UPSPEAK_LENGTH)
+            elems[-1]["end"] = sec(n)
+        p_end = n
+        pause = None
+        pm = ap.get("pause_mora")
+        if pm is not None:
+            length = pm["vowel_length"] if pause_fixed is None else pause_fixed
+            n += frames(float(length) * pause_scale)
+            pause = (sec(p_end), sec(n))
+            elems.append({"kind": "pause", "text": str(pm.get("text", "、")),
+                          "start": pause[0], "end": pause[1], "phrase": pi})
+        phrases.append({"kana": "".join(str(m.get("text", "")) for m in moras),
+                        "start": sec(p_start), "end": sec(p_end), "pause": pause})
+    speech_end = sec(n)
+    n += frames(query.get("postPhonemeLength"))
+    return {"elems": elems, "phrases": phrases, "speech_start": speech_start,
+            "speech_end": speech_end, "duration": sec(n)}
+
+
+_SMALL_KANA = frozenset("ァィゥェォャュョヮ")
+# 文字と読みが違うカナ（助詞の は・へ・を、長音になる う・い、ぢ・づ）
+_KANA_ALT = {"ハ": ("ハ", "ワ"), "ヘ": ("ヘ", "エ"), "ヲ": ("ヲ", "オ"),
+             "ウ": ("ウ", "オ"), "イ": ("イ", "エ"),
+             "ヂ": ("ヂ", "ジ"), "ヅ": ("ヅ", "ズ")}
+# 開き・閉じの括弧類（Unicode の Ps / Pe / Pi / Pf）。これだけの並びは「弱い」間の候補
+_BRACKET_CATEGORIES = frozenset(("Ps", "Pe", "Pi", "Pf"))
+
+
+def _is_strong_pause_char(ch):
+    """間になりやすい記号か（「、。！？・…：」などの約物と空白。括弧類と改行・制御文字は弱い）
+
+    VOICEVOX 0.25.2 の実測: 読まれる文字に挟まれた約物・空白・括弧はどれも間になるが、
+    改行は間にならない。括弧は句読点と隣り合えば1つの間にまとまる。
+    """
+    cat = unicodedata.category(ch)
+    return not (cat in _BRACKET_CATEGORIES or cat[0] == "C" or ch in "  ")
+
+
+def _tokenize_for_marks(text):
+    """文をトークン列にする: [{"idx", "len", "kind": "kana" | "pause" | "other", "cands"}]
+
+    kana はモーラと突き合わせられる仮名（拗音の小書きは前の仮名とまとめて1つ）、
+    other は漢字・英数字・長音符など。pause は間になりうる記号・空白の **並び**
+    （「？　」「」。」のように、間に読まれる文字の無い連続は1トークン。エンジンは
+    並び全体で間を1つしか作らないため）。pause のトークンは次も持つ:
+        "rep":    代表の文字位置（並びの中の最初の句読点。無ければ最初の空白、
+                  それも無ければ並びの先頭）
+        "strong": 句読点・空白を含む並びか（括弧・改行だけなら False）
+        "before" / "after": 並びの前 / 後ろに読まれる文字（kana / other）があるか
+    """
+    tokens = []
+    for i, ch in enumerate(text):
+        k = chr(ord(ch) + 0x60) if "ぁ" <= ch <= "ゖ" else ch
+        prev = tokens[-1] if tokens else None
+        if "ァ" <= k <= "ヺ":
+            if (k in _SMALL_KANA and prev is not None and prev["kind"] == "kana"
+                    and prev["idx"] + prev["len"] == i and prev["len"] == 1):
+                prev["cands"] = (prev["cands"][0] + k,)
+                prev["len"] = 2
+                continue
+            tokens.append({"idx": i, "len": 1, "kind": "kana",
+                           "cands": _KANA_ALT.get(k, (k,))})
+        elif unicodedata.category(ch)[0] in "PZSC":
+            # 代表の順位: 2 = 句読点など / 1 = 空白 / 0 = 括弧・改行
+            rank = 0 if not _is_strong_pause_char(ch) else (1 if ch.isspace() else 2)
+            if prev is not None and prev["kind"] == "pause":
+                prev["len"] += 1
+                if rank > prev["rank"]:
+                    prev["rank"], prev["rep"] = rank, i
+                prev["strong"] = prev["rank"] > 0
+                continue
+            tokens.append({"idx": i, "len": 1, "kind": "pause", "cands": (),
+                           "rep": i, "rank": rank, "strong": rank > 0,
+                           "before": bool(tokens), "after": False})
+        else:
+            tokens.append({"idx": i, "len": 1, "kind": "other", "cands": ()})
+    # 後ろに読まれる文字があるか（最後のトークンが記号の並びなら、それだけが False）
+    for t in tokens[:-1]:
+        if t["kind"] == "pause":
+            t["after"] = True
+    return tokens
+
+
+def _align_tokens(tokens, elems):
+    """トークン列とモーラ・間の列を、順序を保って対応づける: [(トークン番号, 要素番号)]
+
+    重みつきの最長共通部分列。対応できるのは次の2種類だけ:
+      * 記号の並び ↔ 間。ただし間は必ずモーラの後ろに来るので、前に読まれる文字の無い
+        並び（文頭の「「」など）は対応させない。後ろにモーラが続く間は、後ろに読まれる
+        文字がある並びとだけ対応させる（文末の「。」「！」は文中の間を取らない）
+      * 仮名 ↔ 同じ読みのモーラ
+    優先は「間の対応数 ＞ 仮名の対応数 ＞ 句読点・空白を含む並び（括弧・改行だけの
+    並びより優先）」。
+
+    間の対応は、**最適な対応づけのすべてで同じ並びに決まるものだけ**を返す。
+    並びの数が間の数より多く、仮名の対応点でも優先でも決まらない間は返さない
+    （確実と言えない対応を「確実」として返さないため。呼び出し側は近似へ落とす）。
+    """
+    n, m = len(tokens), len(elems)
+    last_mora = max((j for j, e in enumerate(elems) if e["kind"] == "mora"), default=-1)
+    w_kana = n + 1
+    w_pause = (n + 2) * w_kana
+
+    def score(i, j):
+        t, e = tokens[i], elems[j]
+        if t["kind"] == "pause":
+            if e["kind"] != "pause" or not t["before"] or t["after"] != (j < last_mora):
+                return 0
+            return w_pause + (1 if t["strong"] else 0)
+        if t["kind"] == "kana" and e["kind"] == "mora" and e["text"] in t["cands"]:
+            return w_kana
+        return 0
+
+    sc = [[score(i, j) for j in range(m)] for i in range(n)]
+    # back[i][j]: tokens[i:] と elems[j:] の最良 / fwd[i][j]: tokens[:i] と elems[:j] の最良
+    back = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        row, below = back[i], back[i + 1]
+        for j in range(m - 1, -1, -1):
+            best = below[j] if below[j] >= row[j + 1] else row[j + 1]
+            s = sc[i][j]
+            if s and s + below[j + 1] > best:
+                best = s + below[j + 1]
+            row[j] = best
+    fwd = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        row, above = fwd[i], fwd[i - 1]
+        for j in range(1, m + 1):
+            best = above[j] if above[j] >= row[j - 1] else row[j - 1]
+            s = sc[i - 1][j - 1]
+            if s and s + above[j - 1] > best:
+                best = s + above[j - 1]
+            row[j] = best
+    opt = back[0][0]
+
+    def unique(i, j):
+        """間 j が、どの最適な対応づけでも並び i に対応するか"""
+        for i2 in range(n):
+            if i2 != i and sc[i2][j] and fwd[i2][j] + sc[i2][j] + back[i2 + 1][j + 1] == opt:
+                return False
+        # 間 j を対応させないままでも最適になるなら決まっていない
+        return all(fwd[i2][j] + back[i2][j + 1] < opt for i2 in range(n + 1))
+
+    pairs, i, j = [], 0, 0
+    while i < n and j < m:
+        s = sc[i][j]
+        if s and back[i][j] == s + back[i + 1][j + 1]:
+            if elems[j]["kind"] != "pause" or unique(i, j):
+                pairs.append((i, j))
+            i += 1
+            j += 1
+        elif back[i][j] == back[i][j + 1]:
+            j += 1
+        else:
+            i += 1
+    return pairs
+
+
+def _char_marks(text, timeline):
+    """文の各文字の (読まれ始める秒, 精度) と、間 → 代表の記号の文字位置 を返す
+
+    戻り値: (chars, pause_index)。pause_index は {elems の番号: 文字位置}
+    （対応が決まった間だけ）。精度は TtsMarks の docstring 参照。
+    """
+    tokens = _tokenize_for_marks(text)
+    elems = timeline["elems"]
+    n, m = len(tokens), len(elems)
+    tok = [None] * n   # トークンごとの (秒, 精度)
+    pause_index = {}
+    anchors = [(-1, -1)] + _align_tokens(tokens, elems) + [(n, m)]
+    for (ai, aj), (bi, bj) in zip(anchors, anchors[1:]):
+        if bi < n:
+            if elems[bj]["kind"] == "pause":
+                tok[bi] = (elems[bj]["start"], "pause")
+                pause_index[bj] = tokens[bi]["rep"]
+            else:
+                tok[bi] = (elems[bj]["start"], "kana")
+        next_time = elems[bj]["start"] if bj < m else timeline["speech_end"]
+        free = [j for j in range(aj + 1, bj) if elems[j]["kind"] == "mora"]
+        content = [i for i in range(ai + 1, bi) if tokens[i]["kind"] != "pause"]
+        for k, i in enumerate(content):
+            if not free:
+                tok[i] = (next_time, "approx")
+                continue
+            j = free[k * len(free) // len(content)]
+            if k == 0 and j == aj + 1:
+                # 直前の対応点のすぐ次のモーラ。対応点が間（または文頭）なら確実
+                prec = "start" if aj < 0 or elems[aj]["kind"] == "pause" else "kana"
+            else:
+                prec = "approx"
+            tok[i] = (elems[j]["start"], prec)
+        # 対応の付かなかった記号は、次に読まれる文字の時刻
+        later = next_time
+        for i in range(bi - 1, ai, -1):
+            if tokens[i]["kind"] == "pause":
+                tok[i] = (later, "approx")
+            else:
+                later = tok[i][0]
+    chars = [None] * len(text)
+    for t, mark in zip(tokens, tok):
+        for c in range(t["idx"], t["idx"] + t["len"]):
+            chars[c] = mark
+    return chars, pause_index
+
+
+class TtsMarks:
+    """合成した wav の中で、文の各文字が読まれ始める秒（tts_marks() の戻り値）
+
+    秒はすべて **wav の先頭から**（頭の無音 pre_silence を含む）。タイムラインへ
+    `Object(wav) @ t0` で置いたなら、語の時刻は `t0 + marks.time_of("語")`。
+
+    属性:
+        text:         元の文（readings を適用する前）
+        duration:     クエリから計算した wav の長さ（VOICEVOX 0.25.2 では実 wav と
+                      サンプル単位で一致。tts_duration(wav) と突き合わせて確かめられる）
+        speech_start: 最初のモーラの開始（＝頭の無音の長さ）
+        speech_end:   最後のモーラの終わり（この後ろは尻の無音）
+        kana:         エンジンが返した読み（AquesTalk 風カナ。読みの点検に使える）
+        phrases:      アクセント句 [{"kana", "start", "end", "pause": (開始, 終了) | None}]
+        pauses:       間 [{"start", "end", "index": 対応する記号の文字位置 | None}]
+                      index は、記号が並んでいれば（「」。」「？　」）その中の最初の
+                      句読点。どの記号の間か決められないときは None
+        moras:        モーラ [{"text", "start", "end", "phrase": 句の番号}]
+
+    記号と間の対応: 間に読まれる文字の無い記号の並び（「？　」「。「」「」。」）は
+    1つの間に対応し、並びの文字はどれもその間の開始の時刻になる。文頭の記号
+    （前に読まれる文字が無い「「」など）と文末の記号は文中の間に対応させない。
+    VOICEVOX 0.25.2 では、読まれる文字に挟まれた約物・空白・括弧の並びはどれも
+    間を1つ作り、改行は作らない（実測）。並びの数と間の数が合わないときは、
+    仮名の対応点、次に「句読点・空白を含む並びを括弧・改行だけの並びより優先」で
+    決め、それでも一意に決まらない間は対応させない（index は None、その前後は "approx"）。
+
+    精度（precision_at / precision_of が返す文字列）:
+        "pause"  間に対応した記号（の並び）。時刻は間の開始。確実
+        "start"  文頭か、対応の決まった間の直後に読まれる文字。確実
+                 （「。」「、」の次の語はこれ）
+        "kana"   モーラに対応した仮名、またはその直後の文字。モーラ単位で正しいが、
+                 同じ仮名が近くに複数あって漢字の読みと紛れると隣の同じ音へずれうる
+        "approx" 近似。漢字・英数字はカナとの対応が取れないので、前後の対応点の間の
+                 モーラへ文字数で按分している（誤差は最大でその区間の長さ）。
+                 pauses の index がすべて決まっていれば、間をまたぐことはない
+                 （index が None の間があるときだけ、その間の前後の "approx" の
+                 文字が間の反対側の時刻になりうる）。readings で読み替えた語の
+                 2文字目以降は語の先頭と同じ時刻。対応する間の無い記号
+                 （文頭の括弧・文末の句点など）は次に読まれる文字の時刻
+    時刻そのものの誤差: 実測（0.25.2・話者13）で、計算した間の終わりは silencedetect
+    （-35dB）の「音の出始め」より 0.01〜0.07 秒早い（次の子音の立ち上がりが静かなぶん。
+    は行のような弱い子音で大きい）。計算した duration は実 wav とサンプル単位で一致した。
+    ほかの版のエンジンでフレームの丸め方が違う場合は duration が実 wav とずれるので、
+    tts_duration(wav) と比べれば気づける。
+    """
+
+    def __init__(self, text, query, origin=None, synth_text=None):
+        synth_text = text if synth_text is None else synth_text
+        origin = list(range(len(text))) if origin is None else origin
+        tl = _query_timeline(query)
+        self.text = text
+        self.duration = tl["duration"]
+        self.speech_start = tl["speech_start"]
+        self.speech_end = tl["speech_end"]
+        self.kana = query.get("kana")
+        self.phrases = tl["phrases"]
+        self.moras = [{"text": e["text"], "start": e["start"], "end": e["end"],
+                       "phrase": e["phrase"]}
+                      for e in tl["elems"] if e["kind"] == "mora"]
+        synth_chars, pause_index = _char_marks(synth_text, tl)
+        # 合成文の文字 → 元の文の文字。元の1文字に複数対応するときは最初のもの
+        chars = [None] * len(text)
+        for c, o in enumerate(origin):
+            if chars[o] is None:
+                chars[o] = synth_chars[c]
+        # 読み替えた語の2文字目以降（対応する合成文字が無い）は直前の文字と同じ時刻
+        for o in range(len(text)):
+            if chars[o] is None and o > 0 and chars[o - 1] is not None:
+                chars[o] = (chars[o - 1][0], "approx")
+        later = (self.speech_end, "approx")
+        for o in range(len(text) - 1, -1, -1):
+            if chars[o] is None:
+                chars[o] = (later[0], "approx")
+            else:
+                later = chars[o]
+        self._chars = chars
+        # 間 → 対応した記号の文字位置（元の文の位置。決まらなかった間は None）
+        self.pauses = [{"start": e["start"], "end": e["end"],
+                        "index": (origin[pause_index[j]] if j in pause_index else None)}
+                       for j, e in enumerate(tl["elems"]) if e["kind"] == "pause"]
+
+    def _find(self, word, nth):
+        if not isinstance(word, str) or not word:
+            raise ValueError(f"TtsMarks: 語は空でない文字列です: {word!r}")
+        if isinstance(nth, bool) or not isinstance(nth, int) or nth < 0:
+            raise ValueError(
+                f"TtsMarks: nth は 0 以上の整数です（0 が最初の出現）: {nth!r}")
+        pos, start = -1, 0
+        for _ in range(nth + 1):
+            pos = self.text.find(word, start)
+            if pos < 0:
+                break
+            start = pos + 1
+        if pos < 0:
+            which = "" if not nth else f"（{nth + 1} 個目）"
+            raise ValueError(
+                f"TtsMarks: 文の中に {word!r}{which} がありません: {self.text!r}"
+                "（readings で読み替える前の、元の文の語で引きます）")
+        return pos
+
+    def time_at(self, index):
+        """文字位置 index の文字が読まれ始める秒（index == len(text) は話し終わり）"""
+        if index == len(self.text):
+            return self.speech_end
+        if not 0 <= index < len(self.text):
+            raise IndexError(f"TtsMarks: 文字位置が範囲外です: {index}")
+        return self._chars[index][0]
+
+    def precision_at(self, index):
+        """文字位置 index の時刻の精度（"pause" / "start" / "kana" / "approx"）"""
+        if not 0 <= index < len(self.text):
+            raise IndexError(f"TtsMarks: 文字位置が範囲外です: {index}")
+        return self._chars[index][1]
+
+    def time_of(self, word, nth=0):
+        """語 word（nth 個目。0 始まり）が読まれ始める秒。文に無ければ ValueError"""
+        return self.time_at(self._find(word, nth))
+
+    def span_of(self, word, nth=0):
+        """語 word が読まれる区間 (開始秒, 終了秒)。終了は次の文字の開始（文末なら話し終わり）"""
+        pos = self._find(word, nth)
+        return self.time_at(pos), self.time_at(pos + len(word))
+
+    def precision_of(self, word, nth=0):
+        """time_of(word) の精度"""
+        return self.precision_at(self._find(word, nth))
+
+    def __repr__(self):
+        return (f"TtsMarks({self.text!r}, duration={self.duration:.3f}, "
+                f"kana={self.kana!r})")
+
+
+def tts_marks(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
+              cache_dir=_DEFAULT_CACHE_DIR, host=_DEFAULT_HOST, port=_DEFAULT_PORT,
+              pre_silence=None, post_silence=None, pause_length=None, pause_scale=None,
+              intonation=None, volume_scale=None, kana=None, readings=None):
+    """tts() と同じ条件で合成した wav の「文字位置 → 秒」の対応（TtsMarks）を返す
+
+    引数は tts() と同じ。**同じ引数で呼べば、tts() が返す wav の中の時刻**になる
+    （wav と同じ鍵の `<鍵>.marks.json` に、合成に使った audio_query を控える）。
+    VOICEVOX 専用（モーラごとの長さを返すのが VOICEVOX だけのため。
+    ほかのバックエンドでは ValueError）。
+
+    使用例:
+        kw = dict(backend="voicevox", speaker=13, readings={"金": "カネ"})
+        wav = tts("金は戻らなかった。答えは、まだ無い。", **kw)
+        m = tts_marks("金は戻らなかった。答えは、まだ無い。", **kw)
+        m.time_of("答えは")        # 「答えは」が読まれ始める秒（wav の先頭から）
+        m.pauses                   # 句読点の間の [開始, 終了]
+        m.precision_of("答えは")   # "start"（間の直後なので確実）
+
+    控えの扱い（tts() の engine_sig.json と同じ流儀）:
+      * tts() で合成したときに控えも書くので、その後はエンジンが止まっていても返せる
+      * 控えが無い（この機能より前に合成した wav・控えが壊れている）ときは
+        audio_query だけを問い合わせて控えを作る（wav は合成しない）。
+        エンジンに届かなければ ConnectionError
+      * エンジンのバージョンが変われば鍵が変わるので、古い控えは使われない
+
+    精度は TtsMarks の docstring を参照（句読点とその直後の語は確実、
+    漢字の途中は近似。どの記号の間か決められない所は近似へ落とす）。
+    """
+    if not text:
+        raise ValueError("tts_marks: text が空です")
+    backend = _resolve_backend(backend, host=host, port=port)
+    if backend != "voicevox":
+        raise ValueError(
+            f'tts_marks(backend="{backend}"): 語の時刻を出せるのは VOICEVOX だけです'
+            '（audio_query のモーラの長さから計算するため。backend="voicevox" を'
+            "明示してください）")
+    adjust = _normalize_adjust(
+        "tts_marks", backend, pre_silence=pre_silence, post_silence=post_silence,
+        pause_length=pause_length, pause_scale=pause_scale, intonation=intonation,
+        volume_scale=volume_scale, kana=kana)
+    synth_text, origin = _apply_readings("tts_marks", text, readings)
+    resolved = _voicevox_speaker(speaker)
+    engine, online = _voicevox_engine_state(host, port, cache_dir)
+
+    def path_for(engine_sig):
+        return _marks_path(_cache_path(backend, synth_text, resolved, speed, pitch,
+                                       cache_dir, engine=engine_sig, adjust=adjust))
+
+    path = path_for(engine)
+    query = _read_marks_query(path)
+    if query is not None and not online:
+        _warn_voicevox_offline_once(host, port, engine)
+    if query is None and not online:
+        # 控えが無いのにエンジンへ届かない。途中で起動した可能性があるので1回だけ試す
+        engine, online = _voicevox_engine_state(host, port, cache_dir, retry=True)
+        if not online:
+            raise _needs_synth_error(host, port, synth_text, engine,
+                                     need="audio_query の問い合わせ")
+        path = path_for(engine)
+        query = _read_marks_query(path)
+    if query is None:
+        query = _voicevox_query(synth_text, resolved, speed, pitch, host, port, adjust)
+        if not _valid_marks_query(query):
+            raise RuntimeError(
+                "tts_marks: VOICEVOX の audio_query に accent_phrases がありません"
+                f"（読み上げる音の無い文かもしれません）: {synth_text!r}")
+        os.makedirs(cache_dir, exist_ok=True)
+        _write_marks_query(path, query)
+    return TtsMarks(text, query, origin=origin, synth_text=synth_text)
 
 
 def _speakers_voicevox(host, port):

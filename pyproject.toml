@@ -16,7 +16,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # morph_to / explode_to / assemble_from（モーフィング・パーティクル）
-morph = ["numpy", "scipy", "opencv-python", "Pillow", "tqdm"]
+morph = ["numpy", "scipy", "opencv-python", "Pillow>=9.1", "tqdm"]
 # web Object / slide / テンプレート / formula（HTML レンダリング。KaTeX は同梱）
 web = ["playwright"]
 # ビート検出（beat_sync）
@@ -26,8 +26,10 @@ beat = ["numpy", "scipy"]
 # sapi バックエンド（Windows 標準音声）も追加依存なし。
 tts = ["edge-tts"]
 # 進捗表示・検証ツール（testkit はフレーム比較に Pillow を使う）
-tools = ["tqdm", "numpy", "opencv-python", "Pillow"]
-all = ["numpy", "scipy", "opencv-python", "Pillow", "playwright", "tqdm", "edge-tts"]
+# Pillow の下限 9.1 は text_image()（ImageFont.Layout）の要件。textimage.py の
+# _PIL_MIN_VERSION と揃える。
+tools = ["tqdm", "numpy", "opencv-python", "Pillow>=9.1"]
+all = ["numpy", "scipy", "opencv-python", "Pillow>=9.1", "playwright", "tqdm", "edge-tts"]
 # 開発用（テスト・カバレッジ・ビルド）
 dev = ["pytest", "pytest-cov", "build", "pyflakes"]
 

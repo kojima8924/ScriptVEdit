@@ -8,11 +8,19 @@
 ルール一覧（code / severity）:
   quality-hint-ignored (info)    … `~` を付けたが軽量代替の無いop（通常処理される）
   text-too-small (warning/info)  … 文字が小さい（1080p換算 32px未満=warning, 44px未満=info）
-  text-no-decoration (warning)   … 縁取り・影・下地のいずれも無い文字（背景に溶ける）
+  text-no-decoration (warning/info) … 縁取り・影・下地のいずれも無い文字（背景に溶ける）。
+                                   configure(background_color=) で明示した単色の背景だけの
+                                   上にあり、文字色とのコントラスト比が 4.5 以上なら info
+                                   （render() から呼ばれたときは、透過出力
+                                   （alpha=True・連番PNG）なら格下げしない。単独の
+                                   p.audit() は出力先を知らないので不透明を仮定する）
   offscreen-placement (warning)  … x/y が 0..1 の比率の外（画面外で描画されない）
   text-overflow (warning)        … 推定描画幅がフレーム幅（safe area差引）を超える
   outside-duration (warning)     … 表示区間が動画の総尺と交差しない（一切映らない）
   font-missing-glyph (warning)   … 解決したフォントに日本語グリフが無い（豆腐になる）
+  ※ 文字の4項目（text-too-small / text-no-decoration / text-overflow /
+    font-missing-glyph）は text_image() の画像にも効く。画像は文字サイズ・装飾・
+    寸法を Object に申告しており、resize / scale の倍率を掛けた画面上の実寸で見る
   audio-overlap-no-duck (warning)… BGM 役（duck_under / loop を持つ音声）と、それが
                                    ダックしていない音声が1秒以上重なる（BGM 役が無ければ
                                    全ての組を調べる。前景同士の重なりは数えない。
@@ -21,6 +29,8 @@
   bgm-too-short (warning)        … BGM（duck_underを持つ音声）の実尺が表示区間より短い
   no-normalize-audio (info)      … 音声があるのに normalize_audio() 未設定
   web-content-uninspected (info) … Canvas/DOM内部は静的lint対象外。storyboard確認を促す
+  morph-sdf-crossfade (warning)  … morph_to（sdf）の2枚が重ならない／輪郭が取れない
+                                   （形が動かず、実質クロスフェードになる）
 
 severity の使い分け: warning=過去に人間レビューで実際に差し戻された類、
 info=判断が分かれる・意図的な場合もある注意喚起。
@@ -31,12 +41,14 @@ info=判断が分かれる・意図的な場合もある注意喚起。
 """
 
 import bisect
+import math
 import os
 import struct
 import unicodedata
 
 from scriptvedit.audio import _duck_targets
 from scriptvedit.cache import _respects_fast_hint
+from scriptvedit.validate import _parse_color_rgb
 
 
 # 文字サイズの目安（1080p基準。人間レビュー由来: 本文44px以上・注釈32px以上）
@@ -84,6 +96,12 @@ def _obj_label(obj):
         content = str(spec.get("content", spec.get("format", "")))
         short = content[:20] + ("…" if len(content) > 20 else "")
         return f"{spec.get('kind', 'text')}('{short}')"
+    info = getattr(obj, "_text_image", None)
+    if info is not None:
+        # text_image() の生成物は __cache__ のハッシュ名なので、文字の先頭で示す
+        content = str(info.get("content", "")).replace("\n", " ")
+        short = content[:20] + ("…" if len(content) > 20 else "")
+        return f"text_image('{short}')"
     if getattr(obj, "_sfx_hits", None) is not None:
         # sfx() の生成物は __cache__ のハッシュ名なので、元の音源名で示す
         origins = getattr(obj, "_origin_sources", None) or ["?"]
@@ -108,7 +126,66 @@ def _audit_quality_hints(objects, findings):
                     f"処理になります（品質ヒントの契約どおり。害はありません）"))
 
 
-def _audit_text_readability(project, objects, findings):
+# 単色背景の上の文字を「読める」とみなすコントラスト比の下限（WCAG の本文基準）
+_SOLID_BG_MIN_CONTRAST = 4.5
+
+
+def _opaque_rgb(color):
+    """不透明な色指定を (R, G, B) にする。透過つき・解釈できない色は None"""
+    if not isinstance(color, str) or "@" in color:
+        return None
+    try:
+        return _parse_color_rgb(color)
+    except ValueError:
+        return None
+
+
+def _relative_luminance(rgb):
+    """sRGB の相対輝度（WCAG 2.x の定義）"""
+    def lin(c):
+        c = c / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = rgb
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+
+
+def _solid_background_contrast(project, objects, obj, spec, transparent=False):
+    """文字が「明示された単色の背景」だけの上にあるとき、そのコントラスト比を返す。
+
+    それ以外（背景色が未指定・透過つき、表示区間が重なる画像/動画/web がある、
+    色を解釈できない、透過出力）は None（＝背景は分からないので従来どおり warning）。
+    transparent: render() が渡す「この出力は透過か」。alpha=True の webm / webp と
+    連番 PNG は background_color を使わず背景が透明で、別の絵に重ねる前提なので、
+    背景は単色と言えない。
+    重なり順は見ない: 文字の上に載る絵でも、同じ時間に絵があるなら背景は
+    単色と言い切れない、という安全側の判定。"""
+    if transparent or not getattr(project, "_background_color_set", False):
+        return None
+    bg = _opaque_rgb(project.background_color)
+    fg = _opaque_rgb(spec.get("color"))
+    if bg is None or fg is None:
+        return None
+    try:
+        start = float(getattr(obj, "start_time", 0) or 0)
+        end = start + float(project._resolve_obj_duration(obj))
+        for other in objects:
+            if other is obj or getattr(other, "_text_spec", None) is not None:
+                continue
+            if (getattr(other, "media_type", None) == "audio"
+                    or getattr(other, "_video_deleted", False)):
+                continue
+            o_start = float(getattr(other, "start_time", 0) or 0)
+            o_end = o_start + float(project._resolve_obj_duration(other))
+            if o_start < end and start < o_end:
+                return None
+    except Exception:
+        return None     # 尺を決められない（判定不能）→ 格下げしない
+    hi, lo = sorted((_relative_luminance(bg), _relative_luminance(fg)),
+                    reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _audit_text_readability(project, objects, findings, transparent=False):
     """文字サイズと縁取り/影/下地の有無（人間レビューで最多の指摘）"""
     scale = (project.height or 1080) / 1080.0
     min_px = _TEXT_MIN_PX_1080 * scale
@@ -136,6 +213,17 @@ def _audit_text_readability(project, objects, findings):
         shadow = tuple(spec.get("shadow", (0, 0)))
         box = spec.get("box", False)
         if not border and shadow == (0, 0) and not box:
+            contrast = _solid_background_contrast(
+                project, objects, obj, spec, transparent)
+            if contrast is not None and contrast >= _SOLID_BG_MIN_CONTRAST:
+                findings.append(_finding(
+                    "info", "text-no-decoration",
+                    f"{_obj_label(obj)}: 縁取り(border)・影(shadow)・下地(box)は"
+                    f"ありませんが、単色の背景（{project.background_color}）だけの"
+                    f"上にあり、コントラスト比 {contrast:.1f} で読めます"
+                    f"（背景に画像や動画を敷くとき、alpha=True・連番PNG の透過出力で"
+                    f"別の絵に重ねるときは border=3 等を付けてください）"))
+                continue
             findings.append(_finding(
                 "warning", "text-no-decoration",
                 f"{_obj_label(obj)}: 縁取り(border)・影(shadow)・下地(box)の"
@@ -287,6 +375,126 @@ def _audit_text_overflow(project, objects, findings):
             f"（フレーム幅 {frame_w}px の {_SAFE_AREA_RATIO:.0%}）を超え、"
             f"左右がはみ出して読めなくなります"
             f"（改行 \\n で分割するか size を {safe_w / est * size:.0f}px 以下へ）"))
+
+
+# --- 画像の中の文字（text_image）---------------------------------------------
+
+def _text_image_scale(obj):
+    """text_image の画面上の倍率 (横, 縦)。画像は等倍で置かれるので、
+    resize（Transform）と scale（Effect）の倍率を掛け合わせる。
+
+    - チェックポイントで焼かれた op は Object から外れるので、焼く前の控え
+      （_pre_checkpoint_ops）があればそちらを見る
+    - scale がアニメーションのときは 6 点サンプルの**最大**を採る（ポップイン等で
+      一瞬小さいのは正常。いちばん大きい時点で読めるかを見る）
+    - 数値化できない倍率は 1 とみなす（判定不能を warning にしない）
+    - compute() / from_project で素材化した後の倍率は追わない
+    """
+    ops = getattr(obj, "_pre_checkpoint_ops", None)
+    transforms, effects = ops if ops else (obj.transforms, obj.effects)
+    sx = sy = 1.0
+    for t in transforms:
+        if getattr(t, "name", None) != "resize":
+            continue
+        params = getattr(t, "params", {}) or {}
+        fx, fy = params.get("sx", 1), params.get("sy", 1)
+        if all(isinstance(v, (int, float)) and not isinstance(v, bool)
+               for v in (fx, fy)):
+            sx *= float(fx)
+            sy *= float(fy)
+    for e in effects:
+        if getattr(e, "name", None) != "scale":
+            continue
+        values = _sample_param((getattr(e, "params", {}) or {}).get("value"))
+        if values:
+            sx *= max(values)
+            sy *= max(values)
+    return sx, sy
+
+
+def _text_image_is_rotated(obj):
+    """text_image が回転されていて、画面上の幅を倍率だけでは求められないか。
+
+    rotate（Transform）が 0 / 180 度の整数倍以外、または rotate_to（Effect。
+    アニメーション）があれば True。数値化できない角度も True（判定不能は
+    報告しない、という _text_image_scale と同じ方針）。
+    """
+    ops = getattr(obj, "_pre_checkpoint_ops", None)
+    transforms, effects = ops if ops else (obj.transforms, obj.effects)
+    for t in transforms:
+        if getattr(t, "name", None) != "rotate":
+            continue
+        # rotate() の rad は定数の Expr（時間依存の式は構築時に拒否される）
+        values = _sample_param((getattr(t, "params", {}) or {}).get("rad"))
+        if not values:
+            return True
+        half_turns = values[0] / math.pi
+        if abs(half_turns - round(half_turns)) > 1e-6:
+            return True
+    return any(getattr(e, "name", None) == "rotate_to" for e in effects)
+
+
+def _audit_text_images(project, objects, findings):
+    """text_image() の文字を、画面上の実寸で検査する。
+
+    text() 系と同じ基準（text-too-small / text-no-decoration / text-overflow /
+    font-missing-glyph）を、Object が申告した文字サイズ・装飾・寸法に当てる。
+    画像の中の文字は ffmpeg からは見えないので、申告が無い画像（自前の PNG・
+    動画・HTML）は従来どおり検査されない。
+    """
+    ratio = (project.height or 1080) / 1080.0
+    min_px = _TEXT_MIN_PX_1080 * ratio
+    body_px = _TEXT_BODY_PX_1080 * ratio
+    frame_w = project.width or 1920
+    safe_w = frame_w * _SAFE_AREA_RATIO
+    for obj in objects:
+        info = getattr(obj, "_text_image", None)
+        if info is None:
+            continue
+        sx, sy = _text_image_scale(obj)
+        scaled = abs(sx - 1.0) > 1e-9 or abs(sy - 1.0) > 1e-9
+        size = float(info.get("size_min", info.get("size", 0))) * sy
+        note = (f"（text_image の size={info.get('size_min'):g}px × 倍率 {sy:g}）"
+                if scaled else "")
+        if size < min_px:
+            findings.append(_finding(
+                "warning", "text-too-small",
+                f"{_obj_label(obj)}: 画面上の文字サイズ {size:.0f}px は小さすぎます{note}"
+                f"（{project.height}p では {min_px:.0f}px 以上を推奨。"
+                f"入らないときは文章を分割してください）"))
+        elif size < body_px:
+            findings.append(_finding(
+                "info", "text-too-small",
+                f"{_obj_label(obj)}: 画面上の文字サイズ {size:.0f}px は本文には小さめです{note}"
+                f"（{project.height}p の本文目安は {body_px:.0f}px 以上）"))
+        shadow = tuple(info.get("shadow", (0, 0)))
+        if (not info.get("border") and shadow == (0, 0)
+                and not info.get("shadow_blur") and not info.get("background")):
+            findings.append(_finding(
+                "warning", "text-no-decoration",
+                f"{_obj_label(obj)}: 縁取り(border)・影(shadow)・下地(background)の"
+                f"いずれも無く、背景に溶けて読めなくなりがちです"
+                f"（例: border=3, border_color='black'）"))
+        width = float(info.get("content_width", 0)) * sx
+        # 回転した文字は画面上の幅が倍率だけでは決まらないので、はみ出しは判定しない
+        # （90 度回した縦長の文字に「幅が安全域を超える」と誤報しない）
+        if (width > safe_w * _OVERFLOW_TOLERANCE
+                and not _text_image_is_rotated(obj)):
+            findings.append(_finding(
+                "warning", "text-overflow",
+                f"{_obj_label(obj)}: 文字の幅 {width:.0f}px が安全域 {safe_w:.0f}px"
+                f"（フレーム幅 {frame_w}px の {_SAFE_AREA_RATIO:.0%}）を超え、"
+                f"左右がはみ出して読めなくなります"
+                f"（max_width={safe_w:.0f} で折り返すか、改行 \\n で分割するか、"
+                f"size を下げてください）"))
+        missing = info.get("missing") or []
+        if missing:
+            shown = "".join(missing[:5]) + ("…" if len(missing) > 5 else "")
+            findings.append(_finding(
+                "warning", "font-missing-glyph",
+                f"{_obj_label(obj)}: フォントに '{shown}' のグリフが無く、"
+                f"豆腐（□）で描画されています"
+                f"（その字を持つフォントを font= か区間の書式で指定してください）"))
 
 
 # --- 表示区間 ---------------------------------------------------------------
@@ -685,23 +893,69 @@ def _audit_web(objects, findings):
         "完成動画がある場合はsource=を指定して高速確認してください"))
 
 
-def audit_project(project):
+def _audit_morph(objects, findings):
+    """morph_to（sdf）が実質クロスフェードになる組を報告する。
+
+    焼いた後の Object は effects から morph_to が消えているので、チェックポイントの
+    計画が刻んだ _terminal_bake（op, 入力画像）から元の2枚を読む。
+    判定は morph.py の diagnose_sdf_morph（生成時の警告と同じ関数）。
+    判定不能（PIL / numpy / OpenCV が無い・入力が未生成の中間物・読めない画像）は
+    報告しない。
+    """
+    for obj in objects:
+        bake = getattr(obj, "_terminal_bake", None)
+        if bake is None:
+            continue
+        op, src = bake
+        if getattr(op, "name", None) != "morph_to":
+            continue
+        target = getattr(getattr(op, "_morph_target", None), "source", None)
+        if not (target and os.path.isfile(str(src)) and os.path.isfile(str(target))):
+            continue
+        try:
+            from scriptvedit import morph as _morph
+        except ImportError:
+            return
+        params = {k: v for k, v in op.params.items() if k != "blend"}
+        if _morph._resolve_method(params) != "sdf":
+            continue
+        try:
+            reason = _morph.diagnose_sdf_morph(
+                str(src), str(target), align=params.get("align", True),
+                fit=params.get("fit"))
+        except (OSError, ValueError):
+            continue
+        if reason:
+            findings.append(_finding(
+                "warning", "morph-sdf-crossfade",
+                f"morph_to（{os.path.basename(str(src))} → "
+                f"{os.path.basename(str(target))}）: {reason}"))
+
+
+def audit_project(project, *, transparent=False):
     """Project を検査して findings のリストを返す（本体実装）。
 
     呼び出し時点で objects が未解決（layer登録のみ）の場合、呼び出し側の
     Project.audit() が dry_run で解決してから渡す。
+
+    transparent: 出力が透過（alpha=True の webm / webp・連番 PNG）か。render() が
+    出力先から決めて渡す。透過出力では background_color が使われないので、
+    text-no-decoration を「単色の背景の上」として info へ格下げしない。
+    単独の p.audit() は出力先を知らないので False（不透明な出力を仮定）。
     """
     findings = []
     objects = [o for o in project.objects
                if getattr(o, "media_type", None) is not None]
     _audit_quality_hints(objects, findings)
-    _audit_text_readability(project, objects, findings)
+    _audit_text_readability(project, objects, findings, transparent)
     _audit_placement(project, objects, findings)
     _audit_text_overflow(project, objects, findings)
     _audit_outside_duration(project, objects, findings)
     _audit_font_glyphs(objects, findings)
+    _audit_text_images(project, objects, findings)
     _audit_audio(project, objects, findings)
     _audit_web(objects, findings)
+    _audit_morph(objects, findings)
     return findings
 
 

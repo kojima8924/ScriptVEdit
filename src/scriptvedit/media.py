@@ -79,6 +79,8 @@ def _finalize_generated_object(cache_path, cmd, origin_sources, total_dur):
     obj = Object(cache_path)
     obj._origin_sources = list(origin_sources)
     obj._resolved_length = total_dur
+    # time() 省略（length()）が未生成の生成物を probe しないための合成尺
+    obj._generated_length = total_dur
     return obj
 
 
@@ -236,7 +238,11 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
     objs: 動画Object または動画パス文字列（2つ以上）。素のObjectのみ
     （Transform/Effect適用済みは先に compute() で素材化する）。
     各クリップの実長は probe で取得し、t_dur が最短クリップ以上ならエラー。
-    合成尺は sum(実長) - t_dur*(n-1) 秒。
+    合成尺は sum(実長) - t_dur*(n-1) 秒。返す Object の duration にはこの合成尺が
+    入るので time() は呼ばなくてよい（引数なしの time() も、生成前の初回レンダで通る）。
+    この duration は仮の値で、後から speed() / trim() を足すか compute(duration=d) で
+    焼き直すと、レイヤーの実行後に加工後の尺へ入れ直される（time(d) / show(d) で
+    明示した尺は変えない）。
     """
     if len(objs) < 2:
         raise ValueError("video_sequence: 2つ以上の動画を指定してください")
@@ -372,4 +378,12 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
     obj = _finalize_generated_object(cache_path, cmd, list(sources), total)
     # dry_run では未生成キャッシュのprobeができないため音声有無を明示確定する
     obj._has_audio = all_audio
+    # 尺は全入力の probe 時に確定済み。audio_sequence と同じく time(total) を
+    # 要求せず、そのままタイムラインの総尺と進行に反映する（time() 省略も可）。
+    # ここで入れる値は仮のもの: レイヤーの実行後に length() で入れ直すので、
+    # 後から足した speed / trim / compute(duration=) にも追従する
+    # （Object._duration_provisional の説明を参照）。
+    obj.duration = total
+    obj._duration_auto = True
+    obj._duration_provisional = True
     return obj

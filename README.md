@@ -349,6 +349,7 @@ move(x=50%P, y=75%P)  # x=0.5, y=0.75
   - `rotate_to(from_deg, to_deg)` ... 回転アニメーション（bakeable）
   - `wipe(direction)` ... ワイプ表示（"left"/"right"/"up"/"down"。"top"/"bottom" は up/down の別名）
   - `color_shift(hue, saturation, brightness)` ... 色相/彩度/明度シフト
+  - `tint(color, amount=1.0, *, mode="multiply")` ... 色の塗り替え（アルファは変えない）。白い線画を任意の色にする。`"multiply"` は元の色に `color` を掛ける（白 → color、黒は黒のまま、濃淡は保たれる。`tint("black", 0.5)` で暗くする）、`"fill"` は元の色に関係なく `color` へ寄せる（黒い線画も塗れる）。`amount` は 0〜1 で Expr/lambda 可（定数は lutrgb、式は geq）
   - `shake(amplitude, frequency)` ... 振動（live、overlay座標変調）
   - `trim(duration, *, start=0)` ... 素材を切り出す（時間影響あり。`start` はイン点）
   - `delete()` ... 映像をレンダリングから除外（音声のみ残す）
@@ -376,7 +377,7 @@ checkpointで焼き込まれるか、レンダリング時にoverlay座標で解
 | Effect | scale (zoom), fade, rotate_to (look_at), wipe, color_shift | bakeable | zoom は scale、look_at は rotate_to の別名 |
 | Effect | trim | bakeable | 時間影響あり（ベイク尺に反映される唯一の例外） |
 | Effect | chroma_key, vignette, pixelize, glow, lut, glitch, perspective_warp, lens, ken_burns, drop_shadow, outline | bakeable | 「映像エフェクト」節 |
-| Effect | mask, mask_wipe, opacity, rounded | bakeable | 「合成・コンポジション」節 |
+| Effect | mask, mask_wipe, opacity, rounded, tint | bakeable | 「合成・コンポジション」節（tint は色の塗り替え） |
 | Effect | morph_to, explode_to, assemble_from | bakeable | 終端フレーム生成。bakeable ops の末尾に1つだけ置ける |
 | Effect | move（move_along / path_bezier / throw / inertia も内部は move） | live | overlay座標で解釈 |
 | Effect | shake | live | overlay座標にsin/cosオフセット加算 |
@@ -384,7 +385,7 @@ checkpointで焼き込まれるか、レンダリング時にoverlay座標で解
 | Effect | speed, reverse, freeze_frame, repeat（`obj * n`） | live | 時間軸を変える（「時間操作」節） |
 | Effect | blend_mode, blur_background_fill | live | 合成経路の切り替え / キャンバス固定 |
 
-bakeable な Effect の正は `src/scriptvedit/state.py` の `_BAKEABLE_EFFECTS`（24種）で、
+bakeable な Effect の正は `src/scriptvedit/state.py` の `_BAKEABLE_EFFECTS`（25種）で、
 Transform は全て bakeable。`describe` の各エントリの `bakeable` でも確認できる。
 `pip()` は scale → rounded → outline → drop_shadow → move の組を返すプリセットなので、
 配置（move）の部分は live のまま残る。
@@ -394,7 +395,16 @@ Transform は全て bakeable。`describe` の各エントリの `bakeable` で�
 morph_to のモーフ方式（`method`）:
 - `method="sdf"`（**既定**）… 形状ベース（符号付き距離場）。中間形状が常に滑らかな
   1つのシルエットになり、位置・サイズがずれた素材や文字グリフでも破綻しない。
-  追加パラメータ: `align` / `edge_softness` / `color_ease` / `color_path`
+  追加パラメータ: `align` / `fit` / `edge_softness` / `color_ease` / `color_path`
+  - `fit`（既定 `None` = 自動）: 2枚の不透明部の外接矩形（位置と大きさ）を合わせながら補間する。
+    距離場の補間は「相手の形から遠い部分ほど早く消え、遅く現れる」ので、幅の違う文字列どうしでは
+    端の文字が動き出した直後に欠ける。自動では、幅か高さが 1.15 倍を超えて違う組だけ合わせる
+    （同じ大きさの組は従来どおりその場で溶けて入れ替わる）。`fit=False` で常に合わせない
+  - 整列（`align` / `fit`）で絵が動く分だけ、キャンバスに透明の余白を足す（端が切れない。
+    余白は左右・上下で対称なので絵の位置は変わらない）
+  - **輪郭（アルファ）で形を補間する**ので、背景が透明な画像が前提。全面不透明・全体が半透明の
+    素材や、2枚の不透明部が重ならない組（`align=False` で離れた位置にある等）は、形が動かず
+    クロスフェードになる。生成時に警告し、`p.audit()` は `morph-sdf-crossfade`（warning）を出す
 - `method="transport"` … 従来の最適輸送＋ワープ場。形の**内部パーツが実際に移動する**ため、
   複数パーツを持つ素材ではこちらが向く。反面、中間フレームの輪郭が波打ちやすい。
   追加パラメータ: `max_pixels` / `w_move` / `w_color` / `w_vanish` / `grid_step` /
@@ -412,6 +422,14 @@ morph_to の注意点:
 - パラメータ名のタイポは構築時（`morph_to()` 呼び出し時点）に ValueError で検出される
 - morph_to 直前の未ベイク transforms/effects は中間チェックポイントに自動ベイクされる（resize 等がサイレントに消えない）
 - effect や動画ソースと併用した場合は、直前結果の最終フレームを RGBA PNG に抽出してモーフ入力にする
+- `delay=秒` / `duration=秒`（`explode_to` / `assemble_from` と共通）: `a.time(3) <= morph_to(b, delay=0.5, duration=1.5)` は
+  「0.5 秒待ち、1.5 秒で変形し、残りは b を保持」。待つ間と終わった後は最初・最後のコマを複製するだけで、
+  その分のコマは生成しない。前後に同じ絵の静止画 Object を別に置かなくてよい。`delay + duration` が
+  Object の尺を超えると ValueError。動く区間は最低2コマ（元の絵と到達点）を作るので、`duration` が
+  1コマ以下でも・`delay` が尺の終わりぎりぎりでも、最後は必ず到達点の絵になる（その場合は次のコマで切り替わる）
+- **余白と `move` の anchor**: sdf の整列の余白・粒子の `expand` は左右・上下それぞれ対称に付き、
+  `anchor` は余白を除いた元の絵の箱（`morph_to` は2枚を中央で重ねた共通キャンバス）を基準にする。
+  `topleft` / `left` / `right` / `top` / `bottom` でも、静止画として置いたときと同じ位置に映る
 
 shake は overlay 座標の変調として実装されており live 分類。将来 bakeable に変更する場合は ENGINE_VER 更新が必要。
 
@@ -522,6 +540,29 @@ obj.time(4) <= fade(keyframes((0, 0), (0.2, 1), (0.8, 1), (1.0, 0)))
 obj.time(4) <= scale(keyframes((0, 0.5), (1, 1.5), easing=ease_in_out_quad))
 ```
 
+### 秒で書く（ramp / keyframes_sec / elapsed / remaining）
+
+u（0..1）で書くと、表示区間の一部でだけ動かすたびに「秒 ÷ 表示秒」を手で書くことになり、
+表示秒を変えると式も全部変わる。次の4つは **Object の表示開始からの秒**で書け、表示秒を変えても動く時刻が変わらない。
+どれも Expr を返すので、Effect の引数にそのまま渡しても、lambda の中の式に混ぜてもよい。
+
+- `ramp(a, b, easing=None, *, from_end=False)` ... a 秒から b 秒の間に 0→1（前は 0、後は 1）。`from_end=True` なら a, b を「表示終了の何秒前か」で数える（`ramp(0.5, 0, from_end=True)` は最後の 0.5 秒で 0→1）
+- `keyframes_sec(*args, easing=None)` ... `keyframes` の時刻を秒にしたもの（最低2点・最大128点）
+- `elapsed()` ... 表示開始からの経過秒（0 〜 表示秒）
+- `remaining()` ... 表示終了までの残り秒
+
+```python
+obj.time(6) <= fade(ramp(0, 0.4) * (1 - ramp(0.4, 0, from_end=True)))   # 0.4 秒で現れ、最後の 0.4 秒で消える
+obj.time(6) <= wipe("left", progress=ramp(1.2, 1.6, ease_out_cubic))    # 1.2〜1.6 秒で拭って現れる
+obj.time(6) <= scale(lambda u: lerp(1.0, 1.3, ramp(2, 3)))              # 2〜3 秒で 1.3 倍へ
+obj.time(6) <= fade(keyframes_sec((0, 0), (0.25, 1), (5.5, 1), (6, 0)))
+bgm.time(30) <= avolume(lambda u: clip(remaining() / 2, 0, 1))          # 最後の 2 秒でフェードアウト
+```
+
+秒が確定するのは Object の尺が決まった後（フィルタ生成時）で、式には `clip(t-開始, 0, 表示秒)` がそのまま入る。
+表示秒が決まる前の数値評価（`Expr.plot()` / `eval_at()`）はできない（ValueError）。
+時間変化しない Transform（`rotate()` など）には渡せない。
+
 ### シーケンス関数
 
 エフェクトパラメータを時間区間で組み立てるヘルパー。lambdaの代わりにEffect引数へ渡す。
@@ -617,6 +658,14 @@ signatureベースでキャッシュの安全性を保証。保存点はRAA+FSP�
 - `auto`（無印） ... キャッシュが存在すれば再利用、なければ生成。最右のbakeable opがRAA保存点
 - `force`（`+`） ... 常に再生成。FSP保存点
 - `off`（`-`） ... キャッシュ対象から除外
+
+**表示の窓と境目の1枚:** Object が映るのは「開始〜開始+尺」の**閉区間**で、尺がフレームの整数倍なら
+「開始 + 尺」ちょうどのコマも窓に入る（30fps の `time(1)` は 31 枚）。焼いた Effect（チェックポイント）の
+動画もこの最後の1枚まで映る（以前は1枚短く、その1枚だけ背景が見えた。隠すために同じ絵の静止画を
+敷く必要はもう無い）。そのため **`time()` で順に並べた境目の1枚には、前の Object と次の Object の
+両方が映る**（焼かない Effect・静止画は以前からこの挙動。後の Object が上に重なる）。
+後の絵が前の絵を覆わない並び（小さい絵・透過のある絵が続く）で前の絵を1枚も残したくないときは、
+前の Object の尺を1フレーム縮める（`time(d - 1/fps)`）。
 
 **quality（品質ヒント）:**
 - `final`（無印） ... 通常処理
@@ -975,6 +1024,40 @@ clip.time(clip.duration) <= move(x=0.5, y=0.5, anchor="center")
 - `transition` の合成尺は `dur_a + dur_b - duration` 秒。画像は事前に `.time(秒)` が必要
 - どちらも xfade の遷移名（fade/wiperight/circleopen 等 58種）を受け付ける。加工済み素材は先に `compute()` で素材化する
 
+### 絵の列を1本の動画にする（stills / frames）
+
+字幕ページや図のように「全面の絵を、ばらばらの尺で順に出す」ときは、1枚ずつ `Object` にしない。
+どの入力も 0 秒から流れて出番まで捨てられるので、レンダの手間が「枚数 × 尺」に比例し
+（実測: 全面 PNG 100枚×6秒で ffmpeg のメモリ 31GB）、数百枚ではコマンド長が Windows の上限を超える。
+`stills()` / `frames()` は絵の列を先に1本の動画へまとめ、**入力1本の Object を1個**返す
+（同じ 100枚×6秒が 68 秒・メモリ 1.2GB・中間ファイル 4.6MB）。
+
+```python
+# stills: 時刻表つきの静止画列。形1 = (画像, 表示秒)
+pages = stills([("p1.png", 6.4), ("p2.png", 7.1), ("p3.png", 5.0)])
+pages.time(20)                      # 総尺 18.5 秒より長い分は、最後の絵が残る
+v2 = Object("v2.wav")
+v2 @ pages.starts[1]                # 2枚目の開始（フレーム格子上の秒）に音声を合わせる
+
+# 形2 = (画像, 開始秒) + total（総尺）。音声の時刻表をそのまま渡すとき
+stills([("a.png", 0), ("b.png", 3.2), ("c.png", 9)], total=12).time()
+
+# frames: コマを描く関数から動画を作る（PIL.Image か RGBA の numpy 配列を返す）
+def draw(i):                        # i は 0 始まりのコマ番号（時刻は i / fps 秒）
+    im = Image.new("RGBA", (1920, 1080), (0, 0, 0, 0))
+    ImageDraw.Draw(im).rectangle([100, 500, 100 + i * 20, 560], fill="white")
+    return im
+bar = frames(draw, duration=2.0, key=["bar", 1])   # または frames(draw, 60, key=...)
+bar.time(5)                         # 2 秒より後は最後のコマが残る
+```
+
+- **切り替わりの丸め**: 境目の時刻（形1 は表示秒の累積、形2 は開始秒）を最も近いフレームへ丸める（半分ちょうどは切り上げ）。1枚ずつ丸めて足さないので誤差は積もらない。結果は `obj.starts`（各絵の開始秒）/ `obj.frame_counts`（各絵のフレーム数）/ `obj.length()`（総尺）で読める。**音声は自分で秒を足し上げず `obj.starts[i]` に合わせる**（列を `@ t` で置いたら `t + obj.starts[i]`）
+- **最後の絵の保持**: `time(秒)` で素材より長く表示すると、最後の絵（コマ）が残る（普通の動画は素材が終わると背景が見える）。`fade` などを掛けても、伸ばした区間で Effect は進む。引数なしの `time()` は総尺ぶん
+- **alpha を保つ**: 透過 PNG はそのまま下のレイヤーが透ける。音声は無い
+- `stills` の画像は**全部同じ寸法・同じ形式**であること（違えば `ValueError`。PNG と JPEG は混ぜられない）。同じ形式の中での違い（RGB の PNG と RGBA の PNG、パレット、グレースケール）は混ぜてよい。`size=(w, h)` は列全体の出力寸法（縦横比を保って収め、余白は透明）。省略時は画像の寸法そのまま
+- **`frames` の `key` は必須**で、`draw` のコードは鍵に入らない。同じ `key`（とコマ数・fps・size）なら `draw` を呼ばずに前回の動画を使う。**描き方や元データを変えたら `key` を変える**（版番号や元データを `key` に入れる。文字列か JSON にできる値）。`size` 省略時は Project の解像度で、`draw` はその寸法で描く。`draw` は実レンダでキャッシュが無いときだけ呼ばれる（dry_run では呼ばれない）
+- 生成物は `__cache__/artifacts/stills/<鍵>.mov` / `frames/<鍵>.mov`（可逆の QuickTime Animation（qtrle）・alpha つき）。前のコマと同じ画素は書かないので、同じ絵が続く区間はほぼ 0 バイト（文字ページ 20枚×6秒 = 1.0MB。FFV1 だと 353MB）。写真のように圧縮の効かない絵は1枚あたり 6〜8MB（1080p）になるが、枚数に比例するだけで尺には比例しない。`stills` の鍵は各画像の内容指紋・各絵のフレーム数・fps・size（パスは入らない。`__cache__` の下に自分で書き出した画像も内容で見る）。生成した動画はコマ数を確かめてからキャッシュへ確定する（`draw` が例外を出した・途中の画像を読めなかった場合は何も残さない）
+
 ### 合成・コンポジション
 
 ネストコンポジション・マスク・合成モードなど、素材を重ねて加工する機能。
@@ -1030,13 +1113,13 @@ clip.time() <= freeze_frame(at=1.5, duration=2.0)
 
 # video_sequence: 複数動画クリップを xfade（+全クリップ音声ありなら acrossfade）で連結
 seq = video_sequence("a.mp4", "b.mp4", transition="fade", t_dur=0.5)
-seq.time(seq.duration) <= move(x=0.5, y=0.5, anchor="center")
+seq <= move(x=0.5, y=0.5, anchor="center")     # 合成尺は自動で入る（time() は不要。seq.time() と書いてもよい）
 ```
 
 - `speed(factor)` は 0.01〜100。音声付き動画には対応する `atempo` が自動適用される（有効範囲0.5〜100を超える場合は多段に自動分解）
 - `reverse()` は全フレームをメモリ保持するため、**実効尺が30秒を超える素材には使用不可**（明示エラー。`trim()` で短縮してから適用）。音声は反転されない
 - `freeze_frame(at, duration)` の `at` は実効尺未満（**境界以上は拒否**）。音声は変化しない
-- `video_sequence(*objs, transition="fade", t_dur=0.5)` は2つ以上の動画Object/パスを連結。合成尺は `sum(実長) - t_dur*(n-1)` 秒、`t_dur` は最短クリップ未満。Transform/Effect適用済みObjectは先に `compute()` で素材化してから渡す
+- `video_sequence(*objs, transition="fade", t_dur=0.5)` は2つ以上の動画Object/パスを連結。合成尺は `sum(実長) - t_dur*(n-1)` 秒、`t_dur` は最短クリップ未満。返す Object の `duration` には合成尺が入る（`audio_sequence` と同じ。`time()` は不要で、引数なしの `time()` も生成前の初回レンダで通る）。この `duration` は仮の値で、後から `speed()` / `trim()` を足したり `compute(duration=d)` で焼き直したりすると、レイヤーの実行後に加工後の尺へ入れ直される（`time(d)` / `show(d)` で明示した尺は変えない）。Transform/Effect適用済みObjectは先に `compute()` で素材化してから渡す
 - 動画の尺（`length()`）は映像と音声の**長い方**で決まる。音声の方が長い動画（AAC は 1024 サンプル単位なので、scriptvedit が書き出す mp4 も含めて多くの動画は音声が数十 ms 長い）は、音声が終わるまで**映像の最後のフレームを保持**する。`Object("a.mp4").time()` と並べても、つなぎ目に背景の黒が挟まらない。`time(d)` で素材より長く伸ばした分は保持しない（従来どおり背景が見える）
 - Object が映り始めるのは、開始時刻に**最も近いフレーム**から（映像の中身もそのフレームに届く）。開始時刻がフレームの格子から外れていても、中身の1枚目は欠けない
 
@@ -1048,14 +1131,60 @@ drawtext / subtitles で文字を直接描画する映像Object。画像同様 `
 text("こんにちは", x=0.5, y=0.3, size=64, color="white", box=True).time(3)     # 静的テキスト
 typewriter("1文字ずつ表示", cps=10, x=0.1, y=0.5).time(4)                      # タイプライタ
 counter(0, 100, format="%03d", x=0.5, y=0.5, size=80).time(4)                 # 数値カウントアップ
+counter(0, 1234567, format="¥%,d", easing="ease_out_cubic", border=3).time(3) # 桁区切り + イージング
 subtitles("subs.srt", style="FontName=Meiryo,FontSize=28").time(30)           # SRT/ASS/VTT字幕
+subtitles(here("pages.ass"), fontsdir=here("fonts")).time(30)                 # 同梱フォントを名前で使う
+text("1行目\n中央そろえの2行目", text_align="center", line_spacing=12, border=3).time(3)
 ```
 
 - `x` / `y` / `alpha` は 0..1 のキャンバス比率で Expr/lambda 可（liveアニメ）
 - `size` は定数のみ（FFmpeg 8.0 の drawtext fontsize 式は SEGV のため）
 - フォントは未指定時に OS 別の既定候補を自動探索する（Windows: メイリオ等 / Linux: Noto Sans CJK・IPAゴシック / macOS: ヒラギノ）。環境変数 `SCRIPTVEDIT_FONT` で既定フォントを上書き可能（CI・Docker での固定に便利）。見つからない場合は OS 別の導入例（`apt install fonts-noto-cjk` 等）つきのエラーで案内する
-- `counter` の `format` は整数指定（`%d` / `%03d` 等）のみ。前後のリテラル文字も表示可能
-- `subtitles` は SRT 自身のタイムコードで表示されるため `.time(全体尺)` で開始0に配置する
+- `text` の複数行: `line_spacing`（行間に足す px。負で詰める）、`text_align`（行ごとの揃え `left` / `center` / `right`。ブロック全体の位置は `anchor` と `x` / `y`）、`y_align`（y の縦の基準。`text`＝いちばん背の高い字の上端（既定）/ `baseline`＝1行目のベースライン / `font`＝フォントの行の上端。語ごとに `text()` を分けて横に並べるなら `font` か `baseline` で行がそろう）
+- `counter(from_, to, *, format="%d", easing=None, ...)`: 最初のコマは `from_`、**最後のコマは必ず `to`**（途中は四捨五入。総尺がフレーム格子に乗らない動画の末尾でも、出力される最後のコマが `to`。`configure(duration=)` / `render(end=)` で途中を切った場合だけは切った時点の値）
+  - `format` は printf 風で、変換指定は1個: `%d` / `%05d`（ゼロ埋め）/ `%,d`（3桁ごとのカンマ）/ `%.2f`（小数。9桁まで）/ `%,.1f`。前後に固定の文字（接頭辞・接尾辞）を書ける（`"¥%,d円"`）。文字の `%` は `%%`。アポストロフィは不可。ゼロ埋めは桁区切り・小数と併用不可
+  - `easing` は `None`（等速）/ イージング名（`"ease_out_cubic"` 等）/ `u` を受け取る関数・Expr（`ease_spring(...)`、`lambda u: u ** 2`）。行き過ぎる系は途中で `to` を超えた値も表示する
+  - 精度: 「|値| × 10^小数桁」が 2^53（約 9.007×10^15）未満なら全桁が正しい（定数の `from_` / `to` がこれを超えると `ValueError`）。32ビット（±2,147,483,647）を超える整数・桁区切り・小数は、桁数と符号ごとの drawtext を切り替えて表示する（drawtext の `%{eif}` が 32ビットの整数しか印字できないため。フィルタが数個に増える）。桁数が変わるコマで文字列の幅が変わるので、`anchor="center"` ではその瞬間に全体が少し動く
+- `subtitles(file, *, style=None, fontsdir=None)` は SRT 自身のタイムコードで表示されるため `.time(全体尺)` で開始0に配置する。フォントは**名前**で探す（libass）。システムに入っていないフォント（同梱フォント・可変フォントから切り出した静的フォント）は `fontsdir` にフォルダを渡す（`karaoke(..., fontsdir=)` も同じ）
+- `glow()` は `text()` にも掛けられる（白い文字は白く光る）
+- `text` / `typewriter` / `counter` は実体の画像を持たない（drawtext で描く）ので、`morph_to` / `explode_to` / `assemble_from` は掛けられず、`compute()` もできない（どちらも `ValueError`。以前は黙って無視されていた）。文字を粒子化・モーフするときは下の `text_image()` を使う
+
+### 文字を画像に焼く（text_image）
+
+文字を PIL で**透過 PNG** に描き、**画像 Object** を返す。drawtext の `text()` では出来ない
+「1行の中の一部だけ色・太さ・書体を変える」「可変フォントの太さ」「行送り・行ごとの揃え・自動折り返し」を受け持つ。
+画像なので `morph_to` / `explode_to` / `assemble_from` の入力にも target / source にも使える。**Pillow 9.1 以上が必要**（`pip install "Pillow>=9.1"`）。
+
+```python
+# 区間のリスト: 一部だけ色・太さを変える（エスケープ不要。コードや正規表現はこちらで）
+page = text_image([("犯人は、", {}), ("正規表現が1本", {"color": "#E60012", "weight": 900}), ("だった。", {})],
+                  size=64, font="C:/Windows/Fonts/NotoSerifJP-VF.ttf", weight=700,   # 可変フォントの wght 軸
+                  border=4, max_width=1500, line_spacing=1.6)
+page.time(3) <= move(x=0.5, y=0.4, anchor="center")
+
+# 簡易マークアップ: {書式|文字}。styles= に名前を登録しておくと短く書ける
+text_image("犯人は、{r|正規表現が1本}だった。", markup=True,
+           styles={"r": {"color": "red"}}, size=64, border=3).time(3)
+
+# 文字を粒子化・モーフする（morph の2枚は canvas= で同じ寸法にする）
+boom = text_image("崩壊", size=160, border=6, padding=60)
+boom.time(2) <= explode_to(max_pixels=8000, expand=300)
+a = text_image("2038年", size=180, border=6, canvas=(900, 320), align="center")
+b = text_image("桁あふれ", size=180, border=6, canvas=(900, 320), align="center", color="red")
+a.time(1.5) <= morph_to(b)
+```
+
+- `text_image(content, *, size=64, font=None, font_index=0, weight=None, color="white", markup=False, styles=None, line_spacing=1.5, align="left", max_width=None, border=0, border_color="black", shadow=(0, 0), shadow_color="black@0.6", shadow_blur=0, background=None, background_radius=0, padding=None, canvas=None, missing="error", duration=None)`
+- **書式**: `content` は文字列か区間のリスト。区間は `"文字"` / `("文字", {書式})` / `("文字", "styles の名前")`。書式のキーは `color` / `size` / `font` / `font_index` / `weight`。区間が `font` を変えたとき、`weight` と `font_index` は基本書式から引き継がない
+- **マークアップ**（`markup=True` のときだけ解釈する）: `{書式|文字}`。書式はカンマ区切りで、`キー=値` か裸の語（`styles` の名前、無ければ色）。入れ子は不可。区間の中の `|` は文字。**エスケープは `\{` `\}` `\\` の3つだけ**で、それ以外の `\` はそのまま出る
+- **太さ**: `weight=700` は可変フォントの wght 軸、`weight="Bold"` は名前つきインスタンス（同じ軸の値になる指定は同じキャッシュになる）。可変フォントでないファイルに指定すると `ValueError`（黙って無視しない）。`.ttc` の書体は `font_index=`
+- **行**: 縦位置は基本書式のフォントのメトリクス（ascent / descent）で決めるので、`ー・、` だけの行や英小文字だけの行でも位置と画像の高さは変わらない。`line_spacing` は行送り ÷ 文字サイズ。`align` は行ごとの揃え
+- **折り返し**: `max_width`（px）を渡すと、全角はどこでも・欧文は語の切れ目で折り返す。行頭禁則は句読点（`、。！？` 等）と閉じ括弧の類だけで、直前の字ごと次の行へ送る（`だ！？` のように2つ並ぶところまで。`！！！！！` のような長い連続は送らずその位置で折る。長音 `ー` や `…` は禁則にしない）。`.env` のように `.` で始まる半角の語は行頭に置ける。行末禁則・ぶら下げ・ルビは無い
+- **豆腐**: フォントに無い字（フォントの cmap に割り当てが無い字）があると既定で `ValueError`（どの字かを示す）。`missing="warn"` / `"ignore"` で豆腐のまま描ける
+- **装飾**: `border`（縁取り）/ `shadow` + `shadow_blur`（影・ぼかし）/ `background` + `background_radius`（下地）。文字や装飾がキャンバスからはみ出すときは警告するので `padding` を増やす
+- 色は `text()` と同じ ffmpeg 形式（色名 / `色名@alpha` / `#RRGGBB[AA]`）
+- 生成物は content-addressed キャッシュ（`__cache__/artifacts/textimage/*.png`）。鍵は文字列・書式・**フォントファイルの内容指紋**・Pillow の版で、フォントのパスには依らない。PNG は構築時（レイヤー実行時）に描く
+- `p.audit()` は `text_image` の文字を `text()` と同じ基準（`text-too-small` / `text-no-decoration` / `text-overflow` / `font-missing-glyph`）で検査する。大きさと幅は **`resize` / `scale` の倍率を掛けた画面上の実寸**（区間ごとに大きさが違うときは最小の区間。`scale` がアニメーションのときは最大の時点）。`zoom` / `crop` と `compute()` で素材化した後の倍率は見ない。`rotate`（0 / 180 度以外）・`rotate_to` で回した文字は幅を求められないので `text-overflow` を出さない。自前の PNG・動画・HTML の中の文字は見ない
 
 ### 数式レンダリング（formula / formula_lines）
 
@@ -1107,7 +1236,7 @@ viz = audio_viz("bgm.mp3", kind="waves", color="cyan") # 波形/スペクトル�
 
 - `normalize_audio` は Project メソッド。`duck_under` / `loop` は AudioEffect（`&` で連結）。
   `~` は映像系と共通の品質ヒントで、音声を消すには `adelete()` を使う
-- `duck_under(*others, ratio=8, threshold=0.05, attack=20, release=250)`: `others`（ナレーション等）再生中に自音量を下げる。相手は複数指定できる（`duck_under(n1, n2, n3)` / `duck_under([n1, n2, n3])`。`Narration` は `.audio` が使われる）。複数のときはどれか1つでも鳴っている間は下がる（サイドチェーンは各 other を `amix=normalize=0` で合算した1本）。検出は各 other の**形式統一（下記の 48kHz・ステレオ化）より前**の音声で行うので、モノラルのナレーションも元の音量のまま `threshold` と比べられる。1つの Object に `duck_under` は1回だけなので、相手が複数なら1回の呼び出しにまとめる。sidechainは自動で無音延長されるため、ナレーション終了後もBGMは指定尺まで続く
+- `duck_under(*others, ratio=8, threshold=0.05, attack=20, release=250, hold=0)`: `others`（ナレーション等）再生中に自音量を下げる。`hold`（ms）は相手が止んでから戻り始めるまでの保持時間。`release` だけだと読点や文の間（0.3〜0.6 秒）のたびに BGM が戻りかけ、`release` を長くすると声の無い場面でもなかなか戻らない。`hold=600` のように指定すると、相手の検出レベルが `threshold` を下回ってから hold の間は直前の発声の平均的な検出レベルを保ち、その後 `release` で戻る（実測: 0.35 秒の間で、hold なしは元の音量まで戻り、`hold=600` は約 9dB 下がったまま。発声中の下げ幅は hold なしより約 1dB 深い）。`hold > 0` のときは検出用の枝を 48kHz モノラルへまとめ、保持つきの包絡（`aeval`）にしてから `sidechaincompress` へ渡す。相手は複数指定できる（`duck_under(n1, n2, n3)` / `duck_under([n1, n2, n3])`。`Narration` は `.audio` が使われる）。複数のときはどれか1つでも鳴っている間は下がる（サイドチェーンは各 other を `amix=normalize=0` で合算した1本）。検出は各 other の**形式統一（下記の 48kHz・ステレオ化）より前**の音声で行うので、モノラルのナレーションも元の音量のまま `threshold` と比べられる。1つの Object に `duck_under` は1回だけなので、相手が複数なら1回の呼び出しにまとめる。sidechainは自動で無音延長されるため、ナレーション終了後もBGMは指定尺まで続く
 - `loop(until=None)`: 尺は「`time(秒)` / `until()` / `show()` 等で決まった尺 → `loop(until=秒)`
   （タイムラインの絶対時刻）→ Project の総尺」の順で決まり、そこまでループする。
   **引数なしの `time()` と組み合わせてはいけない**: `time()` は尺を素材の長さで確定させるので、
@@ -1139,7 +1268,23 @@ img.time(3) <= explode_to(blend=lambda u: u)          # 自身が粒子化して
 img.time(3) <= assemble_from(Object("logo.png"))      # source の粒子が集合して画像になる
 ```
 
-- パーティクルパラメータ（`**particle_params`）: `max_pixels`, `speed`, `gravity`, `spread`, `swirl`, `particle_size`, `seed`, `dissolve`, `expand`
+- パーティクルパラメータ（`**particle_params`）: `max_pixels`, `speed`, `gravity`, `spread`, `swirl`, `particle_size`, `seed`, `dissolve`, `expand`, `fade`, `delay`, `duration`、`explode_to` は `toward`、`assemble_from` は `from_point`。既定値・単位・推奨値は `python -m scriptvedit describe --name explode_to --format md`
+- `expand`（素材の周りに足す透明の余白 px）は既定 `None` = **自動**。粒が実際に飛ぶ範囲から決めるので、素材の矩形で箱型に切れない（左右と上下で別の幅。ほぼ消えた粒は数えず、画面の外になる分は足さない）。数値を渡すと四方に同じ幅。余白は対称に付き、`move` の `anchor` は余白を除いた元の絵の箱を基準にするので、`topleft` 等でも絵の位置は変わらない
+- `fade=False` … 粒が薄れず、散った位置に残る（既定 `True` は進行に合わせて消える）
+- `delay=秒` … 動き出すまで元の絵（assemble は最初のコマ）を出す。静止の間を `blend` で作るより速い（その間のコマを粒子計算で焼かない）。`duration=秒` … 動く秒数。終わった後は最後のコマを Object の尺の終わりまで保持する
+
+```python
+# 1 秒見せてから 1.5 秒で散り、散ったまま尺の終わりまで残る
+img.time(4) <= explode_to(max_pixels=12000, speed=380, gravity=0, fade=False,
+                          delay=1.0, duration=1.5)
+# 右上の1点（素材の中心から右へ 700px・上へ 380px）へ吸い込まれて消える
+img.time(2) <= explode_to(max_pixels=10000, toward=(700, -380), swirl=0.6)
+# 左下の1点から出て集まり、2 秒で絵になる。残りの 1 秒は絵を保持
+logo.time(3) <= assemble_from(Object("logo.png"), from_point=(-600, 300), duration=2.0)
+```
+
+- `toward` / `from_point` は (dx, dy)（素材の中心からのずれ px。右と下が正）。このとき `speed` は横ぶれの大きさ、`gravity` は道すじのたるみ、`spread` は粒の出発のばらつきになる
+- 重さは「余白込みのキャンバス面積 × 動くコマ数」。目安は 12000 粒・1080p・2 秒で 15 秒前後（2回目からはキャッシュ）
 - `assemble_from(source)` の `source` は集合アニメに消費され、Project のタイムラインから自動除外される
 - 生成エンジンは `scriptvedit.morph`（`generate_explode_frames` / `generate_assemble_frames`）
 - `python -m scriptvedit.morph a.png b.png -o out.mp4` という CLI もあるが（実体は `morph_cli.py`）、こちらは **scriptvedit の ffmpeg パイプラインを通らない**（OpenCV が mp4v で直接書き出す＝アルファ無し・品質指定不可）。プレビュー用途で、本番は `morph_to()` を使う
@@ -1301,7 +1446,7 @@ p.audit(strict=True)              # warningが1件でもあればRuntimeError（
 | code | severity | 内容 |
 |---|---|---|
 | `text-too-small` | warning / info | 文字が小さい（1080p 換算で 32px 未満は warning、44px 未満は info） |
-| `text-no-decoration` | warning | 縁取り・影・下地のいずれも無い文字（背景に溶ける） |
+| `text-no-decoration` | warning / info | 縁取り・影・下地のいずれも無い文字（背景に溶ける）。`configure(background_color=)` で明示した単色の背景だけの上にあり（同じ時間に画像・動画・web が無い）、文字色とのコントラスト比が 4.5 以上なら info。透過出力（`render(alpha=True)`・連番 PNG）は背景色を使わないので、`render()` が回す audit（`strict=True` とレンダ後のサマリ）では warning のまま。単独の `p.audit()` は出力先を知らないので不透明な出力を仮定する |
 | `offscreen-placement` | warning | x / y が 0..1 の比率の外で、画面に映らない（Expr は6点サンプルの全点が外のときだけ。px を渡した疑いも案内） |
 | `text-overflow` | warning | 推定描画幅がフレーム幅（safe area 5% 差引）を超える |
 | `outside-duration` | warning | 表示区間が動画の総尺と交差せず、一度も映らない |
@@ -1312,6 +1457,10 @@ p.audit(strict=True)              # warningが1件でもあればRuntimeError（
 | `no-normalize-audio` | info | 音声があるのに `normalize_audio()` が未設定 |
 | `quality-hint-ignored` | info | `~` 品質ヒントを付けたが、その op に軽い代替処理が無い（通常と同じ処理になる） |
 | `web-content-uninspected` | info | Web/Canvas の内部は静的検査の対象外（`storyboard()` での目視を促す） |
+| `morph-sdf-crossfade` | warning | `morph_to`（sdf）の2枚の不透明部が重ならない、または輪郭が取れない（形が動かず、実質クロスフェードになる） |
+
+文字の4項目（`text-too-small` / `text-no-decoration` / `text-overflow` / `font-missing-glyph`）は `text()` 系に加えて
+`text_image()` の画像にも効く（`resize` / `scale` の倍率を掛けた画面上の実寸で見る）。自前の PNG・動画・HTML の中の文字は検査されない。
 
 キャッシュ管理・監視は CLI からも実行できる。
 
@@ -1401,6 +1550,26 @@ v.show(v.duration)                # 合成音声の長さで配置（字幕・�
 - `scriptvedit.tts.speakers(backend="edge")` で各バックエンドの話者一覧を取得できる
 - 合成 wav は `backend`+text+speaker+speed+pitch の sha256 を鍵に `__cache__/tts/` へキャッシュされる（**バックエンドを変えると別キャッシュ**。アトミック書き込み）
 - VOICEVOX は鍵に「接続先 + エンジンのバージョン」も含める。エンジンに届いたときの値を `__cache__/tts/engine_sig.json`（接続先ごと）に控えておき、**エンジンが止まっているときはその控えで鍵を作ってキャッシュ済みの音声を使う**（警告は1回だけ）。キャッシュに無い台詞の合成が要るときだけ `ConnectionError` になる。エンジンに届けば常に実測のバージョンが優先され、控えも更新される。**この控えが効くのは `backend="voicevox"` を明示したときだけ**: 既定の `backend=None` はエンジン停止中は自動選択で `edge` に切り替わる（edge-tts があれば別の声で合成され、無ければ `RuntimeError`）ので、VOICEVOX のキャッシュは使われない
+- **読みと間の調整**（`tts()` の引数。`voice()` / `narrate()` にもそのまま渡せる）。既定の `None` は「触らない」で、鍵も出力も指定しないときと同じ。指定した項目だけが鍵に入る
+  - `readings={"金": "カネ"}`: 合成に渡す文だけ語を読み替える（画面の文字は変えない。長い語が優先・1回だけ置換。どのバックエンドでも使える）
+  - 以下は **VOICEVOX 専用**（audio_query を書き換える。ほかのバックエンドに渡すと `ValueError`）: `pre_silence` / `post_silence`（文の前後の無音・秒。エンジン既定 0.1）、`pause_length`（句読点の間を固定秒に）/ `pause_scale`（間の倍率。対応していない古いエンジンでは `RuntimeError`）、`intonation`（抑揚）、`volume_scale`（音量）、`kana`（AquesTalk 風カナで読みとアクセントを丸ごと指定。例 `"アタイワ'/カラノ'/ハイレツダッタ'"`。指定すると元の文は音声にも鍵にも効かない）
+- **語の時刻**: `scriptvedit.tts.tts_marks(text, ...)`（引数は `tts()` と同じ。VOICEVOX 専用）は、その wav の中で各文字が読まれ始める秒を返す。図や強調を「この語が読まれた瞬間」に合わせるのに使う
+
+  ```python
+  from scriptvedit import tts as T
+  kw = dict(backend="voicevox", speaker=13, readings={"金": "カネ"})
+  wav = T.tts("金は戻らなかった。答えは、まだ無い。", **kw)
+  m = T.tts_marks("金は戻らなかった。答えは、まだ無い。", **kw)
+  m.time_of("答えは")       # 読まれ始める秒（wav の先頭から。Object(wav) @ t0 なら t0 + これ）
+  m.span_of("答えは")       # (開始, 終了)
+  m.pauses                  # 句読点の間 [{"start", "end", "index": 文字位置}]
+  m.precision_of("答えは")  # "pause" / "start" / "kana" / "approx"
+  ```
+
+  - audio_query のモーラごとの長さを、エンジンと同じ 93.75 フレーム/秒の丸めで積む。計算した長さは実 wav とサンプル単位で一致する（VOICEVOX 0.25.2 で実測）。間の終わりは `silencedetect`（-35dB）が検出する音の出始めより 0.01〜0.07 秒早い（次の子音の立ち上がりが静かなぶん）
+  - 精度: 句読点（`"pause"`）と、文頭・間の直後の語（`"start"`）は確実。仮名（`"kana"`）はモーラ単位。漢字・英数字の途中（`"approx"`）は前後の対応点の間を文字数で按分した近似。`readings` で仮名に開くと対応点が増えて精度が上がる
+  - 記号と間の対応: 間に読まれる文字の無い記号の並び（`？　` `。「` `」。`）は1つの間に対応し、`pauses` の `index` は並びの中の最初の句読点。文頭の括弧と文末の記号は間に対応させない。どの記号の間か決められないとき（記号の並びが間より多く、仮名でも決まらない）は `index` が `None` になり、その前後は `"approx"` へ落とす（`index` がすべて決まっていれば、近似の文字が間をまたぐことはない）
+  - 合成に使ったクエリを wav と同じ鍵の `<鍵>.marks.json` に控えるので、**エンジンが止まっていても返せる**。控えの無い文だけ audio_query を問い合わせる（wav は合成しない）
 - `scriptvedit.tts` 本体は標準ライブラリのみで動作（`edge` バックエンド使用時のみ edge-tts が必要）
 - CLI: `python -m scriptvedit.tts "こんにちは" --backend edge -o out.wav` / `--list-speakers --backend edge`
 
@@ -1431,7 +1600,7 @@ sub.time(5)
 
 - `narrate(..., subtitle_text=None, subtitle_formatter=None, subtitle_max_chars=None, subtitle_max_lines=None, subtitle_safe_area=None)`: 読み上げ文と表示文を分離し、formatter→日本語禁則折り返しの順で整形する。行数超過は切り捨てずエラー。safe areaは数値、`(horizontal, vertical)`、`(left, top, right, bottom)`の画面比率で指定する
 - 字幕窓は音声実長に一致し、音声と字幕は同じ開始時刻に配置される。x/y/size/color/font/box/... は text() と同じ字幕スタイル引数（既定は下部中央+半透明ボックス）。`backend`/`speaker` は `voice()` と同じ
-- `karaoke(lines, *, style=None)`: `lines` は `(start, end, "歌詞")` または `(start, end, "歌詞", [語ごとの秒数])`。`word_durations` 省略時は行内の語へ `(end-start)` を均等割り。`style` で font/size/primary(発音済み色)/secondary(未発音色)/outline/alignment/margin_v 等を上書き。**フォント描画は libass 依存**（環境のフォント有無で見た目が変わる）
+- `karaoke(lines, *, style=None, fontsdir=None)`: `lines` は `(start, end, "歌詞")` または `(start, end, "歌詞", [語ごとの秒数])`。`word_durations` 省略時は行内の語へ `(end-start)` を均等割り。`style` で font/size/primary(発音済み色)/secondary(未発音色)/outline/alignment/margin_v 等を上書き。**フォント描画は libass 依存**（環境のフォント有無で見た目が変わる）
 
 ### ビート同期（beat_sync / scriptvedit.beat）
 
@@ -1575,11 +1744,11 @@ result = p.render("output.mp4", dry_run=True)
 
 ### ディレクトリ構成
 
-本体は `src/scriptvedit/` の47モジュール（合計約2.2万行）のパッケージ。
+本体は `src/scriptvedit/` の50モジュール（合計約2.2万行）のパッケージ。
 
 ```
 ScriptVEdit/
-├── src/scriptvedit/     パッケージ本体（47モジュール）
+├── src/scriptvedit/     パッケージ本体（50モジュール）
 │   ├── project.py       Project / render / ffmpegコマンド構築
 │   ├── checkpoint.py    チェックポイント計画・ベイク（project から抽出した自由関数）
 │   ├── layercache.py    レイヤーキャッシュの鮮度判定・生成・再生
@@ -1594,6 +1763,8 @@ ScriptVEdit/
 │   ├── expr.py easing.py  Expr式ビルダー・イージング
 │   ├── cache.py ffmpeg.py media.py  キャッシュ鍵・ffmpeg実行・probe
 │   ├── formula.py       数式レンダ（formula / formula_lines、KaTeX同梱）
+│   ├── textimage.py     文字を透過 PNG に焼く（text_image。PIL。部分的な色・太さ、可変フォント、折り返し）
+│   ├── stillseq.py      絵の列を1本の動画にまとめる（stills / frames）
 │   ├── text.py audio.py web.py      テキスト・karaoke / オーディオ（voice・narrate・sfx・beat_sync 等） / web Object・テンプレート
 │   ├── morph.py morph_cli.py  モーフィング・パーティクル生成 / その CLI 入口
 │   ├── tts.py           音声合成エンジン層（tts() / speakers。VOICEVOX / edge-tts / SAPI。voice・narrate 本体は audio.py）

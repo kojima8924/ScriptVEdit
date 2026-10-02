@@ -98,6 +98,25 @@ def _is_pending_cache_path(path):
     return (not os.path.exists(path)) and _is_cache_artifact_path(path)
 
 
+# 「表示が素材より長いとき最後のコマを保持する」生成物の種類
+# （__cache__/artifacts/<種類>/ のディレクトリ名。stillseq.py の stills() / frames()）。
+_HOLD_ARTIFACT_KINDS = ("stills", "frames")
+
+
+def _is_hold_artifact_path(path):
+    """最後のコマを保持する生成物（stills() / frames() の動画）のパスかどうか。
+
+    Object の属性ではなく**パス**で見分ける。チェックポイントと compute() は
+    source・transforms・effects だけを写した一時 Object でコマンドを組むので
+    属性は届かず、焼いた後の Object（source が checkpoint へ差し替わる）では逆に
+    属性だけが残る。パスなら「いま流している入力がその生成物か」と常に一致し、
+    未生成の dry_run でも同じ結論になる。
+    """
+    abs_path = os.path.abspath(path).replace("\\", "/")
+    root = os.path.abspath(_ARTIFACT_DIR).replace("\\", "/")
+    return any(abs_path.startswith(f"{root}/{kind}/") for kind in _HOLD_ARTIFACT_KINDS)
+
+
 # ファイルパスを値に持つパラメータ（指紋には生パスではなく内容指紋を使う）。
 # 生パスを混ぜるとリポジトリの置き場所でキャッシュ鍵が変わり移植性が失われるため、
 # ここに挙げたキーはパラメータ列挙から除外し、下で *_ffp として内容指紋を足す。
@@ -272,6 +291,11 @@ def _norm_src_path(path):
     return path.replace("\\", "/")
 
 
+# 動画チェックポイントの「焼く枚数」の版。"1": 枚数を ceil(fps*尺 + 0.5) にして、
+# 閉区間の enable 窓の最後の1枚（開始 + 尺ちょうど）まで焼く
+_CHECKPOINT_TAIL_VER = "1"
+
+
 def _checkpoint_cache_path(original_source, ops, duration=None, fps=None):
     """チェックポイントのキャッシュファイルパスを計算（signature方式）"""
     # 素材=内容指紋 / キャッシュ生成物(web webm 等)=パス署名（dry_runと実レンダで鍵一致）
@@ -291,6 +315,9 @@ def _checkpoint_cache_path(original_source, ops, duration=None, fps=None):
         sigs.append(f"bpf={_BAKE_PIXFMT_VER}")
     if duration is not None:
         sigs.append(f"dur={duration}")
+        # 焼く枚数の決め方の世代（checkpoint.py の _bake_t_arg）。旧形式
+        # （窓より1フレーム短い）の中間物を命中させない
+        sigs.append(f"tail={_CHECKPOINT_TAIL_VER}")
     if fps is not None:
         sigs.append(f"fps={fps}")
     # Project解像度も鍵に含める。blur_background_fill 等、Project寸法に依存する
@@ -310,7 +337,12 @@ def _checkpoint_cache_path(original_source, ops, duration=None, fps=None):
 # （_ENGINE_VER を上げると全キャッシュが飛ぶため、morph 系だけを無効化する）
 # "3": 中間ベイクの pix_fmt を yuva444p → bgra に変更（色変換由来の劣化を除去）。
 #      旧 yuva444p の中間物を再利用させないため版を上げる
-_MORPH_RENDER_VER = "3"
+# "4": 粒子の expand の既定を自動（None）へ変更、sdf モーフは整列で動く分の余白を
+#      キャンバスに足す（どちらも既定の出力寸法が変わる）
+# "5": 自動の余白を偶数にそろえる（奇数だと元の絵が 4:2:0 の色差の格子から半画素ずれる）。
+#      delay / duration で動く区間が1コマになる指定でも到達点のコマを作る
+#      （_terminal_frame_plan）
+_MORPH_RENDER_VER = "5"
 
 
 def _morph_cache_path(src_path, morph_op, duration, fps):
@@ -347,6 +379,14 @@ def _particle_cache_path(img_path, particle_op, duration, fps):
     sigs.append(f"op={_op_fingerprint_str(particle_op)}")
     sigs.append(f"dur={duration}")
     sigs.append(f"fps={fps}")
+    # expand を省略（None）した粒子は余白を自動で決め、その上限に Project の
+    # 画面寸法を使う（project.py の _execute_frames_step が expand_limit を渡す）。
+    # 出力が画面寸法で変わるのはこの場合だけなので、鍵にもこの場合だけ入れる
+    # （expand を明示した粒子は画面寸法が違っても同じ出力＝同じ鍵）
+    if particle_op.params.get("expand") is None:
+        proj = current_project()
+        if proj is not None:
+            sigs.append(f"pframe={proj.width}x{proj.height}")
     # 品質は op から導出する（_morph_cache_path と同じ方針）。
     sigs.append(f"q={_effective_quality(particle_op)}")
     # 中間物は draft/本番で同一内容のため rq(_ACTIVE_QUALITY)は鍵に含めない

@@ -297,6 +297,18 @@ def _web_frame_count(duration, fps):
     return _builtins.max(1, int(_math.ceil(float(duration) * float(fps))))
 
 
+def _text_terminal_effect_message(effect_name):
+    """text 系 Object に終端フレーム Effect を掛けたときのエラー文（構築時・計画時で共通）"""
+    return (
+        f"{effect_name}: text() / typewriter() / counter() などのテキスト Object には"
+        f"適用できません（実体の画像が無く drawtext で描くため、焼き込みの対象外です。"
+        f"以前は黙って無視され、文字が静止表示されるだけでした）。"
+        f"文字を粒子化・モーフするには text_image(\"文字\", size=..., font=...) で"
+        f"透過 PNG の画像 Object にしてから適用してください。"
+        f"例: text_image(\"崩壊\", size=160, border=6, padding=60).time(2) "
+        f"<= explode_to(max_pixels=8000, expand=300)")
+
+
 class Object:
     # 生成元のレイヤーファイル名（Project._stamp_layer_origin が刻む）。
     # None のままレンダに入ったアイテムは「レイヤーファイルの外で作られた」＝
@@ -317,6 +329,37 @@ class Object:
     # この区間だけなので、p.audit() の重なり判定（audio-overlap-no-duck）が読む。
     # sfx 以外は None。_audio_source と同じ理由でクラス属性で既定を持つ。
     _sfx_hits = None
+
+    # 終端フレーム生成Effect（morph_to 等）を焼いた Object の (op, 入力画像パス)。
+    # 焼いた後は effects から op が消えるので、p.audit() の morph-sdf-crossfade が
+    # ここから元の2枚を読む（Project._apply_checkpoint_final_state が刻む）。
+    # それ以外は None。_audio_source と同じ理由でクラス属性で既定を持つ。
+    _terminal_bake = None
+
+    # 生成物（slideshow / transition / video_sequence / audio_sequence 等）の
+    # 合成尺。生成コマンドを組んだ時点で入力の probe から確定している値。
+    # length() はこれがあれば生成物を probe せずこの値を尺の基準にする:
+    # Plan pass では生成物がまだ無く（probe すると FileNotFoundError）、
+    # Render pass では在るので、probe に頼ると cold / warm で尺が食い違う
+    # （コンテナの丸めで数 ms ずれ、Plan/Render の構造差として検出される）。
+    # 生成物以外は None。_audio_source と同じ理由でクラス属性で既定を持つ。
+    _generated_length = None
+
+    # duration が「生成時の合成尺を仮に入れただけ」であることの印（video_sequence）。
+    # レイヤーのコードから seq.duration を読めるよう値は入れておくが、レイヤーの
+    # 実行後に _fill_auto_durations が length() で入れ直す（後から足した speed / trim /
+    # compute(duration=) に追従させる。_duration_auto も True にしておく）。
+    # time(d) / show(d) / スライス / `* n` で尺を明示したら外れる。
+    _duration_provisional = False
+
+    # text_image() が返した Object の「画像の中の文字」の申告（文字サイズ・縁取りの
+    # 有無・寸法などの dict）。p.audit() の文字の検査が読む。text_image 以外は None。
+    _text_image = None
+
+    # チェックポイントで焼かれる前の (transforms, effects)。dry_run でも焼いた op は
+    # Object から外れるので、p.audit() が「画面上の実寸」（resize / scale の倍率）を
+    # 求めるために控える（checkpoint.py の _apply_checkpoint_final_state が刻む）。
+    _pre_checkpoint_ops = None
 
     def __init__(self, source, **kwargs):
         self.source = source
@@ -456,6 +499,7 @@ class Object:
             _require_time("time", "duration", duration, lo=0, lo_exclusive=True)
             self.duration = duration
             self._duration_auto = False
+        self._duration_provisional = False
         if name is not None:
             # 生成アンカー（X.start / X.end）も明示 anchor() と同じ重複管理に
             # 載せる（別レイヤーでの同名定義は last-write-wins にせずエラー。
@@ -488,6 +532,7 @@ class Object:
         """current_timeを進めずに表示。start=current_time, duration=指定値"""
         _require_time("show", "duration", duration, lo=0, lo_exclusive=True)
         self.duration = duration
+        self._duration_provisional = False
         self._advance = False
         if priority is not None:
             self._priority_override = priority
@@ -575,6 +620,7 @@ class Object:
             # アウト点省略（obj[3:]）: 素材末尾まで → 尺は自動確定に委ねる
             self.duration = None
             self._duration_auto = True
+        self._duration_provisional = False
         return self
 
     def __matmul__(self, at):
@@ -628,6 +674,7 @@ class Object:
                 AudioEffect("arepeat", count=count, segment=segment))
         self.duration = segment * count
         self._duration_auto = False
+        self._duration_provisional = False
         return self
 
     __rmul__ = __mul__
@@ -664,6 +711,8 @@ class Object:
         if e.name == "delete":
             self._video_deleted = True
             return
+        if e.name in _TERMINAL_FRAME_EFFECTS and self.media_type == "text":
+            raise ValueError(_text_terminal_effect_message(e.name))
         if e.name in _TIME_LIVE_EFFECTS and self.media_type in ("image", "text", "web"):
             raise ValueError(
                 f"{e.name}: 時間操作Effectは動画素材にのみ適用できます"
@@ -737,6 +786,16 @@ class Object:
         一旦除外されるが、time()/show()/until()/@ で再配置すればその時点の
         位置へ再登録される（README の compute()→time() の契約）。
         """
+        if self.media_type == "text":
+            # 実体ファイルが無い（source は text://… の合成 ID）ので、そのまま進むと
+            # ffmpeg が "text://…: Protocol not found" で落ちる
+            raise ValueError(
+                "compute(): text() / typewriter() / counter() / subtitles() などの"
+                "テキスト Object は実体ファイルを持たないため素材化できません。"
+                "文字を画像にするなら text_image(\"文字\", size=..., font=...) を使ってください"
+                "（透過 PNG の画像 Object を返すので compute() 自体が不要です）。"
+                "drawtext の見た目のまま動画にするなら Object.from_project() で"
+                "サブプロジェクトごと素材化します。")
         # live effects チェック（時間系 speed/reverse/freeze_frame は
         # _build_compute_video_cmd の前処理フィルタでベイクできるため許可）
         for e in self.effects:
@@ -764,6 +823,11 @@ class Object:
         # ベイク尺を保持（差し替え後の未生成予定パスへのprobe fallback防止）
         if duration:
             self._resolved_length = duration
+        # 尺の基準も焼いた尺へ差し替える。video_sequence 等の生成物を焼き直したとき
+        # 古い合成尺が残ると、length()（time() 省略）が黙って元の尺を返す。
+        # 素の動画でも、未生成の compute 生成物を probe せずに time() 省略が通る
+        # （cold / warm で尺が変わらない）。静止画（duration なし）は尺を持たない。
+        self._generated_length = duration if duration else None
         # plan pass: source差し替えのみ
         if proj is not None and proj._mode == "plan":
             return self._apply_compute_result(cache_path)
@@ -995,7 +1059,8 @@ class Object:
         base_dims = _get_base_dimensions(temp)
         filters = _build_transform_filters(temp)
         pre_filters = _build_video_pre_filters(temp)
-        filters = pre_filters + filters
+        # stills() / frames() の生成物は最後のコマを保持してから焼く（-t が尺を切る）
+        filters = pre_filters + _hold_source_filters(self.source) + filters
         eff_filters, _ = _build_effect_filters(temp, 0, duration, base_dims=base_dims)
         filters.extend(eff_filters)
         cmd = ["ffmpeg", "-y"]
@@ -1025,11 +1090,19 @@ class Object:
         proj = current_project()
         if proj is None:
             raise RuntimeError("length()にはアクティブなProjectが必要です")
-        info = proj._probe_media(self.source)
-        if info is None or info.get("duration") is None:
-            raise FileNotFoundError(
-                f"メディアの長さを取得できません: {self.source}")
-        base_dur = info["duration"]
+        if self._generated_length:
+            # 生成物は生成コマンドを組んだ時点の合成尺を基準にする（未生成でも
+            # time() 省略が通り、生成の前後で尺が変わらない。クラス属性の説明を参照）。
+            # 音声有無の判定に使う probe は、生成済みのときだけ当たる。
+            info = (proj._probe_media(self.source)
+                    if os.path.exists(self.source) else None) or {}
+            base_dur = self._generated_length
+        else:
+            info = proj._probe_media(self.source)
+            if info is None or info.get("duration") is None:
+                raise FileNotFoundError(
+                    f"メディアの長さを取得できません: {self.source}")
+            base_dur = info["duration"]
         # 映像側・音声側の実効尺を別々に畳み込み、有効な stream の最大を返す。
         # delete()/adelete() で消した側や存在しない stream は計算から除外する
         # （音声だけ atrim(1) しても未編集の映像尺が縮まない）。
@@ -1410,6 +1483,6 @@ def group(*objects):
 # --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛。scripts/check_import_cycles.py で計測）---
 from scriptvedit.cache import _build_unified_ops, _fold_time_effects, _op_prefix_fingerprint, _ops_effective_quality, _sig_key, _src_bucket, _src_signature, _web_cache_path
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache, _unique_tmp_path
-from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions
+from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions, _hold_source_filters
 from scriptvedit.plugins import _EFFECT_PLUGINS
 from scriptvedit.timeline import _link_after, _register_anchor_owner, _unregister_anchor_site, pause

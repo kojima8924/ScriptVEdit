@@ -42,7 +42,7 @@ def mask(image_path):
 
     白い部分は不透明のまま、黒い部分は透明になる（グレーは半透明）。
     追加 -i 入力の配線を避けるため movie= ソースで filter chain 内に読み込み、
-    scale2ref で素材サイズへ自動スケールする。元素材のアルファとは乗算合成。
+    scale=rw:rh で素材サイズへ自動スケールする。元素材のアルファとは乗算合成。
     """
     _validate_mask_image("mask", image_path)
     _register_material_dep(image_path)

@@ -12,7 +12,7 @@
     "-i",
     "color=c=darkgreen:s=1280x720:d=4:r=30",
     "-i",
-    "__cache__/artifacts/checkpoint/1a12e127/571b4453984c7131.mkv",
+    "__cache__/artifacts/checkpoint/1a12e127/2e24962e6af2e5b2.mkv",
     "-i",
     "assets/audio/bgm_loop.mp3",
     "-i",
@@ -36,7 +36,7 @@
     "test17.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/checkpoint/1a12e127/571b4453984c7131.mkv": [
+    "__cache__/artifacts/checkpoint/1a12e127/2e24962e6af2e5b2.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -56,8 +56,8 @@
       "bgra",
       "-an",
       "-t",
-      "3",
-      "__cache__/artifacts/checkpoint/1a12e127/571b4453984c7131.mkv"
+      "3.033333",
+      "__cache__/artifacts/checkpoint/1a12e127/2e24962e6af2e5b2.mkv"
     ]
   }
 }
