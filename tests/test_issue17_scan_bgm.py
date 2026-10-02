@@ -1,18 +1,16 @@
-# issue #17: showcase の fresh clone 再現性 / scan_bgm の誤認修正のテスト
+# issue #17: scan_bgm の誤認修正のテスト
+# （showcase の fresh clone 再現性のテストは examples/showcase の削除とともに廃止）
 import importlib.util
 import os
-import shutil
-import sys
 
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SHOWCASE = os.path.join(ROOT, "examples", "showcase")
 SCRIPTS = os.path.join(ROOT, "scripts")
 
 
 def _load_module(name, path):
-    """パス指定でモジュールを読み込む（examples/ scripts/ はパッケージではないため）"""
+    """パス指定でモジュールを読み込む（scripts/ はパッケージではないため）"""
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -20,51 +18,7 @@ def _load_module(name, path):
 
 
 # ============================================================
-# A. showcase: tracked ファイルだけの状態から dry_run が通る
-# ============================================================
-
-def test_showcase_dry_run_from_tracked_only(tmp_path):
-    """watermark.png（gitignore 対象の生成物）を除去した状態でも、
-    render_showcase が自動生成して dry_run が通ること"""
-    pytest.importorskip("PIL", reason="スライド生成に Pillow が必要")
-    if shutil.which("ffprobe") is None:
-        pytest.skip("ffprobe が無い環境")
-
-    wm = os.path.join(SHOWCASE, "slides", "watermark.png")
-    backup = None
-    if os.path.exists(wm):
-        backup = str(tmp_path / "watermark.png.bak")
-        shutil.move(wm, backup)
-    try:
-        rs = _load_module("render_showcase_issue17", os.path.join(SHOWCASE, "render_showcase.py"))
-        assert not os.path.exists(wm)
-        rs.ensure_generated()
-        assert os.path.exists(wm), "ensure_generated() が watermark.png を生成していない"
-
-        p = rs.build_project()
-        out = str(tmp_path / "showcase_dry.mp4")
-        cmds = p.render(out, dry_run=True)
-        assert cmds, "dry_run が ffmpeg コマンドを返さない"
-    finally:
-        if backup is not None:
-            # 生成物を消して元のファイルへ戻す（テスト前の状態を保つ）
-            if os.path.exists(wm):
-                os.remove(wm)
-            shutil.move(backup, wm)
-
-
-def test_showcase_ensure_generated_skips_when_present(tmp_path):
-    """生成物が揃っていれば ensure_generated() は何もしない（Pillow 不要で動く）"""
-    rs = _load_module("render_showcase_issue17b", os.path.join(SHOWCASE, "render_showcase.py"))
-    wm = os.path.join(SHOWCASE, "slides", "watermark.png")
-    if not os.path.exists(wm):
-        pytest.importorskip("PIL", reason="スライド生成に Pillow が必要")
-    rs.ensure_generated()   # 例外にならないこと
-    assert os.path.exists(wm)
-
-
-# ============================================================
-# B. scan_bgm: ID抽出・利用条件の出し分け・repo フォールバック廃止
+# scan_bgm: ID抽出・利用条件の出し分け・repo フォールバック廃止
 # ============================================================
 
 @pytest.fixture()

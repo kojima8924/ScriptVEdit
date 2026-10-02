@@ -140,12 +140,12 @@ p.audit()                             # 品質チェック（文字が小さい�
 `p.audit()` より前に呼ぶと、ガントチャートではなく `p.layer()` の登録情報だけの表になる。
 
 ```
-python -m scriptvedit describe --format md   # 全機能のカタログ（40 Effect / 98 Expr）
+python -m scriptvedit describe --format md   # 全機能のカタログ（41 Effect / 102 Expr）
 python -m scriptvedit watch main.py          # ファイル変更を監視して自動再レンダ
 ```
 
-リポジトリの `examples/basic/` にも最小サンプルがある（どのディレクトリからでも
-`python examples/basic/main.py` で実行できる）。
+新しいプロジェクトの雛形は `python -m scriptvedit new <path>` で作れる（生成直後に
+`python main.py` でレンダできる最小構成）。
 
 動画・音声素材は `time()` の引数を省略すると素材の長さがそのまま表示尺になる:
 
@@ -1780,8 +1780,6 @@ ScriptVEdit/
 ├── tests/               pytest（スナップショット/エラーケース/実レンダ等）
 │   ├── layers/          レイヤー定義（testNN_*.py）とフィクスチャ
 │   └── snapshots/       ffmpegコマンドのスナップショット
-├── examples/basic/      最小サンプル
-├── examples/showcase/   ショーケース動画
 ├── plugins/             サンプルプラグイン（cwd/plugins は自動読込）
 └── scripts/             開発用スクリプト
 ```
