@@ -13,7 +13,10 @@
   text-overflow (warning)        … 推定描画幅がフレーム幅（safe area差引）を超える
   outside-duration (warning)     … 表示区間が動画の総尺と交差しない（一切映らない）
   font-missing-glyph (warning)   … 解決したフォントに日本語グリフが無い（豆腐になる）
-  audio-overlap-no-duck (warning)… 音声が重なるのに duck_under が無い（ナレーションが埋もれる）
+  audio-overlap-no-duck (warning)… BGM 役（duck_under / loop を持つ音声）と、それが
+                                   ダックしていない音声が1秒以上重なる（BGM 役が無ければ
+                                   全ての組を調べる。前景同士の重なりは数えない。
+                                   sfx() は各発音区間で判定。組の件数も示す）
   bgm-loop (info)                … loop() 使用（短い曲のループは人間に気付かれやすい）
   bgm-too-short (warning)        … BGM（duck_underを持つ音声）の実尺が表示区間より短い
   no-normalize-audio (info)      … 音声があるのに normalize_audio() 未設定
@@ -32,6 +35,7 @@ import os
 import struct
 import unicodedata
 
+from scriptvedit.audio import _duck_targets
 from scriptvedit.cache import _respects_fast_hint
 
 
@@ -41,6 +45,14 @@ _TEXT_BODY_PX_1080 = 44
 
 # 音声の重なり判定のしきい値[秒]（SFXの一瞬の重なりまで警告しない）
 _OVERLAP_MIN_SEC = 1.0
+
+# audio-overlap-no-duck のメッセージに列挙する組の上限（件数は全体を数える）
+_OVERLAP_SHOW_MAX = 3
+
+# sfx() の発音区間の時刻をずらす op。これが付いた sfx は各発音区間ではなく
+# 再生区間1つで重なりを判定する（区間の計算を op ごとに再実装しないため）
+_TIME_SHIFT_EFFECTS = frozenset({"trim", "speed", "reverse", "freeze_frame", "repeat"})
+_TIME_SHIFT_AUDIO_EFFECTS = frozenset({"atrim", "atempo", "arepeat", "loop"})
 
 # 位置アニメーションのサンプル点（u=0,0.2,…,1 の6点）。
 # 全点が範囲外のときだけ offscreen-placement を報告する
@@ -72,6 +84,10 @@ def _obj_label(obj):
         content = str(spec.get("content", spec.get("format", "")))
         short = content[:20] + ("…" if len(content) > 20 else "")
         return f"{spec.get('kind', 'text')}('{short}')"
+    if getattr(obj, "_sfx_hits", None) is not None:
+        # sfx() の生成物は __cache__ のハッシュ名なので、元の音源名で示す
+        origins = getattr(obj, "_origin_sources", None) or ["?"]
+        return f"sfx({os.path.basename(str(origins[0]))})"
     return os.path.basename(str(getattr(obj, "source", "?")))
 
 
@@ -491,35 +507,139 @@ def _audio_window(project, obj):
     return start, start + dur
 
 
+def _has_time_shift(obj):
+    """発音区間の時刻をずらす時間系の op（切り出し・速度・繰り返し・ループ）を持つか"""
+    return (any(getattr(e, "name", None) in _TIME_SHIFT_EFFECTS
+                for e in getattr(obj, "effects", []))
+            or any(getattr(e, "name", None) in _TIME_SHIFT_AUDIO_EFFECTS
+                   for e in getattr(obj, "audio_effects", [])))
+
+
+def _sounding_intervals(project, obj):
+    """音声が実際に鳴る区間のリスト [(s, e), ...]（タイムライン絶対秒・昇順・互いに素）。
+
+    通常の音声は再生区間そのもの1つ。sfx() が作った Object は「開始0・尺は
+    最後の at + 素材長」の1本だが、実際に鳴るのは各 at から素材長ぶんだけなので、
+    発音区間（重なる発音は結合）で返す。0.3秒の効果音を2発置いただけで
+    「7秒重なる」と数えないため。時間系の op が付いて発音区間の時刻がずれる
+    場合は、再生区間1つで返す（数え過ぎる側へ倒す）。
+    """
+    start, end = _audio_window(project, obj)
+    hits = getattr(obj, "_sfx_hits", None)
+    if hits is None or _has_time_shift(obj):
+        return [(start, end)]
+    merged = []
+    for rel_s, rel_e in sorted(hits):
+        s = start + rel_s
+        e = min(start + rel_e, end)
+        if e <= s:
+            continue
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _longest_overlap(a, b):
+    """区間リスト a・b の重なりのうち、最も長い連続区間の秒数（重ならなければ 0 以下）"""
+    best = 0.0
+    for s1, e1 in a:
+        for s2, e2 in b:
+            best = max(best, min(e1, e2) - max(s1, s2))
+    return best
+
+
+def _is_backdrop(obj):
+    """BGM 役（duck_under か loop を持つ＝他の音の下に敷く音声）か"""
+    return any(getattr(e, "name", None) in ("duck_under", "loop")
+               for e in getattr(obj, "audio_effects", []))
+
+
+def _ducked_pairs(audio_objs):
+    """duck_under で結ばれた音声の組（順不同）を frozenset({id(a), id(b)}) の集合で返す。
+
+    a <= duck_under(b, c) なら {a,b} と {a,c}。どちらがどちらの下にダックして
+    いても「重なりは処理済み」とみなす。
+    """
+    pairs = set()
+    for obj in audio_objs:
+        for e in getattr(obj, "audio_effects", []):
+            if getattr(e, "name", None) != "duck_under":
+                continue
+            for other in _duck_targets(e):
+                pairs.add(frozenset((id(obj), id(other))))
+    return pairs
+
+
+def _overlap_candidates(audio_objs):
+    """重なりを調べる音声の組 [(a, b), ...] と、BGM 役が見つかったかを返す。
+
+    BGM 役（duck_under / loop を持つ音声）が1つでもあれば「BGM 役 × それ以外」の
+    組だけを調べ、BGM 役が duck_under の相手に入れている組は除く。
+    ナレーション同士・ナレーションと効果音のような前景同士の重なりは
+    「ナレーションが BGM に埋もれる」問題ではないので数えない（同じ duck_under の
+    相手に並んだ n1・n2 が重なっても、その間 BGM は下がっている）。BGM 役同士
+    （BGM と環境音の重ね敷き等）も同じ理由で数えない。
+    BGM 役が1つも無いときはどれが BGM か分からないので全ての組を調べる
+    （duck_under を1つも書いていない＝この警告が一番拾いたい構成）。
+    """
+    backdrops = [o for o in audio_objs if _is_backdrop(o)]
+    if not backdrops:
+        return [(audio_objs[i], audio_objs[j])
+                for i in range(len(audio_objs))
+                for j in range(i + 1, len(audio_objs))], False
+    ducked = _ducked_pairs(audio_objs)
+    back_ids = {id(o) for o in backdrops}
+    pairs = []
+    for bgm in backdrops:
+        for fg in audio_objs:
+            if id(fg) in back_ids:
+                continue
+            if frozenset((id(bgm), id(fg))) in ducked:
+                continue
+            pairs.append((bgm, fg))
+    return pairs, True
+
+
 def _audit_audio(project, objects, findings):
     """音声構成: duck_under・ループ・BGM尺・normalize_audio"""
     audio_objs = [o for o in objects if getattr(o, "has_audio", False)]
     if not audio_objs:
         return
 
-    has_duck = any(
-        any(getattr(e, "name", None) == "duck_under"
-            for e in getattr(o, "audio_effects", []))
-        for o in audio_objs)
-
-    # 重なり判定（duck_under がどこにも無い場合のみ）
-    if len(audio_objs) >= 2 and not has_duck:
-        windows = [_audio_window(project, o) for o in audio_objs]
-        for i in range(len(audio_objs)):
-            for j in range(i + 1, len(audio_objs)):
-                s = max(windows[i][0], windows[j][0])
-                e = min(windows[i][1], windows[j][1])
-                if e - s >= _OVERLAP_MIN_SEC:
-                    findings.append(_finding(
-                        "warning", "audio-overlap-no-duck",
-                        f"{_obj_label(audio_objs[i])} と "
-                        f"{_obj_label(audio_objs[j])} が {e - s:.1f}秒 重なるのに"
-                        f" duck_under がありません（ナレーションが BGM に埋もれます。"
-                        f"例: bgm <= duck_under(narration_audio)）"))
-                    break
+    # 重なり判定: 1秒以上続けて重なる「BGM 役と、それがダックしていない音声」の組を
+    # 数える（組の選び方は _overlap_candidates）。以前は duck_under がどこかに
+    # 1つでもあると検査を丸ごと飛ばしていたため、BGM が片方のナレーションにだけ
+    # ダックしていると、もう片方との重なりが見逃された。
+    if len(audio_objs) >= 2:
+        pairs, has_backdrop = _overlap_candidates(audio_objs)
+        intervals = {}
+        overlaps = []
+        for a, b in pairs:
+            for o in (a, b):
+                if id(o) not in intervals:
+                    intervals[id(o)] = _sounding_intervals(project, o)
+            d = _longest_overlap(intervals[id(a)], intervals[id(b)])
+            if d >= _OVERLAP_MIN_SEC:
+                overlaps.append((a, b, d))
+        if overlaps:
+            shown = "、".join(
+                f"{_obj_label(a)} と {_obj_label(b)}（{d:.1f}秒）"
+                for a, b, d in overlaps[:_OVERLAP_SHOW_MAX])
+            if len(overlaps) > _OVERLAP_SHOW_MAX:
+                shown += f" ほか{len(overlaps) - _OVERLAP_SHOW_MAX}組"
+            if has_backdrop:
+                hint = ("BGM がこの音の再生中に下がりません。BGM 側の duck_under に"
+                        "相手を加えてください（無ければ付ける）。"
+                        "例: bgm <= duck_under(n1, n2, n3)。duck_under は1つの音声に1回だけ")
             else:
-                continue
-            break
+                hint = ("ナレーションが BGM に埋もれます。例: bgm <= duck_under(narration_audio)。"
+                        "相手が複数なら bgm <= duck_under(n1, n2, n3)")
+            findings.append(_finding(
+                "warning", "audio-overlap-no-duck",
+                f"1秒以上重なるのに duck_under で処理されていない音声が"
+                f" {len(overlaps)}組 あります: {shown}（{hint}）"))
 
     for obj in audio_objs:
         effects = list(getattr(obj, "audio_effects", []))

@@ -11,22 +11,72 @@ import json
 import hashlib
 
 from scriptvedit.ffmpeg import _atomic_write_text
-from scriptvedit.state import _ARTIFACT_DIR, _ENGINE_VER
+from scriptvedit.state import _ARTIFACT_DIR, _ENGINE_VER, _suggest_hint
 from scriptvedit.validate import _require_number
 
 
 def marker(project, time, label):
-    """タイムライン上のマーカーを記録（mp4チャプター/YouTube目次用）"""
+    """タイムライン上のマーカーを記録（mp4チャプター/YouTube目次用）
+
+    time は秒（数値）か、アンカー名の文字列（例 "q2.start" / "scene:導入"）。
+    アンカー名はレンダ時（タイムライン解決の後）に時刻へ解決する。
+    存在しない名前は、そのレンダで近い候補つきの ValueError になる。"""
+    if isinstance(time, str):
+        if not time.strip():
+            raise ValueError(
+                "marker: time にアンカー名を渡すときは空でない文字列にしてください")
+        project._markers.append((time, str(label)))
+        return project
     _require_number("marker", "time", time, 0)
     project._markers.append((float(time), str(label)))
     return project
 
 
+def _resolve_marker_time(project, t, label):
+    """マーカーの time を秒へ解決する（数値はそのまま、文字列はアンカー名）"""
+    if not isinstance(t, str):
+        return t
+    anchors = getattr(project, "_anchors", None) or {}
+    if t in anchors:
+        return float(anchors[t])
+    defined = ", ".join(f"'{n}'" for n in sorted(anchors)) or "(なし)"
+    raise ValueError(
+        f"marker('{t}', '{label}'): アンカー '{t}' が定義されていません。"
+        f"{_suggest_hint(t, anchors)}\n"
+        f"定義済みアンカー: {defined}\n"
+        f"anchor('名前') か time(秒, name='名前') で定義した名前"
+        f"（time(name=) は '名前.start' / '名前.end'）を指定してください。")
+
+
+def _check_marker_anchors(project):
+    """アンカー名で指定したマーカーがすべて解決できることを検証する。
+
+    レンダパスのタイムライン解決（_resolve_anchors）の直後に呼ぶ。
+    チャプターの書き出しより前に、候補つきの ValueError で止めるため。
+    """
+    for t, label in project._markers:
+        _resolve_marker_time(project, t, label)
+
+
+def _ensure_marker_anchors_resolved(project):
+    """レンダ前に export_* が呼ばれたとき、アンカー名のマーカーを解決できるようにする。
+
+    アンカーはレンダ時にしか解決されないため、まだ一度もレンダしていない
+    （objects 未解決で layer 登録だけがある）ときは audit() と同じく
+    dry_run でタイムラインを解決してから読む。
+    """
+    if not any(isinstance(t, str) for t, _ in project._markers):
+        return
+    if not project.objects and getattr(project, "_layer_specs", None):
+        project.render("__chapters__.mp4", dry_run=True)
+
+
 def _sorted_markers(project):
-    """重複除去 + 時刻昇順のマーカー列を返す"""
+    """重複除去 + 時刻昇順のマーカー列を返す（アンカー名は解決済みの秒）"""
     seen = set()
     uniq = []
     for t, label in project._markers:
+        t = _resolve_marker_time(project, t, label)
         key = (t, label)
         if key in seen:
             continue
@@ -48,6 +98,7 @@ def _fmt_timestamp(sec):
 
 def export_chapters(project, path):
     """YouTube用のチャプター目次テキスト（0:00 ラベル形式）を出力する"""
+    _ensure_marker_anchors_resolved(project)
     markers = _sorted_markers(project)
     lines = []
     # YouTube仕様上、先頭は 0:00 が必要。無ければ補う
@@ -74,6 +125,7 @@ def export_metadata(project, path=None, *, title=None, description=None,
     """
     if title is None:
         title = project.param("title", None)
+    _ensure_marker_anchors_resolved(project)
     markers = _sorted_markers(project)
     chapter_lines = []
     if not markers or markers[0][0] > 0.001:

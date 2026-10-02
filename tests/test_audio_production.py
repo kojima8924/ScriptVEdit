@@ -134,8 +134,9 @@ def test_duck_under_pads_sidechain_and_keeps_bgm_to_project_end(tmp_path):
 
     dry = p.render(str(tmp_path / "duck.mp4"), dry_run=True)
     graph = dry["main"][dry["main"].index("-filter_complex") + 1]
-    assert "asplit[dmix" in graph
-    assert "]apad[dside" in graph
+    # 検出用枝は相手（ナレーション）の形式統一より前から取り出す
+    assert "asplit[apre" in graph
+    assert ",apad[dside" in graph
 
     output = tmp_path / "duck.mp4"
     p.render(str(output), timeout=60)

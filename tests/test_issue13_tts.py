@@ -19,6 +19,9 @@ def _no_network(monkeypatch):
         raise AssertionError("テスト中に実ネットワークへアクセスしました")
     monkeypatch.setattr(urllib.request, "urlopen", _blocked)
     monkeypatch.setattr(svtts, "_VOICEVOX_ENGINE_SIG_MEMO", {})
+    monkeypatch.setattr(svtts, "_VOICEVOX_OFFLINE_SIG_MEMO", {})
+    monkeypatch.setattr(svtts, "_VOICEVOX_SIG_SAVED", set())
+    monkeypatch.setattr(svtts, "_VOICEVOX_OFFLINE_WARNED", set())
 
 
 def _fake_version(monkeypatch, version, counter=None):
@@ -35,7 +38,7 @@ def _fake_version(monkeypatch, version, counter=None):
 def _key(host, port, text="こんにちは", speaker=1, speed=1.0, pitch=0.0,
          cache_dir="c"):
     """voicevox のキャッシュパスを実装と同じ経路（engine 署名込み）で計算する"""
-    engine = svtts._voicevox_engine_sig(host, port)
+    engine = svtts._voicevox_engine_state(host, port)[0]
     return svtts._cache_path("voicevox", text, speaker, speed, pitch, cache_dir,
                              engine=engine)
 
@@ -75,11 +78,11 @@ def test_version_request_is_memoized(monkeypatch):
     calls = []
     _fake_version(monkeypatch, "0.14.0", counter=calls)
     for _ in range(5):
-        svtts._voicevox_engine_sig("127.0.0.1", 50021)
+        svtts._voicevox_engine_state("127.0.0.1", 50021)
     assert len(calls) == 1, f"/version が {len(calls)} 回呼ばれた（メモ化されていない）"
     # 別 endpoint は別途1回だけ問い合わせる
-    svtts._voicevox_engine_sig("127.0.0.1", 50022)
-    svtts._voicevox_engine_sig("127.0.0.1", 50022)
+    svtts._voicevox_engine_state("127.0.0.1", 50022)
+    svtts._voicevox_engine_state("127.0.0.1", 50022)
     assert len(calls) == 2
 
 
@@ -97,7 +100,7 @@ def test_engine_sig_connection_error_message(monkeypatch):
         raise ConnectionRefusedError("refused")
     monkeypatch.setattr(urllib.request, "urlopen", _refused)
     with pytest.raises(ConnectionError) as exc:
-        svtts._voicevox_engine_sig("127.0.0.1", 50099)
+        svtts._voicevox_engine_state("127.0.0.1", 50099)
     assert "VOICEVOX が起動していません" in str(exc.value)
 
 
@@ -126,7 +129,8 @@ def test_edge_sapi_keys_unchanged_without_engine():
 def test_tts_voicevox_checks_engine_before_cache(monkeypatch, tmp_path):
     """tts(backend='voicevox') はキャッシュ照会の前にエンジン署名を取得する
 
-    署名取得（=接続確認）に失敗すれば、旧キャッシュがあっても返さない。
+    署名取得（=接続確認）に失敗し、cache_dir に保存済みの署名（engine_sig.json）も
+    無ければ ConnectionError。保存値があるときの代用は tests/test_tts_offline.py。
     """
     def _refused(*args, **kwargs):
         raise ConnectionRefusedError("refused")

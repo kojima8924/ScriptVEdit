@@ -62,7 +62,9 @@ _ENCODER_MAP = {
                    "draft": ["-preset", "ultrafast", "-crf", "30"]},
 }
 
-# 生成した中間ファイル数のカウンタ（render統計用。render開始時にリセット）
+# 生成した中間ファイル数のカウンタ（render統計用）。0 へはリセットしない:
+# render() は開始時の値を控えて終了時の増分を数える（ネストした render
+# （from_project）が同じカウンタを共有するため。project.py の render 参照）
 _GEN_COUNTER = [0]
 # _GEN_COUNTER の並列更新保護（並列レイヤー生成での過少計上を防ぐ）
 import threading as _threading
@@ -148,6 +150,12 @@ _PLACEMENT_ANCHORS = ("center", "topleft", "left", "right", "top", "bottom")
 # manifest の choices が同じ集合を見るように一本化する（layer_cache と同じ方式）。
 # 以前は manifest だけが存在しない 'bars' を公称し、実在の 'spectrum' を隠していた。
 _AUDIO_VIZ_KINDS = ("waves", "spectrum", "cqt")
+
+# normalize_audio(mode=) の方式。実装（project.py の normalize_audio の検証）と
+# manifest の choices が同じ集合を見るように一本化する（_AUDIO_VIZ_KINDS と同じ方式）。
+#   dynamic … 1パスの loudnorm（短期ラウドネスを目標へ寄せ続ける。BGMだけの区間が膨らむ）
+#   linear  … 測定パス → 一定の増幅 + リミッター（区間どうしの音量差を保つ。loudness.py）
+_NORMALIZE_AUDIO_MODES = ("dynamic", "linear")
 
 # text / typewriter / counter の anchor（drawtext の x 起点）。
 # overlay 配置の _PLACEMENT_ANCHORS とは別軸の語彙なので値も別に持つ。

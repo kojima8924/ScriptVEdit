@@ -323,6 +323,7 @@ def test_object_typed_params_reject_strings():
         "morph_to": lambda v: sv.morph_to(v),
         "assemble_from": lambda v: sv.assemble_from(v),
         "transition": lambda v: sv.transition(v, v),
+        "duck_under": lambda v: sv.duck_under(v),
     }
     for fname, pname in declared:
         assert fname in callers, (

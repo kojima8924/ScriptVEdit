@@ -18,16 +18,16 @@ from scriptvedit.context import (
 )
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.audio import _probe_audio_length
+from scriptvedit.audio import _duck_targets, _probe_audio_length
 from scriptvedit.cache import _is_pending_cache_path, _resolve_layer_cache_quality, _web_cache_path
 from scriptvedit.expr import Expr, max, min
 from scriptvedit.ffmpeg import FFmpegError, _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _normalize_ffmpeg_cmd, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
-from scriptvedit.filters.audio import _build_audio_effect_filters, _build_audio_pre_filters
+from scriptvedit.filters.audio import _MIX_AUDIO_FORMAT, _SIDECHAIN_FORMAT, _SIDECHAIN_MIX_FORMAT, _build_audio_effect_filters, _build_audio_pre_filters
 from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _get_base_dimensions, _optimize_filter_chain, _unwrap_raw_stream_ref, _visible_window
 from scriptvedit.objects import Object, _web_frames_dir
 from scriptvedit.assets import resolve_layer_path
 from scriptvedit.plugins import _autoload_plugins
-from scriptvedit.state import _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _PRESETS, _detect_media_type, _suggest_hint
+from scriptvedit.state import _CONFIGURE_KEYS, _ENCODER_MAP, _GEN_COUNTER, _NORMALIZE_AUDIO_MODES, _PRESETS, _detect_media_type, _suggest_hint
 from scriptvedit.timeline import (
     Pause, Scene, _AnchorMarker, _ScenePad, _check_until_zero_duration)
 from scriptvedit.validate import _require_number, _require_time, _validate_ffmpeg_color
@@ -35,9 +35,10 @@ from scriptvedit.warn import _warn
 # 分割サブシステム（audit.py と同じ「project を第1引数に受ける自由関数」方式）
 from scriptvedit.params import (
     check_unconsumed_params, param as _param_impl)
-from scriptvedit.chapters import _chapters_metadata_path, _write_chapters_metadata, export_chapters as _export_chapters_impl, export_metadata as _export_metadata_impl, marker as _marker_impl
+from scriptvedit.chapters import _chapters_metadata_path, _check_marker_anchors, _write_chapters_metadata, export_chapters as _export_chapters_impl, export_metadata as _export_metadata_impl, marker as _marker_impl
 from scriptvedit.preview import storyboard as _storyboard_impl, thumbnail as _thumbnail_impl
 from scriptvedit.parallel import _parallel_chunk_bounds, _parallel_chunk_count, _render_parallel
+from scriptvedit.loudness import _LINEAR_GAIN_PLACEHOLDER, _LOUDNESS_MEASURE_FILTER, _collect_loudness_cmds, _ensure_linear_gain, _format_gain_db, _processing_peak
 from scriptvedit.checkpoint import (
     _build_morph_webm_cmd, _collect_checkpoint_cmds, _morph_frame_count,
     _step_context,
@@ -86,6 +87,10 @@ class Project:
         self._layers = []  # [(start_idx, end_idx, priority)]
         self._anchors = {}  # anchor name → time
         self._anchor_defined_in = {}  # anchor name → filename（診断用）
+        # 実行中のレイヤー1回分で定義されたアンカー名 → (owner, ファイル, 行, 書き方)。
+        # 同じレイヤー内の重複定義を行番号つきで拒否する（timeline.py の
+        # _register_anchor_owner）。レイヤー exec の開始ごとに空へ戻す
+        self._layer_anchor_sites = {}
         self._layer_specs = []  # [{"filename": str, "priority": int, "cache": str}]
         self._mode = "render"  # "plan" or "render"
         self._current_layer_file = None  # 現在実行中のレイヤーファイル
@@ -103,7 +108,7 @@ class Project:
         self._layer_meta_cache = {}
         self._loudnorm_target = None  # normalize_audio() 設定時のLUFS目標
         self._loudnorm_options = None  # TP/LRA/limiter/sample_rate の実用出力設定
-        self._markers = []  # [(time, label)] チャプターマーカー
+        self._markers = []  # [(time, label)] チャプターマーカー（time は秒 or アンカー名。後者はレンダ時に解決）
         self._param_overrides = None  # p.param() 用の遅延パース済み上書き値
         self._render_window = None  # 部分レンダの (start, end)
         self.encoder = "libx264"    # 映像エンコーダ（configure(encoder=...)で変更）
@@ -121,6 +126,12 @@ class Project:
         self._dry_run = False           # dry_run（コマンド収集のみ）
         self._alpha = False             # 透過出力（from_project のサブレンダ等）
         self._audio_only_render = False  # 並列レンダの音声専用パス
+        # normalize_audio(mode="linear") の測定パス（音声だけ・全編・null 出力）を
+        # 組んでいる間だけ True（loudness.py の _build_loudness_measure_cmd）
+        self._loudness_measure_render = False
+        # linear の増幅量 (dB)。実レンダで測定してから本レンダ・音声レグを組む。
+        # None のまま main を組むのは dry_run だけ（増幅量は表記で置く）
+        self._linear_gain_db = None
         self._pending_compute_cmds = {}  # dry_run 中の compute 生成コマンド
         self._plan_structure = None     # Plan pass のレイヤー構造署名
         self._generated = 0             # レンダ開始時の生成カウンタ基準値
@@ -222,15 +233,21 @@ class Project:
         self._encoder_draft_args = list(info["draft"])
 
     def normalize_audio(self, target=-14, *, true_peak=-1.5, lra=11,
-                        limiter=True, sample_rate=48000):
+                        limiter=True, sample_rate=48000, mode="dynamic"):
         """最終音声を EBU R128 準拠で正規化し、出力ピークを保護する。
 
         target:      目標ラウドネス (LUFS)。既定 -14。
         true_peak:   最終lossy音声の目標上限 (dBTP)。エンコード時の
                      再上昇に備え、内部処理は0.5dB低く設定する。
-        lra:         目標ラウドネスレンジ (LU)。
-        limiter:     True なら loudnorm 後に look-ahead limiter を適用。
+        lra:         目標ラウドネスレンジ (LU)。mode="dynamic" のみ有効。
+        limiter:     True なら正規化の後に look-ahead limiter を適用。
         sample_rate: 最終音声のサンプルレート。None で自動。
+        mode:        "dynamic"（既定）か "linear"。dynamic は1パスの loudnorm で、
+                     短期ラウドネスを目標へ寄せ続けるため声の無い区間の BGM が
+                     膨らみ、声が入ると沈む（ポンピング）。linear は本レンダ前に
+                     音声だけを全編1回流して統合ラウドネスを測り、一定の増幅
+                     (target - 測定値 dB) + リミッターで仕上げる（区間どうしの
+                     音量差を保つ）。
 
         従来の ``normalize_audio(-14)`` はそのまま使える。
         """
@@ -251,12 +268,18 @@ class Project:
                 raise ValueError(
                     "normalize_audio: sample_rate は 8000〜384000 の範囲で"
                     f"指定してください: {sample_rate}")
+        if mode not in _NORMALIZE_AUDIO_MODES:
+            hint = _suggest_hint(mode, _NORMALIZE_AUDIO_MODES)
+            raise ValueError(
+                f"normalize_audio: mode は {' / '.join(map(repr, _NORMALIZE_AUDIO_MODES))}"
+                f" のいずれかで指定してください: {mode!r}{hint}")
         self._loudnorm_target = target
         self._loudnorm_options = {
             "true_peak": true_peak,
             "lra": lra,
             "limiter": limiter,
             "sample_rate": sample_rate,
+            "mode": mode,
         }
 
     # --- テンプレート変数（実装は params.py。委譲メソッドは manifest 掲載用）---
@@ -272,7 +295,12 @@ class Project:
     # --- チャプターマーカー（実装は chapters.py。委譲メソッドは manifest 掲載用）---
 
     def marker(self, time, label):
-        """タイムライン上のマーカーを記録（mp4チャプター/YouTube目次用）"""
+        """タイムライン上のマーカーを記録（mp4チャプター/YouTube目次用）
+
+        time は秒（数値）か、アンカー名の文字列（例 "q2.start" / "scene:導入"）。
+        アンカー名はレンダ時（タイムライン解決の後）に時刻へ解決する。
+        存在しない名前は、そのレンダで近い候補つきの ValueError になる。
+        """
         return _marker_impl(self, time, label)
 
     def export_chapters(self, path):
@@ -385,6 +413,7 @@ class Project:
         self._layers = []
         self._anchors = {}
         self._anchor_defined_in = {}
+        self._layer_anchor_sites = {}
         # probe失敗(None)エントリのみ破棄（renderをまたいだ再試行を許す）
         self._probe_cache = {k: v for k, v in self._probe_cache.items()
                              if v is not None}
@@ -481,6 +510,9 @@ class Project:
         self._render_window = None
         self._render_planned = {}
         self._render_warnings = []
+        # 前回レンダの測定値を持ち越さない（素材や構成が変わっていれば
+        # 増幅量も変わる。実レンダは _ensure_linear_gain が毎回設定し直す）
+        self._linear_gain_db = None
 
     def _resolve_plan_duration(self):
         """Plan pass（アンカー解決。cache模擬、objects破棄）→総尺確定。
@@ -515,6 +547,9 @@ class Project:
             else:
                 self._exec_layer(spec["filename"], spec["priority"])
         self._resolve_anchors()
+        # アンカー名で打ったマーカーは解決済みタイムラインで検証する（書き出し前に
+        # 候補つきの ValueError で止める）
+        _check_marker_anchors(self)
         self._verify_plan_structure(used_cache_files)
         # 全レイヤーの実行が終わった時点で、CLI/環境変数から渡されたのに
         # どのレイヤーからも参照されなかった param を報告する（綴り間違いの検出）
@@ -641,6 +676,9 @@ class Project:
         # 監査 issue #14 P2）
         prev_layer_file = self._current_layer_file
         self._current_layer_file = filename
+        # 同名アンカーの重複検査は「このレイヤーの今回の実行」単位
+        # （Plan/Render の再実行は別の実行なので重複ではない）
+        self._layer_anchor_sites = {}
         try:
             self._exec_layer_body(filename, priority, start_idx)
         finally:
@@ -1022,7 +1060,10 @@ class Project:
         self._prune_window_invisible_web_objects()
 
         if dry_run:
-            all_extra = self._collect_all_extra_cmds()
+            all_extra = self._collect_all_extra_cmds(output_path)
+            # normalize_audio(mode="linear") の増幅量は測定して初めて決まる。
+            # dry_run は測定しないので main には _LINEAR_GAIN_PLACEHOLDER
+            # （volume=<MEASURED_GAIN>dB）が入り、測定パスは cache 側に載る。
             cmd = self._build_ffmpeg_cmd(output_path)
             # 実行時に _run_ffmpeg が付ける共通の診断フラグ
             # （-hide_banner / -loglevel / -nostdin）をここでも同じ規則で付ける。
@@ -1042,6 +1083,11 @@ class Project:
         for path in self._pending_compute_cmds:
             self._note_planned_artifact(path)
         self._ensure_checkpoints()
+        # normalize_audio(mode="linear"): 本レンダ（並列なら音声レグ）を組む前に
+        # 同じ音声グラフを音声だけ全編流して測り、増幅量を確定する。
+        # 入力（チェックポイント差し替え後の source）が本レンダと同じになるよう
+        # _ensure_checkpoints の後に置く。部分レンダでも全編を測る。
+        _ensure_linear_gain(self, output_path, timeout)
         n_chunks = _parallel_chunk_count(self, parallel, output_path)
         if n_chunks >= 2:
             n_chunks = _render_parallel(self, output_path, n_chunks, timeout)
@@ -1155,6 +1201,8 @@ class Project:
 
         out_html 指定時は HTML ガントチャートを書き出しそのパスを返す。
         省略時はプレーンテキストのレポート文字列を返す（遅延 import）。
+        レイヤーは実行しない: render()（dry_run=True でよい）か audit() の後に呼ぶ。
+        前に呼ぶとガントチャートではなく layer() の登録情報だけの表になる。
         """
         try:
             # 属性参照ではなくモジュール直接 import（プラグインの名前空間注入の影響を受けない）
@@ -1255,8 +1303,9 @@ class Project:
     _get_layer_data = _get_layer_data_impl
     _build_layer_cache_cmd = _build_layer_cache_cmd_impl
 
-    def _collect_all_extra_cmds(self):
-        """中間生成物（web/checkpoint/レイヤーキャッシュ/compute）の生成コマンド辞書。
+    def _collect_all_extra_cmds(self, output_path):
+        """中間生成物（web/checkpoint/レイヤーキャッシュ/compute/ラウドネス測定）の
+        生成コマンド辞書。
 
         収集順は実レンダの実行順に一致させる:
         _ensure_web_objects → _ensure_checkpoints → _generate_pending_caches。
@@ -1264,6 +1313,9 @@ class Project:
         破壊的に差し替えるため、cache を先に集めると「実レンダでは走らない
         コマンド」（素材を直接入力にしたレイヤーキャッシュ）を返してしまう。
         収集順は必ずこの1箇所に閉じ込めること。
+        normalize_audio(mode="linear") の測定パス（loudness.py）は、実レンダと
+        同じく**チェックポイント差し替えの後**の source で組む。output_path は
+        その出力形式が音声を持てるか（測定が要るか）の判定に使う。
         """
         extra = {}
         extra.update(self._collect_web_cmds())
@@ -1276,6 +1328,7 @@ class Project:
         extra.update(_collect_checkpoint_cmds(self))
         extra.update(_collect_cache_cmds(self))
         extra.update(self._pending_compute_cmds)
+        extra.update(_collect_loudness_cmds(self, output_path))
         return extra
 
     # --- チェックポイント（実体は checkpoint.py）---
@@ -1701,12 +1754,20 @@ class Project:
     def _build_ffmpeg_cmd(self, output_path):
         inputs = []
         filter_parts = []
-        fmt = self._resolve_output_format(output_path)
+        # ラウドネス測定パス（normalize_audio(mode="linear")。loudness.py）:
+        # 音声グラフは本レンダと同一のまま、正規化チェーンの代わりに測定フィルタを
+        # 付けて null へ出す。出力パスは "-"（拡張子から形式を決めない）
+        measure = bool(self._loudness_measure_render)
+        if measure:
+            fmt = {"kind": "measure", "alpha": False, "has_audio": True,
+                   "output_path": output_path}
+        else:
+            fmt = self._resolve_output_format(output_path)
         output_path = fmt["output_path"]
 
-        # 音声レグ（並列レンダ）: 映像は-mapしないため、全尺キャンバスの
+        # 音声レグ（並列レンダ）・測定パス: 映像は-mapしないため、全尺キャンバスの
         # 生成コストを避けてダミーの極小入力に差し替える（入力indexは維持）
-        audio_only = bool(self._audio_only_render)
+        audio_only = bool(self._audio_only_render) or measure
 
         # 背景入力（alpha出力時は透明キャンバス）
         if audio_only:
@@ -1770,9 +1831,37 @@ class Project:
 
         if audio_objects:
             audio_labels = []
-            idx_by_id = {}  # id(obj) → audio_labels内index（duck_underのother参照用）
+            # id(obj) → audio_labels内index（duck_underのother参照用）
+            idx_by_id = {id(obj): ai for ai, obj in enumerate(audio_objects)}
+            # duck_under の計画を先に立てる。検出用枝は相手の加工チェーンの
+            # 形式統一（_MIX_AUDIO_FORMAT）より**前**から asplit で取り出すので、
+            # チェーンを組む前に「どの相手から何本取るか」が決まっている必要がある。
+            # 揃えた後から取ると、モノラルのナレーションが各チャンネル -3dB の
+            # ステレオとして検出され、ダッキングが浅くなる（_SIDECHAIN_FORMAT 参照）。
+            duck_plans = []  # (ai, duck, 検出用枝ラベルのリスト)
+            side_taps = {}   # 相手の ai → そのチェーンから取り出す検出用枝ラベル
             for ai, obj in enumerate(audio_objects):
-                idx_by_id[id(obj)] = ai
+                duck = next(
+                    (e for e in obj.audio_effects if e.name == "duck_under"), None)
+                if duck is None:
+                    continue
+                others = _duck_targets(duck)
+                for other in others:
+                    if other is obj:
+                        raise ValueError("duck_under: other に自分自身は指定できません")
+                    if id(other) not in idx_by_id:
+                        raise ValueError(
+                            "duck_under: other が同じProjectの再生対象音声に含まれていません。"
+                            "other 側の音声が adelete 等で除外されていないか確認してください。")
+                if len(others) == 1:
+                    taps = [f"[dside_src{ai}]"]
+                else:
+                    taps = [f"[dside_src{ai}_{k}]" for k in range(len(others))]
+                for other, tap in zip(others, taps):
+                    side_taps.setdefault(idx_by_id[id(other)], []).append(tap)
+                duck_plans.append((ai, duck, taps))
+
+            for ai, obj in enumerate(audio_objects):
                 input_idx = audio_input_map[id(obj)]
                 dur = self._resolve_obj_duration(obj)
                 start = obj.start_time
@@ -1806,40 +1895,58 @@ class Project:
                 delay_ms = int(start * 1000)
                 if delay_ms > 0:
                     a_filters.append(f"adelay={delay_ms}:all=1")
-
+                # 形式の統一（48kHz・ステレオ・fltp）: 必ずチェーンの末尾に置く。
+                # amix / sidechaincompress の出力形式は先頭入力に従うため、
+                # 揃えずに混ぜるとモノラル 24kHz の TTS が先頭に来ただけで全体が
+                # モノラル化する（filters/audio.py の _MIX_AUDIO_FORMAT 参照）。
+                # 単一音声でも付ける（出力形式が素材次第で変わらないように）ので、
+                # 加工の無い生入力参照 [N:a] は作られず、常にラベル付きチェーンになる。
                 a_label = f"[a{ai}]"
-                if a_filters:
+                taps = side_taps.get(ai)
+                if taps:
+                    # duck_under の相手: 形式統一の直前で検出用枝を分け、
+                    # ミックス用の枝だけを揃える（[N:a]…,asplit[apreK][検出用…];
+                    # [apreK]aformat…[aK]）。検出用枝は素材のチャンネル構成のまま。
+                    split = ("asplit" if len(taps) == 1
+                             else f"asplit={len(taps) + 1}")
+                    pre_label = f"[apre{ai}]"
+                    filter_parts.append(
+                        f"[{input_idx}:a]{','.join(a_filters + [split])}"
+                        f"{pre_label}{''.join(taps)}")
+                    filter_parts.append(
+                        f"{pre_label}{_MIX_AUDIO_FORMAT}{a_label}")
+                else:
+                    a_filters.append(_MIX_AUDIO_FORMAT)
                     filter_parts.append(
                         f"[{input_idx}:a]{','.join(a_filters)}{a_label}"
                     )
-                else:
-                    a_label = f"[{input_idx}:a]"
                 audio_labels.append(a_label)
 
             # duck_under（sidechaincompress）: other音声再生中に自音量を下げる。
-            # otherをasplitでミックス用/サイドチェーン用に分岐して供給する。
-            for ai, obj in enumerate(audio_objects):
-                duck = next(
-                    (e for e in obj.audio_effects if e.name == "duck_under"), None)
-                if duck is None:
-                    continue
-                other = duck.params["other"]
-                if other is obj:
-                    raise ValueError("duck_under: other に自分自身は指定できません")
-                if id(other) not in idx_by_id:
-                    raise ValueError(
-                        "duck_under: other が同じProjectの再生対象音声に含まれていません。"
-                        "other 側の音声が adelete 等で除外されていないか確認してください。")
-                oi = idx_by_id[id(other)]
-                other_ref = audio_labels[oi]
+            # 検出用枝は上のチェーン構築で相手から取り出し済み（side_taps）。
+            for ai, duck, taps in duck_plans:
                 # sidechaincompress はサイドチェイン入力の EOF で
                 # メイン(BGM)も終端しうる。検出用枝のみ無音で
                 # 延長し、ナレーション終了後は原音量で継続させる。
-                filter_parts.append(
-                    f"{other_ref}asplit[dmix{ai}][dside_src{ai}]")
-                filter_parts.append(
-                    f"[dside_src{ai}]apad[dside{ai}]")
-                audio_labels[oi] = f"[dmix{ai}]"
+                if len(taps) == 1:
+                    # 相手が1つ: チャンネル構成は素材のまま、周波数だけ本線へ揃える
+                    filter_parts.append(
+                        f"{taps[0]}{_SIDECHAIN_FORMAT},apad[dside{ai}]")
+                else:
+                    # 複数の相手: 各検出用枝を 48kHz モノラルへダウンミックスしてから
+                    # amix(normalize=0) で1本へ合算し、同様に apad する
+                    # （normalize=0 なので各 other の音量はそのまま検出に効く。
+                    # 形式を揃えないと合算結果が先頭入力の形式に従い、並び順で
+                    # 検出レベルが変わる。_SIDECHAIN_MIX_FORMAT 参照）
+                    side_refs = []
+                    for k, tap in enumerate(taps):
+                        mono_ref = f"[dside_m{ai}_{k}]"
+                        filter_parts.append(
+                            f"{tap}{_SIDECHAIN_MIX_FORMAT}{mono_ref}")
+                        side_refs.append(mono_ref)
+                    filter_parts.append(
+                        f"{''.join(side_refs)}amix=inputs={len(side_refs)}"
+                        f":normalize=0,apad[dside{ai}]")
                 my_ref = audio_labels[ai]
                 p = duck.params
                 filter_parts.append(
@@ -1849,8 +1956,9 @@ class Project:
                 audio_labels[ai] = f"[duck{ai}]"
 
             if len(audio_labels) == 1:
-                # フィルタなしの生入力参照は -map 用にブラケットを外す
-                audio_out = _unwrap_raw_stream_ref(audio_labels[0], "a")
+                # 各入力は必ず aformat 付きのラベル付きチェーンなので、
+                # 生入力参照（[N:a]）のブラケット外しは要らない
+                audio_out = audio_labels[0]
             else:
                 amix_in = "".join(audio_labels)
                 audio_out = "[aout]"
@@ -1858,14 +1966,22 @@ class Project:
                     f"{amix_in}amix=inputs={len(audio_labels)}:normalize=0{audio_out}"
                 )
 
-            # normalize_audio: loudnorm → sample rate確定 → peak limiter。
-            # リサンプルは補間により新しいピークを作り得るため、リミッターを
-            # 必ず最終sample rateの後段に置く。
-            if self._loudnorm_target is not None and audio_out is not None:
-                ln_in = audio_out if audio_out.startswith("[") else f"[{audio_out}]"
+            # normalize_audio: 正規化 → sample rate確定 → peak limiter。
+            # 正規化は mode="dynamic" なら loudnorm、"linear" なら測定済みの
+            # 一定の増幅（volume=<増幅>dB）。リサンプルは補間により新しい
+            # ピークを作り得るため、リミッターを必ず最終sample rateの後段に置く。
+            # 測定パス（loudness.py）では正規化の代わりに測定フィルタを付ける
+            # （測るのは正規化前のミックス。増幅量はその測定値から決まる）。
+            if measure and audio_out is not None:
+                filter_parts.append(
+                    f"{audio_out}{_LOUDNESS_MEASURE_FILTER}[ameas]")
+                audio_out = "[ameas]"
+            elif self._loudnorm_target is not None and audio_out is not None:
+                ln_in = audio_out
                 opts = self._loudnorm_options or {
                     "true_peak": -1.5, "lra": 11,
                     "limiter": False, "sample_rate": None,
+                    "mode": "dynamic",
                 }
                 if (fmt["kind"] == "webm"
                         and opts["sample_rate"] not in (None, 48000)):
@@ -1883,15 +1999,31 @@ class Project:
                         "normalize_audio: AAC出力で未対応のsample_rateです: "
                         f"{opts['sample_rate']}。対応値: "
                         + ", ".join(str(v) for v in sorted(aac_sample_rates)))
-                true_peak = opts["true_peak"]
                 # AAC/Opusの量子化でtrue peakがわずかに再上昇するため、
                 # ユーザー指定は最終出力目標とし、loudnorm/limiterには
-                # 0.5dBのcodec headroomを確保する。loudnormの許容下限は-9。
-                processing_peak = _builtins.max(-9.0, float(true_peak) - 0.5)
-                filter_parts.append(
-                    f"{ln_in}loudnorm=I={self._loudnorm_target}"
-                    f":TP={processing_peak}:LRA={opts['lra']}[aout_ln]")
-                normalized = "[aout_ln]"
+                # 0.5dBのcodec headroomを確保する（loudness._processing_peak）。
+                processing_peak = _processing_peak(opts["true_peak"])
+                if opts.get("mode", "dynamic") == "linear":
+                    # 一定の増幅だけで目標へ合わせる（動的な loudnorm は通さない）。
+                    # 増幅量は _ensure_linear_gain が本レンダの前に測定して決める。
+                    # dry_run は測定しないので表記（volume=<MEASURED_GAIN>dB）で置く
+                    gain = self._linear_gain_db
+                    if gain is None:
+                        if not self._dry_run:
+                            raise RuntimeError(
+                                "normalize_audio(mode='linear'): 増幅量を測定する前に"
+                                "本レンダのコマンドを組もうとしました（内部エラー。"
+                                "render() が _ensure_linear_gain を呼んでいません）")
+                        gain_txt = _LINEAR_GAIN_PLACEHOLDER
+                    else:
+                        gain_txt = _format_gain_db(gain)
+                    filter_parts.append(f"{ln_in}volume={gain_txt}[aout_gain]")
+                    normalized = "[aout_gain]"
+                else:
+                    filter_parts.append(
+                        f"{ln_in}loudnorm=I={self._loudnorm_target}"
+                        f":TP={processing_peak}:LRA={opts['lra']}[aout_ln]")
+                    normalized = "[aout_ln]"
                 if opts["sample_rate"] is not None:
                     filter_parts.append(
                         f"{normalized}aresample={opts['sample_rate']}[aout_sr]")
@@ -1907,8 +2039,12 @@ class Project:
 
         # 出力前の映像後処理（draft縮小・GIFパレット生成）
         video_map = current_base
-        if getattr(self, "_draft", False):
-            # ドラフト: 解像度を半分に（式は _DRAFT_SCALE_FILTER に一元化）
+        if getattr(self, "_draft", False) and not audio_only:
+            # ドラフト: 解像度を半分に（式は _DRAFT_SCALE_FILTER に一元化）。
+            # 音声レグ（並列レンダ）では映像を -map しないので付けない。付けると
+            # 出力先の無い [vdraft] がグラフに残り、FFmpeg が
+            # "Error binding filtergraph inputs/outputs" で失敗する
+            # （render(parallel=N, draft=True) + 音声で実際に踏んだ）
             filter_parts.append(f"{video_map}{_DRAFT_SCALE_FILTER}[vdraft]")
             video_map = "[vdraft]"
         if fmt["kind"] == "gif":
@@ -1927,6 +2063,11 @@ class Project:
             video_map = "[vstory]"
 
         cmd = ["ffmpeg", "-y"]
+        if measure:
+            # 測定結果（loudnorm の JSON）は情報レベルのログにしか出ないので、
+            # 既定の -loglevel warning を上書きする（_normalize_ffmpeg_cmd は明示を
+            # 尊重する）。進捗行は解析の邪魔なので出さない
+            cmd.extend(["-loglevel", "info", "-nostats"])
         cmd.extend(inputs)
 
         # チャプター: FFMETADATAを追加入力にして -map_metadata で埋め込む
@@ -1947,8 +2088,9 @@ class Project:
         use_audio = bool(audio_out) and fmt["has_audio"]
         if filter_parts:
             cmd.extend(["-filter_complex", ";".join(filter_parts)])
-            # 映像Objectが無い（音声のみ＋音声フィルタ）場合、video_mapは
-            # 生入力参照（[0:v]）のまま。音声側と同様にストリーム指定へ外す
+            # 映像Objectが無い（音声のみ）場合、video_mapは生入力参照（[0:v]）の
+            # まま。-map 用にストリーム指定へ外す（音声側は常に aformat 付きの
+            # ラベル付きチェーンなので外す必要が無い）
             video_map = _unwrap_raw_stream_ref(video_map, "v")
             if not audio_only:
                 cmd.extend(["-map", video_map])
@@ -1959,6 +2101,11 @@ class Project:
             cmd.extend(["-map_metadata", str(meta_idx)])
 
         # --- 出力形式ごとのエンコード指定 ---
+        if measure:
+            # 測定パス: 何も書かない null 出力。部分レンダでも窓を切らず全編を測る
+            # （どの区間を書き出しても同じ増幅量になるように）
+            cmd.extend(["-vn", "-f", "null", "-t", str(self.duration), output_path])
+            return cmd
         if audio_only:
             # 音声レグ: 逐次レンダのh264音声設定と同一（_aac_audio_argsで強制）
             cmd.append("-vn")

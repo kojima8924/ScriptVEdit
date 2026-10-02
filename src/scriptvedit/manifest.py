@@ -402,9 +402,12 @@ def describe(kind=None, name=None):
     コーディングAIが本体を読まずに「使える機能・シグネチャ・制約」を発見するための入口。
     シグネチャ/型/既定値/bakeable は実装から自動導出されるため、機能追加は自動で載る。
 
-    kind: "effect"/"transform"/"audio_effect"/"factory"/"class"/"project_method"/
-          "expr"/"plugin" で絞り込む
-    name: 単一エントリ名で絞り込む
+    kind: 種別で絞り込む（10種）。"effect"/"transform"/"audio_effect"/"factory"/
+          "class"/"object_method"/"project_method"/"expr"/"plugin"/"meta"
+          （正は manifest_data の _MANIFEST_KIND_SECTIONS）。未知の kind は候補つき ValueError
+    name: エントリ名で絞り込む（部分一致・カンマ区切りの複数指定も可）。
+          照合は完全一致・末尾要素一致・一定長以上の部分一致の順。
+          未知の名前は候補つき ValueError
     """
     effects, transforms, audio_effects, factories = [], [], [], []
     classes, exprs, metas = [], [], []
@@ -643,11 +646,18 @@ def _manifest_filter_name(manifest, name):
     for section, e in found:
         out.setdefault(section, []).append(e)
     # enums も該当エントリが実際に使うものだけへ絞る（全列挙は数千文字ある）
+    # 引数名だけで引くと別物を拾う（normalize_audio(mode=) の dynamic/linear に
+    # blend_mode の列挙、audio_viz(kind=) に xfade の列挙）ので、
+    # その引数の choices が列挙に含まれるときだけ紐づける。
     used_enum_keys = set()
+    all_enums = manifest.get("enums", {})
     for _section, e in found:
         for pname, pmeta in e.get("params", {}).items():
-            if pmeta.get("choices") and pname in _MANIFEST_PARAM_ENUM_KEY:
-                used_enum_keys.add(_MANIFEST_PARAM_ENUM_KEY[pname])
+            key = _MANIFEST_PARAM_ENUM_KEY.get(pname)
+            if not (pmeta.get("choices") and key):
+                continue
+            if set(map(str, pmeta["choices"])) <= set(map(str, all_enums.get(key, []))):
+                used_enum_keys.add(key)
     out["enums"] = {k: v for k, v in manifest.get("enums", {}).items()
                     if k in used_enum_keys}
     out["stats"] = {"matched": len(found)}

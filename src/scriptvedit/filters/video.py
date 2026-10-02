@@ -5,6 +5,7 @@ import subprocess
 import math as _math
 import warnings
 import builtins as _builtins
+from fractions import Fraction
 
 # context は scriptvedit 内 import を持たない葉なので先頭で import できる。
 from scriptvedit.context import current_project
@@ -21,6 +22,32 @@ from scriptvedit.validate import _parse_color_rgb
 # （置き場所が project.py だと parallel.py → project.py の循環になる）。
 _DRAFT_SCALE_FILTER = "scale=trunc(iw/4)*2:trunc(ih/4)*2"
 
+# tpad の直前で揃えるタイムベースの分母（CLAUDE.md §4.7）。23.976 / 24 / 25 /
+# 29.97 / 30 / 48 / 50 / 59.94 / 60 / 120fps の1フレーム長がすべて整数 tick になり、
+# tpad がクローン1枚ごとに積算しても丸め誤差が出ない。
+_TPAD_TB_DEN = 120000
+# settb の分母の上限（AVRational の分母は int。超える最小公倍数は使わない）
+_TB_DEN_MAX = 2 ** 31 - 1
+
+
+def _tpad_timebase(fps):
+    """tpad の直前へ入れる settb のタイムベース（'1/N'）を返す。
+
+    基本は 1/120000。Project の fps の1フレーム長が 1/120000 で割り切れない
+    （90 / 144fps 等）ときは、分母を fps の分子との最小公倍数へ広げる。
+    checkpoint / web / compute / レイヤーキャッシュの生成物は Project の fps で
+    書かれるので、どの fps でも誤差0になる。Project の fps と違い、かつ一般的でない
+    （1/120000 で割り切れない）fps の素材だけ、1枚あたり 1/240000 秒以下の誤差が残る。
+    fps だけで決まる（素材を probe しない）ので dry_run と実レンダで同じ文字列になる。
+    """
+    den = _TPAD_TB_DEN
+    frac = Fraction(fps).limit_denominator(1001)
+    if abs(float(frac) - float(fps)) < 1e-9:
+        wide = _math.lcm(_TPAD_TB_DEN, frac.numerator)
+        if wide <= _TB_DEN_MAX:
+            den = wide
+    return f"1/{den}"
+
 
 def _unwrap_raw_stream_ref(label, kind):
     """生入力参照（[N:v] / [N:a]）ならブラケットを外したストリーム指定を返す。
@@ -28,7 +55,8 @@ def _unwrap_raw_stream_ref(label, kind):
     フィルタなしの生入力参照はフィルタグラフの出力ラベルではないため、
     -map にブラケット付きで渡すと "Output with label ... does not exist" で
     落ちる。ストリーム指定（N:v / N:a）へ外す。
-    project.py の映像・音声と parallel.py のチャンク側で共通利用する。
+    project.py と parallel.py のチャンク側の映像で共通利用する（音声は各入力に
+    必ず aformat を付けたラベル付きチェーンになるので、生入力参照は現れない）。
     """
     inner = label[1:-1]
     if label.startswith("[") and inner.endswith(f":{kind}") \
@@ -112,6 +140,7 @@ def _get_base_dimensions(obj):
 
     resizeに加えてcrop/pad/rotate(expand)のサイズ変化も反映する
     （scaleエフェクトのpadサイズ過小による実行時エラーを防ぐ）。
+    blur / eq / flip / rotate(expand=False) は寸法を変えないので素通しする。
     """
     if getattr(obj, "media_type", None) == "text":
         # テキスト系はキャンバス全面（Project解像度）を基底サイズとする
@@ -176,6 +205,116 @@ def _build_input_args(obj, fps):
     return _decoder_input_args(obj.source, obj.media_type, fps)
 
 
+def _t_floor(x):
+    """フィルタに書く時刻を 1µs 格子へ切り捨てる（x 以下の最大値）。
+
+    time() で順に並べた Object の開始時刻は尺の足し算で決まるので
+    804.9000000000001 のような端数が乗る。フィルタ文字列にはこれを出さない。
+    単純な round(x, 6) にしないのは、2/30 秒のような格子上の時刻を
+    0.066667 へ切り上げてしまうため。tpad の start_duration は ffmpeg 自身が
+    µs へ切り捨てて読むので、この値を書けば読まれる値と一致する。
+    int と端数の無い float は表記ごとそのまま返す。
+    """
+    if isinstance(x, int):
+        return x
+    r = round(x, 6)
+    if r > x:
+        r = round(r - 1e-6, 6)
+    return r
+
+
+# enable 窓の開始側に取る許容幅（秒）。フレーム間隔（240fps でも約 4ms）より十分小さく、
+# 浮動小数の誤差（長尺でも 1e-12 秒程度）より十分大きい。
+_T_ENABLE_EPS = 1e-6
+
+
+def _t_enable_from(start, fps):
+    """overlay の enable=between(t,開始,終了) に書く開始側の時刻。
+
+    窓は「開始時刻に最も近い出力フレーム」から開ける。映像入力を開始位置へ送る
+    tpad=start_duration も、クローンの枚数を最も近いフレーム数へ丸める
+    （av_rescale_q の既定の丸め）ので、中身の1枚目はそのフレームに届く。
+    開始時刻のままで窓を開けると、開始が格子から外れているとき（207.339 秒開始 →
+    中身は 207.333 秒に届く）中身の1枚目が窓の外に落ちる。time() で並べた動画の
+    つなぎ目では、前の動画は音声（AAC は 1024 サンプル単位）の分だけ映像より尺が長く、
+    次の動画の開始が映像の終わりより数 ms 後ろになるので、境目の1枚が
+    どちらの映像も無い黒いフレームになった（実測: 章の mp4 を5本つないだ完成版）。
+
+    さらに 1µs 手前から開ける。ffmpeg は t を「pts × タイムベースの double 値」で
+    計算するので、格子上のフレームの t が 1ulp 小さく出ることがあり
+    （30fps の 111 枚目は 111×(1/30)=3.6999999999999997。49fps なら整数秒でも起きる）、
+    time() の連結で開始時刻に 804.9000000000001 のような端数も乗る。
+    fps だけで決まる（素材を probe しない）ので dry_run と実レンダで同じ文字列になる。
+    0 以下はそのまま。
+    """
+    if start <= 0:
+        return start
+    n = _tpad_first_frame(start, fps)
+    if n <= 0:
+        return 0 if isinstance(start, int) else 0.0
+    return _t_floor(n / float(fps) - _T_ENABLE_EPS)
+
+
+def _tpad_first_frame(start, fps):
+    """tpad=start_duration=_t_floor(start) が中身の1枚目を送るフレーム番号。
+
+    tpad は start_duration を µs の整数で読み（小数7桁目以降は切り捨て）、
+    av_rescale_q（半分は切り上げる四捨五入）でクローンの枚数にする。同じ計算を
+    有理数で行う（浮動小数で掛けると 55.65×30 のような半分ちょうどで食い違う）。
+    fps は Project の fps（素材の fps が違うときは近似になる）。
+    """
+    us = Fraction(repr(_t_floor(start)))
+    frac = Fraction(fps).limit_denominator(1001)
+    if abs(float(frac) - float(fps)) >= 1e-9:
+        frac = Fraction(fps)
+    return _math.floor(us * frac + Fraction(1, 2))
+
+
+def _video_tail_hold(obj):
+    """映像が Object 自身の尺より先に終わる分（秒）。この分は最後のフレームを保持する。
+
+    Object の尺（length()）は長い方の stream で決まる。AAC は 1024 サンプル単位で
+    書くので、scriptvedit 自身が書き出す mp4 を含め多くの動画は音声が映像より数十 ms
+    長い。time() で順に並べると次の Object は音声の終わりから始まり、映像の終わりとの
+    隙間にフレームが落ちると、前の映像は EOF（eof_action=pass）で次はまだ始まらない
+    黒いフレームになる。音声の終わりまで最後の絵を出す（再生ソフトと同じ扱い）。
+    保持は Object 自身の尺（長い方の stream）までで、time(d) で素材より長く伸ばした分は
+    保持しない（従来どおり背景が見える）。__cache__ の生成物は対象外
+    （dry_run では未生成で probe できず、キャッシュの有無でコマンドが変わるため。
+    checkpoint 等は映像だけを焼くので、そもそも尺が食い違わない）。
+    ループする音声（loop()）を持つ Object も対象外（尺が素材で決まらない）。
+    """
+    if obj.media_type != "video" or obj.duration is None:
+        return 0.0
+    if _is_cache_artifact_path(obj.source) or not os.path.exists(obj.source):
+        return 0.0
+    if any(getattr(e, "name", None) == "loop" for e in obj.audio_effects):
+        return 0.0
+    proj = current_project()
+    info = proj._probe_media(obj.source) if proj is not None else None
+    if not info or not info.get("has_video"):
+        return 0.0
+    vd, fd = info.get("video_duration"), info.get("duration")
+    if vd is None or fd is None or vd >= fd:
+        return 0.0
+    try:
+        natural = obj.length()
+    except (TypeError, RuntimeError, FileNotFoundError):
+        return 0.0
+    hold = _builtins.min(float(obj.duration), natural) - _fold_time_effects(vd, obj.effects)
+    return hold if hold > 1e-6 else 0.0
+
+
+def _t_ceil(x):
+    """フィルタに書く「終了」側の時刻。1µs 格子で x 以上の最小値（_t_floor の対）。"""
+    if isinstance(x, int):
+        return x
+    r = round(x, 6)
+    if r < x:
+        r = round(r + 1e-6, 6)
+    return r
+
+
 def _visible_window(obj, fps):
     """オブジェクトの可視区間 (t_from, t_to) をタイムライン絶対秒で返す。
 
@@ -218,11 +357,41 @@ def _build_video_overlay_parts(obj, input_idx, current_base, dur, visible_window
     start = obj.start_time
     base_dims = _get_base_dimensions(obj)
     obj_filters = list(_build_video_pre_filters(obj, label_prefix=f"pre{input_idx}"))
+    # 映像が Object 自身の尺より先に終わる動画は、最後のフレームを尺の終わりまで保持する
+    # （_video_tail_hold）。tpad は stop_duration を最も近いフレーム数へ丸めるので
+    # （数 ms だと 0 枚になる）1フレーム足して必ず覆う。はみ出した分は enable と
+    # 可視区間の trim が落とす。開始の tpad があるときは同じ tpad に入れる:
+    # 2段に分けると、前段の tpad が下流へ伝える終端の時刻を詰め物の分ずらさないので、
+    # 後段のクローンが過去の時刻（開始 0.412 秒の 0.2 秒素材なら 0.2 秒）に出て
+    # overlay に捨てられる（FFmpeg 8 実測）
+    hold = _video_tail_hold(obj)
+    stop_opts = ""
+    if hold > 0:
+        proj = current_project()
+        pad = hold + 1.0 / float(proj.fps if proj else 30)
+        stop_opts = f"stop_duration={_t_ceil(pad)}:stop_mode=clone"
     # ビデオ入力が start_time > 0 の場合、tpad で先頭にフレームを追加
     # (overlay有効化前にフレームが消費されるのを防ぐ)
     # trim/setpts の後に挿入し、trim がクローンフレーム込みで尺を切らないようにする
     if obj.media_type != "image" and start > 0:
-        obj_filters.append(f"tpad=start_duration={start}:start_mode=clone")
+        # tpad はクローン1枚ごとに「1/フレームレート」を入力タイムベースへ丸めて
+        # 積算する。Matroska/WebM（checkpoint の FFV1 .mkv・web/compute/
+        # from_project/レイヤーキャッシュの生成物）は 1/1000 なので 1/30 秒が
+        # 33ms に丸まり、開始時刻の約1%早く中身が届く（600秒開始で 594 秒。
+        # GIF の 1/100 では約10%）。直前で、よく使うフレームレートの1フレーム長が
+        # 割り切れるタイムベース（_tpad_timebase。通常 1/120000）へ揃えて防ぐ
+        # （CLAUDE.md §4.7）。1/1000000（AVTB）では 1/30 秒などが割り切れず、
+        # 誤差が半フレームに積もった時点で1フレームずれる（実測: 30fps の mkv を
+        # 1800 秒開始で1フレーム早く、60fps の mp4 を 600 秒開始で1フレーム遅く）。
+        # テキストの lavfi 入力はタイムベースが 1/fps で丸めが起きない
+        # （実測で開始 600 秒ちょうど）ので対象外にする。
+        if obj.media_type != "text":
+            proj = current_project()
+            obj_filters.append(f"settb={_tpad_timebase(proj.fps if proj else 30)}")
+        tpad = f"tpad=start_duration={_t_floor(start)}:start_mode=clone"
+        obj_filters.append(f"{tpad}:{stop_opts}" if stop_opts else tpad)
+    elif stop_opts:
+        obj_filters.append(f"tpad={stop_opts}")
     # 可視区間の外のフレームを早期破棄（PTSは絶対時刻のまま維持）
     if visible_window is not None:
         t_from, t_to = visible_window
@@ -254,7 +423,9 @@ def _build_video_overlay_parts(obj, input_idx, current_base, dur, visible_window
     enable_expr = None
     if obj.duration is not None:
         end = start + obj.duration
-        enable_expr = f"between(t\\,{start}\\,{end})"
+        proj = current_project()
+        t_from = _t_enable_from(start, proj.fps if proj else 30)
+        enable_expr = f"between(t\\,{t_from}\\,{_t_ceil(end)})"
     enable_str = f":enable='{enable_expr}'" if enable_expr else ""
 
     out_label = f"[v{input_idx}]"
@@ -352,6 +523,12 @@ def _build_transform_filters(obj):
             s = t.params.get("saturation", 1)
             g = t.params.get("gamma", 1)
             filters.append(f"eq=brightness={b}:contrast={c}:saturation={s}:gamma={g}")
+        elif t.name == "flip":
+            # 寸法を変えない（_get_base_dimensions は素通しでよい）。alpha も保持する
+            if t.params.get("horizontal", True):
+                filters.append("hflip")
+            if t.params.get("vertical", False):
+                filters.append("vflip")
         elif t.name == "grid":
             # 静止素材を cols×rows のグリッドに複製（背景パターン生成用）。
             # -loop 1 の入力は全フレームが同一なので、tile フィルタで
@@ -361,6 +538,13 @@ def _build_transform_filters(obj):
             gap = t.params.get("gap", 0)
             filters.append(
                 f"tile={cols}x{rows}:padding={gap}:margin=0:color=0x00000000")
+        else:
+            # 未知の Transform を黙って捨てない（Effect の _FX_BUILDERS と同じ方針）。
+            # 捨てるとフィルタの出ないコマンドがスナップショットに焼かれ、
+            # 以後ずっと緑のまま「効かない Transform」が残る
+            raise ValueError(
+                f"未知の Transform '{t.name}' です（_build_transform_filters に"
+                f"フィルタ生成がありません）")
     return filters
 
 

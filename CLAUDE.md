@@ -9,20 +9,34 @@ Python の DSL で動画を構成し、ffmpeg でレンダリングするライ�
 
 - **1ファイル = 1レイヤー**。`main.py` が構成（設定・レイヤー順・出力）だけを持ち、
   各レイヤー `.py` が素材とエフェクトを宣言する。
-- 演算子オーバーロードによる DSL: `<=` 適用 / `&` Effect連結 / `|` Transform連結 /
+- 演算子オーバーロードによる DSL: `<=` 適用 / `&` Effect連結（AudioEffect 同士も `&`。
+  Effect と AudioEffect は混ぜられず TypeError なので別々に `<=`）/ `|` Transform連結 /
   `~` 品質ヒント / `+` force / `-` cache off。`~` は内容を削除せず、軽い代替を
   持たない op では通常と同一の処理を警告なしで行う（音声削除は `adelete()`）。
   タイムライン系: `obj[2:5]` 素材切り出し（素材時間）/ `obj @ 12` 絶対配置
-  （タイムライン時間・非進行）/ `a >> b` 直後連結（pause.time() を挟める）。
+  （タイムライン時間・非進行）/ `a >> b` 直後連結（pause.time() を挟める）/
+  `obj * n` リピート / `-obj` 逆再生（`reverse()` の糖衣）。
+  **`-` は被演算子で意味が変わる**: Transform / Effect（とそのチェーン）なら policy="off"、
+  Object なら逆再生。スライス・`* n`・`-obj` は Object を破壊的に変更して同じ Object を返す。
 - レイヤー .py の中で作った `Object` は exec 中に `Project` へ**自動登録**される。
   `p.objects.append()` の手動追加はしない（render 時のレイヤー再実行で消える）。
 - **タイムラインの順次カーソルはレイヤーごとに 0 秒へリセットされる**
   （`project.py` の `_resolve_anchors`）。**レイヤー内は順次・レイヤー間は並行**で、
   総尺は全レイヤーの最大値。別レイヤーのものを後ろに置きたいときは
-  `pause.time()` / `obj @ t` / `a >> b` / `time(name=...)` + `pause.until("名前.end")` を使う。
+  `pause.time()` / `obj @ t`（`@ "名前.end"` も可）/ `time(name=...)` + `pause.until("名前.end")` を使う。
+  `a >> b` は**同じレイヤーの中だけ**（先行 Object を変数で参照するが、レイヤー .py は
+  それぞれ別の名前空間で exec されるので別レイヤーの Object は見えない）。
   これは DSL で最も事故が多い規則なので `describe` の constraints
   （`layer_timeline_independent`）にも載せてある。
-- パッケージ本体は `src/scriptvedit/`（47モジュール）。`pip install -e .` で
+- **Object はコンストラクタを呼んだ時点のカーソル位置で登録される**（`Object.__init__`、
+  text 系は `text.py` の `_new_text_object` が `proj.objects.append` し、
+  `_resolve_anchors` はこの登録順で順次カーソルを進める）。
+  後から呼んだ `time()` / `show()` では並び順は動かない。音声 `v` を作って `v.time(4)` した後に
+  字幕 `text()` を作ると字幕は4秒後ろへずれるので、**字幕の text を先、音声 Object を後に作る**
+  （または `narrate()`）。describe の constraints（`object_registered_at_creation`）にも載せてある。
+- **priority が同じ Object は登録順に重なる**（`sorted(key=priority)` が安定ソートなので、
+  `p.layer()` を呼んだ順・レイヤー内は作った順で、後が上）。
+- パッケージ本体は `src/scriptvedit/`（48モジュール）。`pip install -e .` で
   どのディレクトリからでも `from scriptvedit import *`。
 
 ## 2. 最初に読むもの（最重要）
@@ -44,7 +58,7 @@ plugin / project_method / transform。
 
 - `usage` … 概念・main スクリプト雛形・レイヤー雛形・DSL・Expr・**プラグイン雛形**・CLI
 - `constraints` … 守らないと壊れる制約（severity: error/warning/info）
-- `effects`(40) / `transforms`(7) / `audio_effects`(7) / `factories`(32) /
+- `effects`(40) / `transforms`(8) / `audio_effects`(7) / `factories`(32) /
   `objects`(19) / `object_methods`(9) / `project_methods`(14) / `expr`(98) / `plugins`(3)
   （件数は変動する。正は `describe` の実測で、整合は tests/test_issue17_docs.py が検証する）
 
@@ -111,8 +125,9 @@ SCC(7) = cache / ffmpeg / filters.video / objects / plugins / text / timeline
   切り出した。ここにも **import を増やさない**。
 - `Project._current` / `Project._exec_stack` というクラス属性は**廃止**した。
   現在の Project は `from scriptvedit.context import current_project` で読む。
-- `project.py` は純粋な sink（誰からも import されない）。唯一の例外は
-  `manifest.py`（`_inspect.getmembers(Project)` で型そのものが要る）。
+- `project.py` は純粋な sink（誰からも import されない）。例外は
+  `__init__.py` の再エクスポートと `manifest.py`（`_inspect.getmembers(Project)` で
+  型そのものが要る）の2つだけ。
   `objects.from_project` の型判定は `context.is_project()` 経由にしてあり、
   project.py がクラス定義直後に `register_project_class(Project)` で注入する。
   **sink であることは分割の武器でもある**: `parallel.py` / `preview.py` /
@@ -150,7 +165,7 @@ pad（SEGVバリア, §4.1）が付かないコマンドになる。**formula + 
 「いま何が未生成か」ではない。だから `__cache__` に何があっても出力コマンドは同じで、
 **実レンダの後にキャッシュを消さずスナップショットを回してよい**。
 
-この契約を守っているのは次の4つの収集経路。**新しい中間生成物を足すときも必ず揃えること**
+この契約を守っているのは次の5つの収集経路。**新しい中間生成物を足すときも必ず揃えること**
 （1つでも「存在すればコマンドを出さない」を入れると、実レンダの有無でスナップショットが落ちる）:
 
 | 経路 | 場所 |
@@ -159,12 +174,32 @@ pad（SEGVバリア, §4.1）が付かないコマンドになる。**formula + 
 | web Object | `project.py` の `_collect_web_cmds` |
 | レイヤーキャッシュ | `layercache.py` の `_collect_cache_cmds`（生成は `cache='make'` のときだけ。存在は見ない） |
 | compute / from_project / xfade 生成物 | `objects.py` の `compute` / `from_project`、`media.py` の `_finalize_generated_object` |
+| ラウドネス測定（`normalize_audio(mode="linear")`） | `loudness.py` の `_collect_loudness_cmds`（測定結果 JSON の有無は見ない） |
 
-最後の1つだけが存在チェックを dry_run 分岐より**前**に置いており、それが
+compute / from_project / xfade の経路だけが存在チェックを dry_run 分岐より**前**に置いており、それが
 「実レンダ後に test18 / test24 / test57 / test74 が落ちる」罠の正体だった
 （test18 / test24 はさらに別原因も重なっていた。§5 の「中間生成物は映像専用」を参照）。
 現在は全経路が揃っており、`tests/test_compute_cache_path.py` が
 **cold と warm の dry_run 出力が完全一致すること**を検証している。
+
+**`normalize_audio(mode="linear")` の増幅量だけは dry_run の main に実値が入らない。**
+増幅量は測定パス（音声だけ・全編・null 出力の ffmpeg）を実行して初めて決まり、dry_run は
+測定しないので、main の正規化は `volume=<MEASURED_GAIN>dB`（`loudness.py` の
+`_LINEAR_GAIN_PLACEHOLDER`）と表記する。測定パスのコマンドは cache 側に
+`__cache__/artifacts/loudness/<鍵>.json` → コマンド、として「実行予定」で載る。
+**測定済み（warm）でも表記のまま**にしている（測定値を読んで埋めると、測定キャッシュの
+有無で main が変わりスナップショットが落ちる）。表記は実行されないので、実レンダで
+増幅量が未設定のまま main を組むと `_build_ffmpeg_cmd` が RuntimeError で止める
+（表記を ffmpeg へ流さない）。cold / warm の一致は `tests/test_normalize_linear.py` が検証する。
+
+**例外はレイヤーキャッシュの `cache='auto'` / `'use'`**（`layercache.py` の
+`_should_use_cache`）。これは「キャッシュを再生するか、レイヤーを実行し直すか」を
+キャッシュの有無・鮮度で決める機能そのものなので、dry_run の main コマンドも変わる
+（auto は warm なら入力が1本のキャッシュ webm になる。use は cold だと dry_run でも
+`FileNotFoundError`）。上の表の「存在は見ない」は `cache='make'` の**生成コマンド**の話。
+スナップショットで auto / use を扱うときは、dry_run の前にキャッシュの状態を固定すること
+（test15 = `tests/projects.py` の `_test15_factory` は、dry_run 用にダミーの webm と
+anchors.json を置いてから `use` を踏む）。固定しないと実レンダの有無でスナップショットが落ちる。
 
 キャッシュはリポジトリルートの `__cache__/` に置かれる（`tests/conftest.py` が
 実行ディレクトリに依存しないようルートへ chdir する）。実レンダ出力は `tests/output/`。
@@ -195,7 +230,7 @@ enable=false の区間でも最終フレームが合成され続ける。`filter
 
 開始が 0 より後の映像入力には `tpad=start_duration=N:start_mode=clone` を入れる
 （`_build_video_overlay_parts`）。**`tpad` は trim/setpts の「後」に挿入すること** — 前に置くと
-trim がクローンフレーム込みで尺を切ってしまう。
+trim がクローンフレーム込みで尺を切ってしまう。`tpad` の直前には `settb=1/120000` が要る（§4.7）。
 ※ `mask` / `mask_wipe` の `blend` 側は `eof_action=repeat` のままで正しい。
 
 ### 4.3 drawtext の fontsize 式アニメは SEGV
@@ -228,6 +263,96 @@ FFmpeg 8 の `-/filter_complex <path>` 構文に自動で切り替える
 break しており、「`-filter_complex` は1回しか出ない」という暗黙の前提に依存していた）。
 **失敗時は一時ファイルを消さずパスをエラーに出す**（ffmpeg が指した式そのものが
 消えると原因が追えないため）。成功時のみ削除する。
+
+### 4.7 `tpad` のクローンが入力タイムベースに丸まり、中身が早く届く
+
+`tpad=start_duration=N:start_mode=clone` はクローン1枚ごとに「1/フレームレート」を
+**入力のタイムベースへ丸めて**積算する。Matroska/WebM のタイムベースは 1/1000 なので
+30fps の 1/30 秒が 33ms に丸まり、中身が開始時刻の**約1%早く**届いて早く消える
+（FFmpeg 8.0 実測: FFV1 mkv を 600 秒開始 → 実フレームが 594 秒から。60 秒開始 →
+59.4 秒から届き、enable で隠れた分だけ「素材の途中から始まり最後が背景」になる。
+GIF の 1/100 では約10%）。scriptvedit 自身の生成物（checkpoint の FFV1 .mkv、
+web / compute / from_project / レイヤーキャッシュ）がすべてこの形なので、
+長尺動画の後半ほど大きくずれる。mp4（1/15360 等、1/fps で割り切れる）はずれない。
+
+回避策は **`tpad` の直前に `settb=1/120000`** を入れること
+（`_build_video_overlay_parts` と `_tpad_timebase`。本レンダ・レイヤーキャッシュ・
+時間分割並列レンダが共通で通る）。1/120000 なら 24 / 25 / 30 / 48 / 50 / 60 / 120fps と
+NTSC の 24000/1001・30000/1001・60000/1001 の1フレーム長がすべて整数 tick になり、誤差は0。
+Project の fps が割り切れない（90 / 144fps 等。`fps=29.97` のように小数で書いた fps も
+2997/100 として扱うので割り切れない）ときは分母を fps との最小公倍数へ
+広げる（90fps → 1/360000、29.97 → 1/119880000）。fps だけで決まり素材を probe しないので、
+dry_run と実レンダで同じ文字列になる。
+
+**`settb=AVTB`（1/1000000）では足りない。** 1/30 秒は 33333.3µs で割り切れず、
+丸め誤差がクローン枚数ぶん積もって半フレームに達した時点で overlay が1フレームずれる
+（FFmpeg 8.0 実測: 30fps の FFV1 mkv は開始が約28分を過ぎると1フレーム早く出て0枚目が飛ぶ
+（1800 秒開始で確認）。60fps の mp4（1/15360）は約7分を過ぎると1フレーム遅れて0枚目が
+2回出る（600 秒開始で確認）。
+後者は settb 無しなら正確なので、AVTB は mp4 にとって退行だった。90fps では
+1/120000 も割り切れず 600 秒開始で13フレーム早く出たので、分母を広げている）。
+Project の fps と違い、かつ 1/120000 で割り切れない fps の素材だけ、
+1枚あたり 1/240000 秒以下の誤差が残る。
+**テキストの lavfi 入力は対象外**: タイムベースが 1/fps で丸めが起きない
+（実測で 600 秒ちょうど）。画像入力には `tpad` 自体が無い。
+回帰は `tests/test_tpad_timebase.py`（FFV1 mkv 30fps を 60 秒・1800 秒開始、
+h264 mp4 60fps を 600 秒開始へ置いて、j 枚目が「開始 + j/fps 秒」に映ることを
+画素で確かめる。後の2つは AVTB だと落ちる）。
+
+### 4.8 `volume` の式は初期化時に `t=NaN` で評価される
+
+`volume=volume='式':eval=frame` は、フレームごとの評価とは別に**初期化時に1回**
+全変数を NaN にして式を評価する（`af_volume.c` の config_output → set_volume）。
+`avolume(lambda u: ...)` の式 `clip((t)/dur,0,1)` は NaN になり、式を使う音声1本ごとに
+`Invalid value NaN for volume, setting to 0` が出て、数百行で本当のエラーが埋もれた。
+初期化時の値は使われない（各フレームで t を入れて評価し直す）ので実害は無い。
+
+回避策は **式の `t` を `if(isnan(t),0,t)` で包む**こと（`filters/audio.py` の
+`_VOLUME_T_EXPR`）。フレームごとの `t` は NaN にならないので出力は置き換え前と
+ビット単位で同一（`tests/test_volume_nan.py` が PCM の MD5 と実レンダで確かめる。
+test16 / test17 の実レンダでもデコード後の音声 MD5 が一致）。**音声側で `t` を使う式を
+足すときも `_VOLUME_T_EXPR` を通すこと。**
+
+### 4.9 `volume` の式は音声フレーム1枚に1回しか評価されない
+
+`eval=frame` の「frame」は音声フレーム（デコーダの 1024〜4096 サンプル。44.1kHz で最大約 93ms）。
+立ち上がりのフェード `clip(u/a,0,1)` は最初の1枚が丸ごと `u=0`（無音）になり、
+切り出した語録の頭が最大 93ms 欠けた（「あっ」の立ち上がりが消える、など）。
+回避策は **時間で変わる音量の前に `asetnsamples=n=256:p=0` を入れて約 5ms に刻む**こと
+（`filters/audio.py` の `_VOLUME_EXPR_FRAMING`。定数の音量には入れない）。
+回帰は `tests/test_volume_nan.py` の `test_volume_expr_fade_in_does_not_swallow_first_frame`。
+
+### 4.10 動画のつなぎ目に黒いフレームが1枚入る（enable の開始と映像の終わり）
+
+`time()` で動画を順に並べると、境目の1枚がどちらの映像も無い**黒フレーム**になりえた
+（実測: 章ごとの mp4 を5本つないだ完成版の境目4か所）。原因は4つあり、全部に手当てがある:
+
+1. **開始時刻の端数**: `time()` の連結で `804.9000000000001` のような端数が乗る。
+2. **`t` の 1ulp 誤差**: overlay の `t` は「pts × タイムベースの double 値」なので、格子上の
+   フレームの `t` が開始より小さく出る（30fps の 111 枚目は `111×(1/30)=3.6999999999999997`。
+   49fps などでは整数秒でも起きる）。
+3. **`tpad` と `enable` の丸めの食い違い**: `tpad=start_duration` はクローンの枚数を
+   「µs に切り捨てた開始 × fps」の四捨五入（半分は切り上げ）にするので、中身の1枚目は
+   **開始に最も近いフレーム**に届く。`enable` を開始時刻ちょうどで開けると、開始が格子から
+   外れているとき（207.339 秒 → 中身は 207.333 秒）その1枚目が窓の外に落ちる。
+4. **音声の方が長い動画**: AAC は 1024 サンプル単位なので、scriptvedit 自身が書き出す mp4 も
+   含めて音声が映像より数十 ms 長い。Object の尺は長い方の stream で決まるので、次の Object は
+   映像の終わりより後ろから始まる。
+
+回避策（`filters/video.py`）:
+- `enable` の開始は **`_t_enable_from`**: `_tpad_first_frame`（tpad と同じ有理数計算）で求めた
+  フレームの **1µs 手前**。終了は `_t_ceil`、tpad の `start_duration` は `_t_floor`
+  （ffmpeg 自身が µs へ切り捨てて読む）。どれも小数6桁までしか書かない。
+  `round(x, 6)` にしないこと（2/30 秒を切り上げて開始フレームを落とす）。
+- 映像が Object 自身の尺より先に終わる動画は **`_video_tail_hold`** の分だけ最後のフレームを
+  保持する（`tpad` の `stop_mode=clone`。1フレーム足して必ず覆う）。保持は Object 自身の尺
+  （長い方の stream）までで、`time(d)` で素材より長く伸ばした分は保持しない。
+  `__cache__` の生成物・存在しない素材・`loop()` 付きは対象外（probe しない）。
+- **保持は開始の `tpad` と同じ `tpad` に書く**。2段に分けると、前段の `tpad` が下流へ伝える
+  終端の時刻を詰め物の分ずらさないので、後段のクローンが過去の時刻に出て overlay に
+  捨てられる（FFmpeg 8 実測: 0.412 秒開始の 0.2 秒素材のクローンが pts 0.2 秒）。
+
+回帰は `tests/test_enable_float_fuzz.py`（音声の方が長い素材を並べる実レンダを含む）。
 
 ## 5. 設計規約（コードを変更するときに守ること）
 
@@ -266,6 +391,68 @@ Effect は2種類ある。
 `_build_ffmpeg_cmd` が**音声専用入力を末尾に1本追加**する。
 入力本数が増えるので、FFMETADATA のストリーム index は
 `1 + len(sorted_objects)` ではなく**実際の入力総数**で数えること（チャプターが壊れる）。
+
+### 音声は混ぜる前に 48kHz・ステレオへ揃える
+
+`amix` / `sidechaincompress` / `acrossfade` の出力のチャンネル配置とサンプリング周波数は
+**先頭入力に従う**（実測: モノラル 24kHz の TTS が先頭だと全体が 24kHz・モノラルになり、
+ステレオの BGM が L/R 平均に潰れる）。入力の並びは priority 順＋生成順なので書き手は気づけない。
+
+- `_build_ffmpeg_cmd` は各音声入力の加工チェーンの**末尾**に `filters/audio.py` の
+  `_MIX_AUDIO_FORMAT`（`aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo`）を
+  必ず付ける。加工の無い入力も `[N:a]aformat…[aK]` のラベル付きチェーンにし、生入力参照
+  （`[N:a]` を amix へ直接・`-map N:a`）は作らない。並列レンダの音声レグも同じ関数を通る。
+- **末尾であること**: `aloop` / `arepeat` の size は素材の実サンプルレートで見積もるので、
+  先頭で 48kHz に変えると size が不足しうる。
+- `audio_sequence` / `video_sequence` の `acrossfade` 入力にも付ける。出力の中身が変わるので
+  鍵にも `afmt=` を入れた（`video_sequence` は音声を連結するときだけ）。`from_project` は
+  音声のあるサブプロジェクトだけ `audio_graph=4` に上げ、映像だけなら `2` のまま据え置く
+  （音声グラフに出力が左右されないので、上げると同一出力なのに webm を作り直す）。
+  **混ぜ方を変えたら、音声を焼いた生成物の鍵も上げること**
+  （上げないと旧形式で焼いたキャッシュが命中し続けて直らない）。
+- モノラル → ステレオの自動変換は各チャンネル約 -3dB（パンの法則）。仕様として README に明記済み。
+  入力がすべてモノラルのプロジェクトは、以前のモノラル出力より再生音量が約 3dB 下がる
+  （`normalize_audio()` を使えば目標値どおり）。これも README に明記済み。
+- **`duck_under` の検出用枝は形式統一の前から取る**（`[N:a]…,asplit[apreK][dside_src…];`
+  `[apreK]aformat…[aK]`）。揃えた後から取ると、モノラルのナレーションが各チャンネル -3dB で
+  検出され（`sidechaincompress` の既定 `link=average`）、既定値で下げ幅が約 2.6dB 浅くなる。
+  相手1つなら `_SIDECHAIN_FORMAT`（周波数だけ揃える）、複数なら `_SIDECHAIN_MIX_FORMAT`
+  （48kHz モノラルへダウンミックス）を通してから `amix`。複数を揃えずに合算すると
+  結果が先頭の相手の形式に従い、並び順で検出レベルが 3dB 変わる（実測）。
+- 48000 は `normalize_audio()` の `sample_rate` 既定値・libopus の固定値と同じ。
+
+### `normalize_audio(mode="linear")` は測定パス → 一定の増幅（`loudness.py`）
+
+`mode="dynamic"`（既定）は測定値を渡さない1パスの `loudnorm` で、短期ラウドネスを
+目標へ寄せ続けるため、声の無い区間の BGM が膨らみ声が入ると沈む（ポンピング。
+実測で区間差 15.8dB → 1.4dB）。`mode="linear"` は次の2段:
+
+1. **測定パス**: `_build_ffmpeg_cmd` を `_loudness_measure_render=True` で呼び、
+   本レンダと同じ音声グラフの末尾に `loudnorm=print_format=json` を付けて
+   音声だけ・全編・`-f null` で流す（並列レンダの音声レグと同じ再利用の仕方。
+   **音声グラフを別に組み直さないこと**。duck_under 等の変更が測定側にだけ漏れる）。
+   `-loglevel info -nostats` を明示し、`_run_ffmpeg(echo=False)` の戻り値
+   （stderr の末尾200行）から JSON を読む。
+2. **本レンダ**: `volume=<target − 測定値>dB` → `aresample` → `alimiter`。
+   リミッターは既存どおり sample rate 確定の**後**（リサンプルの補間が新しいピークを
+   作るため）。`limiter=False` は true peak が内部上限を超えない所で増幅を止めて警告する。
+
+- 測定は `render()` の `_ensure_checkpoints` の**後**（入力の source を本レンダと揃える）、
+  本レンダ・並列レンダの前に `_ensure_linear_gain` が行い、`project._linear_gain_db` に置く。
+  音声レグ（`parallel._build_audio_leg_cmd`）も同じ値を使う。
+- **部分レンダでも全編を測る**（測定コマンドは `_render_window` を見ず `-t 総尺`）。
+  窓だけ測ると BGM だけの窓が +20dB 以上持ち上がる。
+- 音声を出さない出力（gif / webp / 連番PNG / サムネイル / 絵コンテ）と音声 Object の無い
+  プロジェクトは測らない（判定は `_needs_measurement`。`_build_ffmpeg_cmd` が正規化チェーンを
+  組む条件と同じにしてある）。
+- 測定結果の鍵は**測定コマンドそのもの**（入力は `_src_signature`）。映像だけの Object は
+  測定コマンドに入れない。`target` / `true_peak` / `limiter` / `sample_rate` は測定コマンドに
+  現れないので、変えても測り直さない（同一出力なら同一鍵の逆で、同一測定なら同一鍵）。
+- `from_project` の署名は効く設定だけ: dynamic は mode 導入前と同じ文字列、linear は
+  `lra` を外して `mode` を足す（`objects.py`）。
+- ピークの多い素材を大きく持ち上げると、リミッターが削る分だけ統合ラウドネスが目標より
+  低くなる（実測: TTS の声＋BGM を +8.8dB、ピークを最大 5dB 抑えて -14.46 LUFS）。
+  **補正の再測定はしていない**（仕様は「target − 測定値」の一定増幅）。
 
 ### キャッシュ鍵（フィンガープリント）
 
@@ -335,11 +522,25 @@ Effect は2種類ある。
 ファイル名が内容ハッシュなので、切り詰められた残骸が一度でも残ると以後どのレンダでも
 再生成されず黙って使われ続ける。「存在すればスキップ」ガードも置かない
 （残骸を永久に温存する）。
+**`_atomic_write_text` は改行を変換せず LF で書く**（`newline="\n"`）。Windows 既定の
+CRLF で書くと FFmpeg 8 の drawtext が textfile の `\r\n` を改行2回として描き、
+複数行 `text()` の行間が倍になる（実測）。`_ensure_textfile` は内容中の CR も LF へ
+正規化してから鍵と本文を作る。ASS・FFMETADATA・concat リスト・anchors.json・
+チャプター目次も LF で問題ない（`tests/test_text_newlines.py` がバイトで検証）。
 
 **この「ガードを置かない」規則が当てはまるのは、再生成がタダ（内容から一意に
 書き直せる）な成果物だけ。** `tts.py` のように**再生成に外部エンジンやネットワークが
 要る**キャッシュは、命中ガードを置いてよい。その条件は2つ:
 ① 書き込みが原子的であること、② 0バイト等の明らかな残骸を命中扱いにしないこと。
+`loudness.py` の測定結果 JSON（再生成に音声の全編パスが要る）も同じ扱いで、
+`_read_measurement` が形を検証し、壊れていれば測り直す（self-heal）。
+
+同じ理由で、VOICEVOX の鍵に混ぜるエンジン署名（接続先 + `/version`）は
+`<cache_dir>/engine_sig.json` に控え、**エンジンに届かない間だけ**その控えで鍵を作る
+（キャッシュに当たれば使い、合成が要るときだけ ConnectionError）。届けば必ず実測が勝ち、
+控えも上書きする。ffp.json（撤廃済み）の罠は「古い永続値が実測より優先される」ことで、
+これは「実測できない間だけ最後の実測値を使う」逆向きの使い方なので、罠には当たらない。
+**控えを実測より優先する使い方に変えないこと。**
 
 ### Object を `__new__` で手組みする箇所は属性を全部揃える
 
@@ -380,11 +581,13 @@ overlay の中央配置は `(W-pad_size[0])/2` で計算される
 
 ### その他
 
-- **u 正規化**: エフェクト進行度は `clip((T-start)/dur, 0, 1)` で 0..1 に正規化する
-  （`filters/video.py` の `_u_expr`。コア Effect もプラグインの `ctx["u"]` も
+- **u 正規化**: エフェクト進行度は `clip((t-start)/dur, 0, 1)` で 0..1 に正規化する
+  （`filters/video.py` の `_u_expr`。時間変数は通常フィルタ（scale / rotate / overlay 等）が
+  小文字 `t`、geq / blend 等の framesync 系だけ大文字 `T`（小文字 `t` が未定義）で、
+  プラグインの `ctx["u"]` / `ctx["u_T"]` がそれぞれに当たる。コア Effect もプラグインも
   この1関数から式を得るので、定義が乖離しない）。
 - **音声側の u 正規化だけは `_u_expr` を通らない**（`filters/audio.py` が
-  `clip((t)/{dur},0,1)` を直書きする）。adelay 前のオブジェクトローカル時間なので
+  `clip(if(isnan(t),0,t)/{dur},0,1)` を直書きする。NaN の包みは §4.8）。adelay 前のオブジェクトローカル時間なので
   `start` を引かないのが正しいが、**定義箇所が2つある**ことは意識しておくこと。
 - **`_resolve_obj_duration`**（`project.py`）は `obj.length()` ベース。
   trim / atempo を反映した加工後の尺を返す（チェックポイントのベイクと同一基準）。
@@ -415,7 +618,9 @@ overlay の中央配置は `(W-pad_size[0])/2` で計算される
     リポジトリ同梱の assets/ が常に勝ち、利用者自身の assets/ が永久に無視される）。
     結果はキャッシュしない。
   - 新規プロジェクトは `python -m scriptvedit new <path> [--template explainer]` で
-    雛形生成（`src/scriptvedit/scaffold.py`）。生成直後に `python main.py` でレンダできる。
+    雛形生成（`src/scriptvedit/scaffold.py`）。既定の minimal 雛形は生成直後に
+    `python main.py` でレンダできる。explainer 雛形は `formula()` を使うので
+    Playwright + Chromium が要る（`pip install "scriptvedit[web]" && playwright install chromium`）。
   - `here("scene.html")` … 実行中のレイヤーファイルと同じディレクトリ。
   - `p.layer("bg.py")` も cwd 非依存に解決される。
 
@@ -445,7 +650,7 @@ overlay の中央配置は `(W-pad_size[0])/2` で計算される
 | `webm` | .webm | 可 | あり | 不可 |
 | `gif` | .gif | 不可 | なし | 不可 |
 | `webp` | .webp | 可 | なし | 不可 |
-| `pngseq` | `%0Nd.png` | 可 | なし | 不可（単一パスへ確定できないので原子的出力もしない） |
+| `pngseq` | `%0Nd.png` | **常に透過**（`alpha` 指定に関係なく背景は `black@0`。`background_color` は無視） | なし | 不可（単一パスへ確定できないので原子的出力もしない） |
 | `storyboard` | .png | 不可 | なし | 不可（select フィルタで間引く） |
 
 並列レンダの適用条件は「`kind == "h264"` かつ 非 alpha かつ 部分レンダなし かつ

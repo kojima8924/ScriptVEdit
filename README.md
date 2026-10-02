@@ -76,7 +76,10 @@ myvideo/
 └── .gitignore         output/ __cache__/ assets/_imported/ を除外
 ```
 
-- `scriptvedit new myvideo --template explainer` … 解説動画向けの雛形（数式・字幕・BGM 入り）
+- `scriptvedit new myvideo --template explainer` … 解説動画向けの雛形（数式・字幕・BGM 入り）。
+  数式に `formula()` を使うため、レンダには **Playwright + Chromium** が要る
+  （`pip install "scriptvedit[web]" && playwright install chromium`）。
+  既定の minimal 雛形は追加導入なしでそのままレンダできる
 - `scriptvedit new myvideo --force` … 生成先が空でなくても生成する
 
 生成される雛形は、そのまま `p.audit()` の warning がゼロになるよう作ってある
@@ -114,7 +117,8 @@ bg.time(6) <= move(x=0.5, y=0.5, anchor="center") \
 
 初めて見る記号の意味:
 
-- `Object(...)` … 素材1つ。レイヤー内で作るだけで自動的に登録される（リストに追加する操作は不要）
+- `Object(...)` … 素材1つ。レイヤー内で作るだけで自動的に登録される（リストに追加する操作は不要）。
+  順次配置の順番は**作った順**で決まる（→「レイヤーの独立タイムライン」節）
 - `bg.time(6)` … この素材を**6秒間**表示し、タイムラインを6秒進める
 - `<=` … 適用。`&` … 複数の Effect をひとまとめにする
 - `lambda u: ...` … アニメーション。`u` は表示開始で 0、表示終了で 1 になる**進行度**。
@@ -127,10 +131,13 @@ bg.time(6) <= move(x=0.5, y=0.5, anchor="center") \
 ### 3. 次の一歩
 
 ```python
-p.inspect("timeline.html")            # 配置をガントチャートで確認（レンダ前に見る）
-p.render("out.mp4", dry_run=True)     # ffmpeg を実行せずコマンドだけ確認
+p.render("out.mp4", dry_run=True)     # ffmpeg を実行せずコマンドだけ確認（タイムラインもここで解決される）
+p.inspect("timeline.html")            # 配置をガントチャートで確認（dry_run の後に呼ぶ）
 p.audit()                             # 品質チェック（文字が小さい等の警告）
 ```
+
+`p.inspect()` 自身はレイヤーを実行しない。`render()`（`dry_run=True` でよい）か
+`p.audit()` より前に呼ぶと、ガントチャートではなく `p.layer()` の登録情報だけの表になる。
 
 ```
 python -m scriptvedit describe --format md   # 全機能のカタログ（40 Effect / 98 Expr）
@@ -147,6 +154,9 @@ clip.time() <= trim(3)                # duration=3（加工後の長さ）
 bgm.time() <= atrim(2) & avolume(0.6)   # duration=2
 img.time()                            # TypeError（画像は「素材の長さ」を持たない）
 ```
+
+このため `loop()` と組み合わせると尺が素材の長さで確定してしまい、ループしない
+（`bgm.time() <= loop()` は1回再生で終わる。→「オーディオ（拡張）」節）。
 
 ## 基本概念（用語）
 
@@ -173,10 +183,10 @@ img.time()                            # TypeError（画像は「素材の長さ�
 | `e1 & e2` | Effect を連結 | 〃 |
 | `~効果` | 品質ヒント（軽い代替処理があれば使う。無ければ通常と同一） | チェックポイントキャッシュ |
 | `+効果` | キャッシュを強制再生成 | 〃 |
-| `-効果` | キャッシュ対象から除外 | 〃 |
+| `-効果` | キャッシュ対象から除外（Object に付けると下の `-obj`＝逆再生） | 〃 |
 | `obj[2:5]` | 素材の 2〜5 秒を切り出し（**素材時間**） | タイムライン演算子 |
 | `obj @ 12` | タイムライン 12 秒の位置に配置（**タイムライン時間**・非進行） | 〃 |
-| `a >> b` | b を a の終了直後に開始 | 〃 |
+| `a >> b` | b を a の終了直後に開始（同じレイヤーの中だけ） | 〃 |
 | `obj * 3` | 3回連続再生 | 〃 |
 | `-obj` | 逆再生 | 〃 |
 | `50%P` | 0.5（パーセント記法） | パーセント記法 |
@@ -262,7 +272,9 @@ badge.py     ... 素材レイヤー
 - `~` (チルダ) ... 品質ヒント。軽い代替処理を持つ op だけ高速側を使い、
   持たない op は通常と同一の処理（内容を削除せず、警告も出さない）
 - `+` (プラス) ... policy="force"（キャッシュを強制再生成）
-- `-` (マイナス) ... policy="off"（キャッシュ対象から除外）
+- `-` (マイナス) ... policy="off"（キャッシュ対象から除外）。**被演算子で意味が変わる**:
+  Transform / Effect（とそのチェーン）に付けると policy="off"、Object に付けた `-obj` は
+  逆再生（→「タイムライン演算子」節）
 - 無印 ... policy="auto", quality="final"（右端のbakeable opを自動キャッシュ）
 
 ```python
@@ -287,7 +299,9 @@ obj.time(6) <= move(x=0.5, y=0.5, anchor="center") \
   （`show()` と同じ非進行＝周囲のレイアウトを乱さない）。
   `obj @ "intro.end"` でアンカー名も指定できる
 - `a >> b` ... b を a の終了直後に開始。`a >> pause.time(0.5) >> b` で間も置ける。
-  先行アイテムの尺は `time()`・スライス・`until()` のいずれかで確定している必要がある
+  先行アイテムの尺は `time()`・スライス・`until()` のいずれかで確定している必要がある。
+  a は変数で参照するので**同じレイヤーの中だけ**で使える（別レイヤーの後ろへ置くなら
+  `time(name=...)` + `pause.until("名前.end")` か `@ "名前.end"`）
 - `obj * 3` ... 3回連続再生（映像はloop、音声はaloop。表示尺は実効尺×回数）。
   繰り返す区間は `*` を書いた時点の実効尺で確定する
 - `-obj` ... 逆再生（`reverse()` の糖衣。音声は反転されない・30秒上限は reverse と同じ）
@@ -320,6 +334,7 @@ move(x=50%P, y=75%P)  # x=0.5, y=0.75
   - `pad(w, h, x, y, color)` ... パディング
   - `blur(radius)` ... ぼかし
   - `eq(brightness, contrast, saturation, gamma)` ... 色調補正
+  - `flip(horizontal=None, vertical=False)` ... 反転（左右=hflip / 上下=vflip）。`flip()` は左右、`flip(vertical=True)` は上下だけ、両方は `flip(horizontal=True, vertical=True)`（`horizontal` を省略すると「`vertical` を指定していなければ左右反転」）
 
 - **Effect** (`&` で連結、`<=` で適用): float で定数、lambda(u) でアニメーション
   - `move(x, y, anchor)` ... 配置位置（固定 or from/toアニメーション）。
@@ -357,17 +372,22 @@ checkpointで焼き込まれるか、レンダリング時にoverlay座標で解
 
 | 種類 | 名前 | 分類 | 備考 |
 |------|------|------|------|
-| Transform | resize, rotate, crop, pad, blur, eq | bakeable | 全Transform は bakeable |
-| Effect | scale (zoom) | bakeable | zoom は scale のエイリアス |
-| Effect | fade | bakeable | |
-| Effect | trim | bakeable | 時間影響あり |
-| Effect | rotate_to | bakeable | |
-| Effect | wipe | bakeable | |
-| Effect | color_shift | bakeable | |
-| Effect | morph_to | bakeable | 生成系。bakeable ops の末尾に配置必須 |
-| Effect | move | live | overlay座標で解釈 |
-| Effect | delete | live | overlay除外 |
+| Transform | resize, rotate, crop, pad, blur, eq, flip（と `obj.grid()` が足す grid） | bakeable | 全Transform は bakeable |
+| Effect | scale (zoom), fade, rotate_to (look_at), wipe, color_shift | bakeable | zoom は scale、look_at は rotate_to の別名 |
+| Effect | trim | bakeable | 時間影響あり（ベイク尺に反映される唯一の例外） |
+| Effect | chroma_key, vignette, pixelize, glow, lut, glitch, perspective_warp, lens, ken_burns, drop_shadow, outline | bakeable | 「映像エフェクト」節 |
+| Effect | mask, mask_wipe, opacity, rounded | bakeable | 「合成・コンポジション」節 |
+| Effect | morph_to, explode_to, assemble_from | bakeable | 終端フレーム生成。bakeable ops の末尾に1つだけ置ける |
+| Effect | move（move_along / path_bezier / throw / inertia も内部は move） | live | overlay座標で解釈 |
 | Effect | shake | live | overlay座標にsin/cosオフセット加算 |
+| Effect | delete | live | overlay除外 |
+| Effect | speed, reverse, freeze_frame, repeat（`obj * n`） | live | 時間軸を変える（「時間操作」節） |
+| Effect | blend_mode, blur_background_fill | live | 合成経路の切り替え / キャンバス固定 |
+
+bakeable な Effect の正は `src/scriptvedit/state.py` の `_BAKEABLE_EFFECTS`（24種）で、
+Transform は全て bakeable。`describe` の各エントリの `bakeable` でも確認できる。
+`pip()` は scale → rounded → outline → drop_shadow → move の組を返すプリセットなので、
+配置（move）の部分は live のまま残る。
 
 **重要**: live Effect は checkpoint で焼かれないため、checkpoint 生成後もレンダリング時に必ず残る。
 
@@ -397,7 +417,9 @@ shake は overlay 座標の変調として実装されており live 分類。�
 
 ### 音声エフェクト
 
-動画・音声ファイルの音声トラックを制御する。`&` で連結可能。`~` は品質ヒントで、
+動画・音声ファイルの音声トラックを制御する。AudioEffect 同士は `&` で連結できる。
+**Effect（映像）と AudioEffect（音声）は `&` で混ぜられない**（`fade(...) & avolume(0.6)` は
+TypeError）ので、別々の `<=` で適用する。`~` は品質ヒントで、
 軽い代替を持たない AudioEffect では通常と同じ処理をする。音声削除は `adelete()`。
 
 - `avolume(value)` ... 音量倍率（デフォルト 1.0。lambda(u) でフェードも書ける）
@@ -407,10 +429,8 @@ shake は overlay 座標の変調として実装されており live 分類。�
 
 ```python
 clip = Object("video.mp4")
-clip.time(5) <= move(x=0.5, y=0.5, anchor="center") \
-              & fade(lambda u: u) \
-              & avolume(0.6) \
-              & atrim(3)
+clip.time(5) <= move(x=0.5, y=0.5, anchor="center") & fade(lambda u: u)   # 映像（Effect）
+clip <= avolume(0.6) & atrim(3)                                            # 音声（AudioEffect）
 ```
 
 ### 映像/音声分離（split）
@@ -487,7 +507,11 @@ obj.time(2) <= fade(lambda u: ease(u))
 
 `keyframes(*args, easing=None)` は固定時点 `(u, 値)` のリストから区分線形補間のパラメータ関数を生成する。
 フラット形式（`t0, v0, t1, v1, ...`）とタプル形式（`(t0, v0), (t1, v1), ...`）の両方に対応。
-最低2点必要で、時刻順に自動ソートされる。`easing=` で各区間の補間カーブを指定できる。
+最低2点・最大128点で、時刻順に自動ソートされる。`easing=` で各区間の補間カーブを指定できる。
+
+**時刻は秒ではなく u（0..1。表示区間の進行度）**。`obj.time(4)` なら u=0.5 は表示開始から2秒後。
+秒で考えたいときは表示尺で割って渡す（範囲外の時刻は端の値で止まるだけでエラーにならないので、
+秒のまま渡すと u=1 より後のキーは黙って届かない）。
 
 ```python
 # フラット形式: 0.5倍 → 1.2倍 → 等倍
@@ -586,7 +610,7 @@ move(x=lambda u: lerp(0.2, 0.8, u), y=0.5, anchor="center")
 
 ### チェックポイントキャッシュ（policy と品質ヒント）
 
-bakeable ops（Transform全般 + scale/fade/trim Effect）の中間結果を自動保存・復元する仕組み。
+bakeable ops（全 Transform と bakeable Effect。→「Effect分類（bakeable / live）」節）の中間結果を自動保存・復元する仕組み。
 signatureベースでキャッシュの安全性を保証。保存点はRAA+FSPで最小化。
 
 **policy（キャッシュ制御）:**
@@ -741,7 +765,11 @@ pause.until("scene1.end")    # scene1の終了を待つ
 
 生成アンカー（`X.start` / `X.end`）は明示 `anchor()` と共通の重複管理に
 登録される。同名アンカーを**別レイヤー**で定義するとエラー
-（同一レイヤーファイルの再実行は許容）。
+（同一レイヤーファイルの再実行は許容）。**同じレイヤーの中**で同名アンカーを
+2回定義する（`anchor('x')` の2回、`time(name='x')` の2回、`anchor('x.start')` と
+`time(name='x')` の混在、同名 `scene()` の2回）と、定義した時点で
+「アンカー名 'x' はこのレイヤーで既に定義されています（3行目: …）」の ValueError になる。
+`anchor('x')` と `time(name='x')`（`x.start` / `x.end`）はキーが違うので共存できる。
 
 ### show / show_until（同時表示）
 
@@ -782,8 +810,12 @@ processed.time(3) <= move(x=0.5, y=0.5, anchor="center")
 # 動画生成（duration指定）
 clip = Object("source.png")
 clip <= resize(sx=0.5, sy=0.5)
-clip.compute(duration=3)  # WebM動画として生成
+clip.compute(duration=3)  # 動画として生成（FFV1 bgra の .mkv。可逆・透過あり）
 ```
+
+生成物は `duration` なしなら PNG、ありなら FFV1 `bgra` の `.mkv`（checkpoint と同じ中間ベイク形式。
+→「チェックポイントキャッシュ」節の「中間ベイクのピクセル形式」）で、
+`__cache__/artifacts/compute/` に置かれる。
 
 ### テンプレート機能
 
@@ -849,6 +881,22 @@ HTML内で `window.renderFrame(state)` 関数を定義する。
 1. **Plan pass** ... アンカーを固定点反復で解決（cache は no-op）
 2. **Render pass** ... アンカー確定済みの状態で本実行、ffmpegコマンドを構築・実行
 
+### 開始時刻の精度（tpad とタイムベース）
+
+開始が 0 秒より後の映像素材は、`tpad` で先頭のフレームを複製して開始位置まで埋めてから重ねる。
+`tpad` は複製1枚ごとの長さを**入力のタイムベースへ丸めて**積み上げるため、そのままだと
+Matroska / WebM（タイムベース 1/1000）の素材は 30fps の 1/30 秒が 33ms に丸まり、
+中身が開始時刻の約1%早く届く（60秒開始で0.6秒、600秒開始で6秒）。checkpoint・compute・
+web・from_project・レイヤーキャッシュの生成物はすべてこの形なので、長尺の後半ほど大きくずれていた。
+
+現在は `tpad` の直前で `settb=1/120000` に揃えている（24 / 25 / 30 / 48 / 50 / 60 / 120fps と、
+NTSC の 24000/1001・30000/1001・60000/1001 の1フレームが整数 tick になる）。Project の fps が
+割り切れない 90 / 144fps や、`fps=29.97` のように小数で書いた fps では、分母を fps との
+最小公倍数へ広げる（90fps → `settb=1/360000`）。本レンダ・レイヤーキャッシュ・時間分割並列レンダの
+どの経路でも、長尺の後半に置いた素材が1フレーム未満の精度で出る。
+値は fps だけで決まる（素材を probe しない）ので、dry_run と実レンダで同じコマンドになる。
+テキスト（drawtext）の入力はタイムベースが 1/fps で丸めが起きないため対象外で、画像入力には `tpad` 自体が無い。
+
 ### レイヤーの独立タイムライン
 
 各レイヤーは0秒から独立したタイムラインを持つ。
@@ -861,17 +909,27 @@ HTML内で `window.renderFrame(state)` 関数を定義する。
 | 手段 | 使いどころ |
 |---|---|
 | `pause.time(6)` | レイヤー先頭を固定秒だけ空ける |
-| `obj @ 6` | タイムラインの絶対時刻へ置く |
-| `a >> b` | 同一レイヤー内で直後に連結する |
+| `obj @ 6` / `obj @ "intro.end"` | タイムラインの絶対時刻（またはアンカー）へ置く |
 | `time(name="intro")` + `pause.until("intro.end")` | **別レイヤーの尺に自動追従させる**（推奨） |
 
-最後のアンカー方式だけが、先行レイヤーの尺を変えたときに後続が自動で追従する。
+アンカー方式（`pause.until` / `@ "intro.end"`）だけが、先行レイヤーの尺を変えたときに後続が自動で追従する。
+`a >> b` は**同じレイヤーの中でしか使えない**（先行の Object を変数で参照する必要があるが、
+レイヤー .py はそれぞれ別の名前空間で実行されるため、別レイヤーの Object は見えない）。
 `describe` の constraints にも `layer_timeline_independent` として載っている。
+
+**Object は作った時点のカーソル位置で登録される。** 順次配置の順番は `Object(...)` / `text(...)` 等を
+**呼んだ順**で決まり、後から `time()` / `show()` を呼んだ順ではない。たとえば
+「音声 `v` を作って `v.time(4)` → 字幕 `t = text(...)` を作って `t.show(4)`」と書くと、
+`v.time(4)` がカーソルを進めた後に `t` が作られるので、字幕は音声の**後ろ**（4秒から）に出る。
+音声と字幕を同時に出したいときは、**字幕の `text()` を先に作ってから音声 Object を作る**
+（または `narrate()` を使う。音声と字幕を同じ開始時刻に置く）。
 
 ### priority による z-order 制御
 
 `p.layer(filename, priority=N)` の `priority` で重ね順を制御する。
-値が大きいほど手前に表示。記述順に依存しない。
+値が大きいほど手前に表示。個別の Object は `show(..., priority=N)` / `show_until(..., priority=N)` で上書きできる。
+**priority が同じときは登録順**で、後に登録したものが上に重なる（`p.layer()` を呼んだ順、
+同じレイヤーの中では Object を作った順）。
 
 ### 映像エフェクト
 
@@ -979,6 +1037,8 @@ seq.time(seq.duration) <= move(x=0.5, y=0.5, anchor="center")
 - `reverse()` は全フレームをメモリ保持するため、**実効尺が30秒を超える素材には使用不可**（明示エラー。`trim()` で短縮してから適用）。音声は反転されない
 - `freeze_frame(at, duration)` の `at` は実効尺未満（**境界以上は拒否**）。音声は変化しない
 - `video_sequence(*objs, transition="fade", t_dur=0.5)` は2つ以上の動画Object/パスを連結。合成尺は `sum(実長) - t_dur*(n-1)` 秒、`t_dur` は最短クリップ未満。Transform/Effect適用済みObjectは先に `compute()` で素材化してから渡す
+- 動画の尺（`length()`）は映像と音声の**長い方**で決まる。音声の方が長い動画（AAC は 1024 サンプル単位なので、scriptvedit が書き出す mp4 も含めて多くの動画は音声が数十 ms 長い）は、音声が終わるまで**映像の最後のフレームを保持**する。`Object("a.mp4").time()` と並べても、つなぎ目に背景の黒が挟まらない。`time(d)` で素材より長く伸ばした分は保持しない（従来どおり背景が見える）
+- Object が映り始めるのは、開始時刻に**最も近いフレーム**から（映像の中身もそのフレームに届く）。開始時刻がフレームの格子から外れていても、中身の1枚目は欠けない
 
 ### テキスト・字幕
 
@@ -1032,21 +1092,42 @@ proof.time(3) <= move(x=0.5, y=0.5, anchor="center") & scale(lambda u: lerp(0.8,
 
 ```python
 p.normalize_audio(target=-14, true_peak=-1.5, limiter=True, sample_rate=48000)
-# loudnorm → 48kHz化 → 最終ピークリミッター
+# loudnorm → 48kHz化 → 最終ピークリミッター（mode="dynamic"。既定）
+p.normalize_audio(-14, mode="linear")
+# 音声だけ全編を1回測る → 一定の増幅 → 48kHz化 → 最終ピークリミッター（BGM がポンピングしない）
 
-bgm.time() <= loop(until=None) & duck_under(narration, ratio=8)  # ループ + 自動ダッキング
+bgm <= loop() & duck_under(narration, ratio=8)   # ループ + 自動ダッキング（time() は呼ばない）
+bgm2.time(30) <= loop()                          # 尺を決めてループするなら time(秒) を付ける
 
 seq = audio_sequence("a.mp3", "b.mp3", crossfade=1.0)  # acrossfade連結（2つ以上）
 hit = sfx("click.wav", at=[0.5, 1.5, 3.0], volume=1.0) # 同一音源を複数時刻に配置
+pop = sfx("pop.wav", at=2.5)                           # 1回だけなら数値1つでよい（at=[2.5] と同じ）
 viz = audio_viz("bgm.mp3", kind="waves", color="cyan") # 波形/スペクトルを映像化
 ```
 
 - `normalize_audio` は Project メソッド。`duck_under` / `loop` は AudioEffect（`&` で連結）。
   `~` は映像系と共通の品質ヒントで、音声を消すには `adelete()` を使う
-- `duck_under(other, *, ratio=8, threshold=0.05, attack=20, release=250)`: `other`（ナレーション等）再生中に自音量を下げる。sidechainは自動で無音延長されるため、ナレーション終了後もBGMは指定尺まで続く
-- `loop(until=None)`: 省略時は Project.duration までループ
+- `duck_under(*others, ratio=8, threshold=0.05, attack=20, release=250)`: `others`（ナレーション等）再生中に自音量を下げる。相手は複数指定できる（`duck_under(n1, n2, n3)` / `duck_under([n1, n2, n3])`。`Narration` は `.audio` が使われる）。複数のときはどれか1つでも鳴っている間は下がる（サイドチェーンは各 other を `amix=normalize=0` で合算した1本）。検出は各 other の**形式統一（下記の 48kHz・ステレオ化）より前**の音声で行うので、モノラルのナレーションも元の音量のまま `threshold` と比べられる。1つの Object に `duck_under` は1回だけなので、相手が複数なら1回の呼び出しにまとめる。sidechainは自動で無音延長されるため、ナレーション終了後もBGMは指定尺まで続く
+- `loop(until=None)`: 尺は「`time(秒)` / `until()` / `show()` 等で決まった尺 → `loop(until=秒)`
+  （タイムラインの絶対時刻）→ Project の総尺」の順で決まり、そこまでループする。
+  **引数なしの `time()` と組み合わせてはいけない**: `time()` は尺を素材の長さで確定させるので、
+  `bgm.time() <= loop()` は1回再生で終わる（`loop(until=)` も効かない）。`bgm <= loop()` と
+  `time()` を呼ばずに書けば総尺まで、`bgm.time(30) <= loop()` / `bgm.until("outro.end") <= loop()` なら
+  その尺までループする
 - `audio_sequence` は連結後の実尺を返却Objectの`duration`へ自動設定する。`Narration`を直接渡すと字幕もcrossfade込みで並び、返却Objectの数値`@`配置へ追従する。追加の`.time(total)`は不要
-- `normalize_audio(target=-14, *, true_peak=-1.5, lra=11, limiter=True, sample_rate=48000)` は最終音声へloudnorm、サンプルレート確定、任意のピークリミッターを順に適用する。`true_peak`は最終lossy出力の目標で、AAC/Opus再上昇向けに内部で0.5dBの余裕を確保する。WebM/Opusの出力レートは48kHz固定
+- `normalize_audio(target=-14, *, true_peak=-1.5, lra=11, limiter=True, sample_rate=48000, mode="dynamic")` は最終音声へ正規化、サンプルレート確定、任意のピークリミッター（`alimiter`。look-ahead 5ms）を順に適用する。`true_peak`は最終lossy出力の目標で、AAC/Opus再上昇向けに内部で0.5dBの余裕を確保する。WebM/Opusの出力レートは48kHz固定
+- **`mode` は正規化の方式**:
+  - `"dynamic"`（既定）… 測定値を渡さない1パスの `loudnorm`。3秒窓の短期ラウドネスを目標へ寄せ続けるので、**声の無い区間の BGM が膨らみ、声が入ると沈む（ポンピング）**。実測（静かな BGM -36.5 LUFS の区間 + 声 -20.8 LUFS の区間、目標 -14）: 区間の音量差が 15.8dB → 1.4dB に潰れ、BGM だけの区間が -14.7 LUFS まで持ち上がる
+  - `"linear"` … 本レンダの前に、同じ音声グラフを**音声だけ・全編・null 出力で1回流して**統合ラウドネスと true peak を測り（`loudnorm=print_format=json`）、`volume=<target − 測定値>dB` → `aresample` → `alimiter` で仕上げる。動的な `loudnorm` は通さないので、**区間どうしの音量差がそのまま保たれる**（同じ素材で 15.8dB → 15.7dB、統合 -14.1 LUFS、true peak -1.9dBTP）。`lra` は使わない。ナレーション＋BGM の動画はこちらを推奨
+- `mode="linear"` の補足:
+  - 測定結果は `__cache__/artifacts/loudness/<鍵>.json` に保存し、**音声グラフと音声素材が同じなら2回目以降は測り直さない**（映像だけ直した再レンダで全編を流さない）。鍵は測定コマンドから作る（素材は内容指紋）ので、`target` / `true_peak` / `limiter` / `sample_rate` を変えても測り直さない
+  - **部分レンダ（`start` / `end`）・並列レンダ（`parallel=N`）も全編の測定値で増幅する**（BGM だけの窓を書き出しても、その窓だけで測って +20dB 持ち上げたりしない）。gif / webp / 連番PNG / サムネイル / 絵コンテなど音声を出さない出力と、音声の無いプロジェクトでは測定しない
+  - `render(dry_run=True)` は測定しない。測定コマンドは戻り値の `cache` 側に「実行予定」として載り、`main` の増幅量は `volume=<MEASURED_GAIN>dB` と表記される（dry_run はキャッシュの有無に依存しない）
+  - ピークの多い素材を大きく持ち上げると、上限を超えるピークをリミッターが削る分だけ統合ラウドネスが目標よりやや低くなり、声の区間がわずかに下がる（実測: TTS の声＋BGM を +8.8dB 増幅、ピークを最大 5dB 抑えたとき、統合 -14.46 LUFS・区間差の変化 0.5dB）。レンダ時に「上限を超えるピークはリミッターが最大 X dB 抑えます」と表示される
+  - `limiter=False` のときは、目標どおり増幅すると true peak が上限を超える場合に限り、超えない所で増幅を止める（統合ラウドネスは目標より低くなり、警告を出す）
+- **音声は混ぜる前に 48kHz・ステレオへ揃う**: 各音声の加工チェーン（atrim / atempo / avolume / adelay 等）の末尾に `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo` が付く。`amix` / `sidechaincompress`（`duck_under`）/ `acrossfade`（`audio_sequence` / `video_sequence`）の出力形式は**先頭入力に従う**ため、揃えないとモノラル 24kHz の TTS が先頭に来ただけで全体が 24kHz・モノラルになり、ステレオの BGM が L/R 平均に潰れる（入力の並びは priority 順＋生成順で、書き手からは見えない）。素材側で形式を合わせる必要はない。ミックス結果は 48kHz・ステレオで、`normalize_audio` の既定 `sample_rate=48000` と一致する
+- **モノラル素材はステレオへの自動変換で中央定位になり、各チャンネルの振幅は約 -3dB になる**（パンの法則。左右の合計パワーは元のモノラルと同じ）。これは仕様。ただし**入力がすべてモノラルのプロジェクト**（TTS ナレーションだけの動画など）は、以前はモノラルで出力され、ステレオ環境では左右とも元の音量で鳴っていたので、`normalize_audio()` を使わないと再生音量が約 3dB 下がる（実測 -18.8 → -21.9 LUFS）。音量を揃えるには `normalize_audio()` を使う（目標値どおりになる）
+- **`duck_under` のサイドチェーン検出は揃える前の音声で行う**: 検出用の枝は各 other の加工チェーンの `aformat` の直前から `asplit` で取り出す。揃えた後から取ると、モノラルのナレーションが各チャンネル -3dB のステレオとして検出され（`sidechaincompress` の既定 `link=average`）、既定値でダッキングが約 2.6dB 浅くなるため。相手が1つなら検出用枝はチャンネル構成を変えず周波数だけ 48kHz へ揃える。相手が複数なら合算のため各枝を 48kHz モノラルへダウンミックスする（`aresample=48000:ochl=mono:rematrix_maxval=1`。モノラルはそのまま、ステレオは (L+R)/2 で、左右が同相なら相手1つのときと同じ検出レベル）。揃えずに合算すると結果が先頭の相手の形式に従い、並び順で検出レベルが変わる
 - `audio_sequence` / `sfx` / `audio_viz` はキャッシュ生成物（音声/映像Objectを返す）。`audio_viz` の `kind` は `"waves"` / `"spectrum"` / `"cqt"`。**`color` が効くのは `kind="waves"` のときだけ**（`showspectrum` / `showcqt` は ffmpeg カラー形式の色指定を持たないため）
 
 ### パーティクル（explode / assemble）
@@ -1082,13 +1163,14 @@ bg.grid(4, 3, gap=8)              # または tile(bg, 4, 3, gap=8)
 
 # marker / チャプター: mp4 に FFMETADATA 埋め込み + YouTube 目次を書き出し
 p.marker(0, "オープニング"); p.marker(12, "本編")
+p.marker("q2.start", "問題2")   # アンカー名はレンダ時に時刻へ解決
 p.export_chapters("chapters.txt")
 
 # param: CLI / 環境変数で差し替え可能なテンプレート変数
 title_text = p.param("title", "デフォルト")   # --param title=... / SCRIPTVEDIT_PARAM_title
 ```
 
-- `grid(cols, rows, *, gap=0)` は画像素材のみ。`marker` は `render()` 時にチャプターとして埋め込まれる
+- `grid(cols, rows, *, gap=0)` は画像素材のみ。`marker` は `render()` 時にチャプターとして埋め込まれる。`marker` の time にはアンカー名（`"q2.start"` / `"scene:導入"` 等）も渡せ、レンダ時（タイムライン解決の後）に解決される。存在しない名前は候補つきの ValueError
 - `param` は `default` の型（int/float/bool）に合わせて文字列値を変換する（バッチ生成用）
 
 ### パスアニメーション・Expr拡張
@@ -1125,7 +1207,7 @@ p.explain(obj)                   # obj のフィルタチェーンと u 正規�
 p.render("out.mp4")               # H.264 / AAC（既定）
 p.render("out.gif")               # GIF（2パスパレット）
 p.render("out.webp")              # アニメーション WebP
-p.render("out.png")               # 連番PNG（out.png → out_%05d.png）
+p.render("out.png")               # 連番PNG（out.png → out_%05d.png）。常に透過（background_color は無視）
 p.render("out.webm", alpha=True)  # 透過VP9（yuva420p）
 p.render("out.mp4", draft=True)   # 半解像度・軽量エンコード。Webも既定8fpsで撮影
 p.thumbnail(at=2.5, out="thumb.png")   # 指定時刻の1フレームをPNG抽出
@@ -1141,7 +1223,8 @@ p.configure(parallel=4)           # キャッシュ並列生成のワーカ数
 p.configure(draft_web_fps=8)      # draft時のCanvas screenshot上限。Noneで本番同等
 ```
 
-- 透過出力（`alpha=True`）は `.webm`（VP9）を推奨。gif / h264 はアルファを保持できない
+- 透過出力（`alpha=True`）は `.webm`（VP9）を推奨。gif / h264 はアルファを保持できない（h264 に `alpha=True` を付けると ValueError）
+- 連番PNG は `alpha` の指定に関係なく**常に透過**で書き出す（背景は `color=black@0` で、`configure(background_color=...)` は効かない）。背景色が要るなら全面の背景素材をレイヤーに置く
 - `encoder` は `ffmpeg -encoders` で検出のみ。検出できても環境により libx264 にフォールバックし得る
 
 ### 時間分割並列レンダ（render(parallel=N)）
@@ -1162,13 +1245,15 @@ p.render("out.mp4", parallel=4)   # 4分割並列。未指定/1 なら従来ど�
   `trim` で区間前のフレームを破棄し、区間に重ならないオブジェクトは入力ごと除外する
 - **音声は分割しない**: `loudnorm` / `duck_under` は全尺依存のため、音声は全編1本を
   並行レンダし、concat 結果へ mux する（境界のサンプルずれも起きない）。
-  チャプター（marker）も mux 時に付与される
+  チャプター（marker）も mux 時に付与される。`normalize_audio(mode="linear")` の
+  増幅量はチャンクを起動する前に全編を測って決め、音声レグにも同じ値が入る
 - **出力の同一性**: フィルタ文字列が全編レンダと同一のため、エンコード前のフレームは
   一致する。最終出力は H.264 のレート制御が GOP 境界で変わるためビット同一には
   ならないが、視覚的には同一（実プロジェクト2分56秒での実測: フレーム数完全一致・
   PSNR 平均53.8dB / 最低46.0dB・SSIM 0.9996・音声はデコードPCMがMD5完全一致）
 - **対応形式**: H.264系（.mp4/.mkv/.mov、draft含む）のみ。gif/webp/webm/連番PNG/
-  alpha や `start`/`end` 部分レンダとの併用時は通知の上で従来レンダへフォールバック
+  alpha や `start`/`end` 部分レンダとの併用時は通知の上で従来レンダへフォールバック。
+  `draft=True` の縮小はチャンク（映像）だけに掛かり、音声レグには掛からない
 - **配分**: 各チャンクへ `-threads ceil(CPU数/N)` を渡してエンコーダスレッドの
   過剰予約を防ぐ。`configure(parallel=N)`（キャッシュ並列生成のワーカ数）とは別物
 - **向き不向き**: フィルタ評価が支配的な長尺プロジェクトほど効く
@@ -1184,7 +1269,8 @@ p.render("out.mp4", parallel=4)   # 4分割並列。未指定/1 なら従来ど�
 ### ツール・開発体験（DX）
 
 ```python
-# 検査ビュー（scriptvedit.viz 統合）
+# 検査ビュー（scriptvedit.viz 統合）。レイヤーは実行しないので render / dry_run / audit の後に呼ぶ
+p.render("out.mp4", dry_run=True)
 p.inspect("timeline.html")        # HTMLガントチャートを書き出しパスを返す
 print(p.inspect())                # 省略時はテキストレポート文字列を返す
 
@@ -1196,13 +1282,36 @@ findings = p.audit()              # レポートをprintし findings のリス�
 p.audit(strict=True)              # warningが1件でもあればRuntimeError（CI向け）
 ```
 
-`audit()` のルール: 文字が小さい/縁取り・影・下地なし（`text-too-small` /
-`text-no-decoration`）、音声が重なるのに `duck_under` なし
-（`audio-overlap-no-duck`）、BGM のループ・尺不足（`bgm-loop` / `bgm-too-short`）、
-`normalize_audio()` 未設定（`no-normalize-audio`）、`~` 品質ヒントが尊重されない op
-（`quality-hint-ignored`、info）、Web/Canvas内部が静的検査対象外であること
-（`web-content-uninspected`、info）。エラーにはせず findings
-（`{"severity", "code", "message"}` の list）を返す。
+- `p.inspect()` はレイヤーを実行しない。`render()`（`dry_run=True` でよい）か `p.audit()` の前に
+  呼ぶと、ガントチャートではなく `p.layer()` の登録情報だけの表になる
+- `watch(script, out=...)` は起動時に1回、以後は変更のたびに `python <script> <out>` を
+  スクリプトのディレクトリで実行する。`out` は**スクリプトの第1引数として渡るだけ**なので、
+  スクリプト側が `sys.argv[1]` を読んで `render()` に渡す必要がある（`scriptvedit new` の
+  main.py はそうなっている）。監視するのはスクリプトのディレクトリ以下（サブディレクトリを含む）の
+  `.py` と素材（画像・音声・動画・フォント・`.html` / `.css` / `.js`・字幕・`.cube`）で、
+  `__cache__` / `__pycache__` / `.git` / `output` ディレクトリは見ない。
+  `out` の出力ファイルとその一時ファイル（連番PNGなら各フレーム）も監視しないので、
+  監視ディレクトリ内へ書き出しても出力の更新で再実行が連鎖しない
+  （相対パスの `out` はスクリプトのディレクトリ基準で解決する）
+
+`audit()` はエラーにはせず findings（`{"severity", "code", "message"}` の list）を返す。
+`render()` も strict でなくても最後に audit を回し、指摘があれば `[audit] warning N / info M` の
+1行サマリを出す。ルール:
+
+| code | severity | 内容 |
+|---|---|---|
+| `text-too-small` | warning / info | 文字が小さい（1080p 換算で 32px 未満は warning、44px 未満は info） |
+| `text-no-decoration` | warning | 縁取り・影・下地のいずれも無い文字（背景に溶ける） |
+| `offscreen-placement` | warning | x / y が 0..1 の比率の外で、画面に映らない（Expr は6点サンプルの全点が外のときだけ。px を渡した疑いも案内） |
+| `text-overflow` | warning | 推定描画幅がフレーム幅（safe area 5% 差引）を超える |
+| `outside-duration` | warning | 表示区間が動画の総尺と交差せず、一度も映らない |
+| `font-missing-glyph` | warning | 使うフォント（指定が無ければ自動選択されたもの）に日本語のグリフが無く、豆腐（□）になる |
+| `audio-overlap-no-duck` | warning | BGM 役（`duck_under` か `loop` を持つ音声）と、それがダックしていない音声が1秒以上続けて重なる。組の件数と先頭3組を示す。ナレーション同士・ナレーションと効果音のような前景同士や BGM 役同士は数えず、BGM 役が1つも無いときは全ての組を調べる。`sfx()` は各発音区間で判定する |
+| `bgm-loop` | info | `loop()` を使っている（つなぎ目が気付かれやすい） |
+| `bgm-too-short` | warning | `duck_under` を持つ BGM の実尺が表示区間より短く、途中で無音になる |
+| `no-normalize-audio` | info | 音声があるのに `normalize_audio()` が未設定 |
+| `quality-hint-ignored` | info | `~` 品質ヒントを付けたが、その op に軽い代替処理が無い（通常と同じ処理になる） |
+| `web-content-uninspected` | info | Web/Canvas の内部は静的検査の対象外（`storyboard()` での目視を促す） |
 
 キャッシュ管理・監視は CLI からも実行できる。
 
@@ -1212,7 +1321,7 @@ python -m scriptvedit cache --stats             # 種別ごとの件数・サイ
 python -m scriptvedit cache --gc --keep-days 7  # 7日より古い生成物を削除
 python -m scriptvedit cache --clear             # キャッシュ全削除
 python -m scriptvedit describe                  # 全機能の機械可読マニフェスト
-python -m scriptvedit watch main.py --out out.mp4
+python -m scriptvedit watch main.py --out out.mp4   # 変更のたびに python main.py out.mp4 を実行
 ```
 
 不明な設定キー・プリセット名・エンコーダ名・`audio_viz` の kind などは、difflib による「もしかして: ...?」候補付きのエラーになる。
@@ -1291,6 +1400,7 @@ v.show(v.duration)                # 合成音声の長さで配置（字幕・�
 - 出力は**どのバックエンドでも wav に統一**（edge の mp3 は ffmpeg で 24kHz/mono/pcm_s16le の wav に変換）。`scriptvedit.tts.tts_duration(wav)` で実長が取れる
 - `scriptvedit.tts.speakers(backend="edge")` で各バックエンドの話者一覧を取得できる
 - 合成 wav は `backend`+text+speaker+speed+pitch の sha256 を鍵に `__cache__/tts/` へキャッシュされる（**バックエンドを変えると別キャッシュ**。アトミック書き込み）
+- VOICEVOX は鍵に「接続先 + エンジンのバージョン」も含める。エンジンに届いたときの値を `__cache__/tts/engine_sig.json`（接続先ごと）に控えておき、**エンジンが止まっているときはその控えで鍵を作ってキャッシュ済みの音声を使う**（警告は1回だけ）。キャッシュに無い台詞の合成が要るときだけ `ConnectionError` になる。エンジンに届けば常に実測のバージョンが優先され、控えも更新される。**この控えが効くのは `backend="voicevox"` を明示したときだけ**: 既定の `backend=None` はエンジン停止中は自動選択で `edge` に切り替わる（edge-tts があれば別の声で合成され、無ければ `RuntimeError`）ので、VOICEVOX のキャッシュは使われない
 - `scriptvedit.tts` 本体は標準ライブラリのみで動作（`edge` バックエンド使用時のみ edge-tts が必要）
 - CLI: `python -m scriptvedit.tts "こんにちは" --backend edge -o out.wav` / `--list-speakers --backend edge`
 
@@ -1333,8 +1443,12 @@ res = beat_sync("bgm.mp3", min_bpm=60, max_bpm=200)
 # res = {"bpm": float, "beats": [秒,...], "onsets": [秒,...], "duration": float}
 
 # 拍ごとに scale が跳ねて戻るキーフレーム（beats_to_keyframes → keyframes）
+# beats は秒、keyframes の時刻は u（0..1）なので、表示尺で割ってから渡す
+# （obj と BGM がどちらもタイムライン 0 秒から始まる場合の例）
 from scriptvedit.beat import beats_to_keyframes, snap_times
-kf = beats_to_keyframes(res["beats"], [1.15], decay=0.12, base=1.0)
+dur = 8.0
+beats_u = [b / dur for b in res["beats"] if b < dur]
+kf = beats_to_keyframes(beats_u, [1.15], decay=0.12 / dur, base=1.0)
 obj.time(dur) <= scale(keyframes(*kf))
 
 # カット点を最近傍ビートへスナップ（snap_times）
@@ -1342,7 +1456,7 @@ cut_times = snap_times([2.0, 4.3, 6.1], res["beats"])
 ```
 
 - `beat_sync(audio_source, *, min_bpm=60, max_bpm=200)`: 解析結果は 素材FFP+bpm範囲 をキーに JSON キャッシュ。**numpy/scipy が必要**（未導入時は導入手順付きの日本語エラー）
-- `beats_to_keyframes(beats, values, *, offset=0.0, decay=None, base=None, t_start=None, t_end=None)` は `keyframes(*result)` に渡せるフラット列 `(t0, v0, t1, v1, ...)` を返すデータ整形ヘルパー（scriptvedit 非依存）。`decay` 指定で各拍がパルス形（跳ねてすぐ `base` に戻る）になる
+- `beats_to_keyframes(beats, values, *, offset=0.0, decay=None, base=None, t_start=None, t_end=None)` は `keyframes(*result)` に渡せるフラット列 `(t0, v0, t1, v1, ...)` を返すデータ整形ヘルパー（scriptvedit 非依存）。`decay` 指定で各拍がパルス形（跳ねてすぐ `base` に戻る）になる。**単位は変換しない**（入力の時刻・`offset`・`decay`・`t_start`/`t_end` がそのまま出る）ので、秒の `beats` をそのまま渡すと `keyframes` が u として読んで拍が合わない。上の例のように表示尺で割った値を渡す（`obj` の開始が BGM とずれているなら、割る前に開始時刻を引く）。`keyframes` は最大128点なので、`decay` 付き（1拍2点）なら64拍まで
 - `snap_times(times, beats)` は任意の時刻列を最近傍ビートへ寄せる（カット点合わせ用）
 - CLI: `python -m scriptvedit.beat song.mp3`（BPM+先頭20拍を表示）/ `--json`（全結果をJSON出力）
 
@@ -1398,11 +1512,15 @@ d = testkit.frame_diff("a.png", "b.png", out_png="diff.png")     # mean_abs/max_
 | `until` | `until(name, offset=0.0)` | durationをアンカー時刻+offset秒まで伸長 |
 | `show` | `show(duration, *, priority=None)` | current_timeを進めずに表示 |
 | `show_until` | `show_until(name, offset=0.0, *, priority=None)` | current_timeを進めずにアンカーまで表示 |
-| `compute` | `compute(duration=None)` | タイムライン外で素材生成（PNG or WebM） |
+| `compute` | `compute(duration=None)` | タイムライン外で素材生成（PNG、`duration` 指定時は FFV1 の .mkv） |
 | `length` | `length()` | 加工後の再生時間を返す（trim/atempo反映） |
 | `split` | `split()` | `(VideoView, AudioView)` を返す |
+| `grid` | `grid(cols, rows, *, gap=0)` | 画像を cols×rows に複製配置する Transform を足す（`tile(obj, cols, rows, gap)` も同じ） |
+| `from_project` | `Object.from_project(sub_project, *, cache="auto")` | サブ Project を透過 webm に焼いた1つの Object を返す（staticmethod。「合成・コンポジション」節） |
 
-プロパティ: `has_video`, `has_audio`, `source`, `duration`, `start_time`, `priority`
+プロパティ: `has_video`, `has_audio`, `source`, `audio_source`, `duration`, `start_time`, `priority`
+（`audio_source` は音声を取り出す素材のパス。チェックポイント等で `source` が映像専用の中間物へ
+差し替わった後も、音声は元素材から取るためここを見る。差し替えが無ければ `source` と同じ）
 
 ## render の詳細
 
@@ -1410,8 +1528,11 @@ d = testkit.frame_diff("a.png", "b.png", out_png="diff.png")     # mean_abs/max_
 
 ```python
 p.render(output_path, *, dry_run=False, timeout=None,
-         start=None, end=None, draft=False, alpha=False, strict=False)
+         start=None, end=None, draft=False, alpha=False, strict=False,
+         parallel=None)
 ```
+
+`parallel=N` は時間分割並列レンダ（→「時間分割並列レンダ」節）。
 
 `start`/`end` は部分レンダの時間窓（秒。フィルタの t 基準を保持）。Web/Canvas Objectは
 交差するフレームだけをscreenshotする。状態依存`renderFrame()`との互換性のため窓より前も
@@ -1438,10 +1559,15 @@ result = p.render("output.mp4", dry_run=True)
 
 `dry_run` 自体は数式 PNG・web webm・checkpoint 等のキャッシュ生成物を
 作らない。未生成の素材は寸法不明になるため、pad による SEGV バリア等の
-寸法依存経路は実レンダテスト（`tests/render_all.py`）でカバーする。一方、
-実レンダで checkpoint が実体化すると、`dry_run` もそれを入力に再利用して
-コマンドが変わり得る。実レンダ後は `python -m scriptvedit cache --clear` で
-キャッシュを消してからスナップショットを実行する。
+寸法依存経路は実レンダテスト（`pytest tests/test_real_render.py --realrender` /
+`tests/render_all.py`）でカバーする。
+
+`dry_run` が返すのは「**キャッシュが空の状態で何を実行するか**」で、`__cache__` の中身には
+依存しない。実レンダで checkpoint 等が実体化した後でも同じコマンドを返すので、
+キャッシュを消さずにスナップショットを回してよい。**例外はレイヤーキャッシュの
+`cache="auto"` / `"use"`** で、これはキャッシュの有無・鮮度を見て「キャッシュを再生するか、
+レイヤーを実行し直すか」を決めるため、`dry_run` の出力もキャッシュの状態で変わる
+（`"use"` はキャッシュが無ければ `dry_run` でも `FileNotFoundError`）。
 
 ## 開発者向け情報
 
@@ -1449,7 +1575,7 @@ result = p.render("output.mp4", dry_run=True)
 
 ### ディレクトリ構成
 
-本体は `src/scriptvedit/` の47モジュール（合計約21,200行）のパッケージ。
+本体は `src/scriptvedit/` の47モジュール（合計約2.2万行）のパッケージ。
 
 ```
 ScriptVEdit/
@@ -1459,8 +1585,8 @@ ScriptVEdit/
 │   ├── layercache.py    レイヤーキャッシュの鮮度判定・生成・再生
 │   ├── parallel.py preview.py  時間分割並列レンダ / thumbnail・storyboard
 │   ├── chapters.py params.py   マーカー・チャプター出力 / テンプレート変数
-│   ├── objects.py       Object / Transform / Effect
-│   ├── timeline.py      anchor / pause / scene / group
+│   ├── objects.py       Object / Transform / Effect / group・tile（Group）
+│   ├── timeline.py      anchor / pause / scene（`>>` の連結とアンカーの重複検査も）
 │   ├── context.py      レンダ中の Project の参照（依存ゼロの葉。循環 import を防ぐ）
 │   ├── warn.py         レンダ警告の集約（同じく依存ゼロの葉）
 │   ├── effects/         basic / visual / composite / paths / time / terminal
@@ -1468,10 +1594,10 @@ ScriptVEdit/
 │   ├── expr.py easing.py  Expr式ビルダー・イージング
 │   ├── cache.py ffmpeg.py media.py  キャッシュ鍵・ffmpeg実行・probe
 │   ├── formula.py       数式レンダ（formula / formula_lines、KaTeX同梱）
-│   ├── text.py audio.py web.py      テキスト / オーディオ / web Object・テンプレート
+│   ├── text.py audio.py web.py      テキスト・karaoke / オーディオ（voice・narrate・sfx・beat_sync 等） / web Object・テンプレート
 │   ├── morph.py morph_cli.py  モーフィング・パーティクル生成 / その CLI 入口
-│   ├── tts.py           音声合成（voice / narrate。VOICEVOX / edge-tts / SAPI）
-│   ├── beat.py          ビート検出（beat_sync）
+│   ├── tts.py           音声合成エンジン層（tts() / speakers。VOICEVOX / edge-tts / SAPI。voice・narrate 本体は audio.py）
+│   ├── beat.py          ビート検出エンジン（beat_sync の実体・beats_to_keyframes / snap_times）
 │   ├── viz.py           タイムライン検査・可視化（Project.inspect）
 │   ├── testkit.py       SSIM によるレンダ結果の視覚検証
 │   ├── plugins.py       プラグイン機構（@effect_plugin）
@@ -1524,7 +1650,8 @@ LF/CRLFだけの違いをCRLFへ正規化してハッシュするため、改行
 
 `render(dry_run=True)` が返すのは「**キャッシュが空の状態で何を実行するか**」で、
 `__cache__` の中身には依存しない。したがって実レンダの後にキャッシュを消さずに
-スナップショットを回してよい（以前は消す必要があった）。
+スナップショットを回してよい（以前は消す必要があった）。例外はレイヤーキャッシュの
+`cache="auto"` / `"use"` で、キャッシュの有無で再生か再実行かが変わる（→「dry_run」節）。
 
 ## ライセンス
 

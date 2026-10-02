@@ -135,13 +135,14 @@ jobs:
           EOF
       - name: 実レンダ回帰(選抜)
         # dry_run では原理的に踏めない経路だけを実 FFmpeg で回す(監査 項目11)。
-        # 全93本は重すぎるので CI では回さない(`--realrender-all` で手元実行)。
+        # 全件は重すぎるので CI では回さない(`--realrender-all` で手元実行)。
         # Chromium が要る formula 経路を含むため Linux の1マトリクスだけで実行する。
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: python -m pytest tests/test_real_render.py -q -rs --realrender
       - name: 実レンダ後のキャッシュを掃除
-        # 実レンダでチェックポイントが実体化すると dry_run のコマンドが変わる。
-        # 同一ジョブ内で後続ステップを足したときに黙って壊れないようにする(CLAUDE.md §3)。
+        # dry_run はキャッシュ状態に依存しない(CLAUDE.md §3)ので必須ではないが、
+        # 例外のレイヤーキャッシュ cache='auto'/'use' を使うテストを後続ステップに
+        # 足したときに、実レンダの残骸で結果が変わらないよう消しておく。
         if: always() && runner.os == 'Linux' && matrix.python == '3.13'
         run: python -m scriptvedit cache --clear
 

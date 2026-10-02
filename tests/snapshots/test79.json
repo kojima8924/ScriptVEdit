@@ -20,7 +20,7 @@
     "-i",
     "assets/video/clip_with_audio.mp4",
     "-filter_complex",
-    "[1:v]trim=end=4.066666666666666[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,4)'[v1];[2:v]trim=end=4.066666666666666[obj2];[v1][obj2]overlay=trunc(0.75*W-w/2):trunc(0.75*H-h/2):eof_action=pass:enable='between(t/,0/,4)'[v2];[3:v]trim=end=4.066666666666666[obj3];[v2][obj3]overlay=trunc(0.25*W-w/2):trunc(0.3*H-h/2):eof_action=pass:enable='between(t/,0/,4)'[v3];[4:a]atrim=duration=4,asetpts=PTS-STARTPTS[a0]",
+    "[1:v]trim=end=4.066666666666666[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,4)'[v1];[2:v]trim=end=4.066666666666666[obj2];[v1][obj2]overlay=trunc(0.75*W-w/2):trunc(0.75*H-h/2):eof_action=pass:enable='between(t/,0/,4)'[v2];[3:v]trim=end=4.066666666666666[obj3];[v2][obj3]overlay=trunc(0.25*W-w/2):trunc(0.3*H-h/2):eof_action=pass:enable='between(t/,0/,4)'[v3];[4:a]atrim=duration=4,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0]",
     "-map",
     "[v3]",
     "-map",

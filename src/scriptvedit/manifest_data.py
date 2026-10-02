@@ -5,13 +5,13 @@
 組み立て・kind/name の絞り込み・Markdown 整形）は manifest.py にある。
 
 scriptvedit 内の import は state.py（パッケージ内 import ゼロの葉）から語彙を
-1つ借りるだけに留めること。ここに依存を足すと「データとロジックの分離」が
+借りるだけに留めること。ここに依存を足すと「データとロジックの分離」が
 崩れ、循環 import の芽にもなる。
 
 dict のキー順序は describe の出力順に直結する。**定義順を変えないこと。**
 """
 
-from scriptvedit.state import _AUDIO_VIZ_KINDS
+from scriptvedit.state import _AUDIO_VIZ_KINDS, _NORMALIZE_AUDIO_MODES
 
 MANIFEST_VERSION = "1.1"
 
@@ -23,7 +23,7 @@ _MANIFEST_COLOR_PARAMS = {
 
 # カテゴリ（日本語）: カテゴリ名 -> そのカテゴリに属する公開名
 _MANIFEST_CATEGORY_MEMBERS = {
-    "変形": ["resize", "rotate", "crop", "pad", "blur", "eq", "grid"],
+    "変形": ["resize", "rotate", "crop", "pad", "blur", "eq", "flip", "grid"],
     "視覚効果": [
         "fade", "wipe", "zoom", "color_shift", "shake", "chroma_key", "vignette",
         "pixelize", "glow", "lut", "glitch", "perspective_warp", "lens",
@@ -197,6 +197,13 @@ _MANIFEST_PARAM_META = {
                           "desc": "話者ラベル（キーワード専用）"},
     ("bubble", "tail"): {"type": "any", "default": None,
                          "desc": "尻尾が指す位置 (x, y)（0..1 の画面比率。旧名 anchor）"},
+    ("flip", "horizontal"): {"type": "bool", "default": None,
+                             "desc": "左右反転（hflip）。省略時は vertical を指定していなければ True、"
+                                     "vertical=True だけなら False（上下反転のみ）"},
+    ("flip", "vertical"): {"type": "bool", "default": False,
+                           "desc": "上下反転（vflip）"},
+    ("sfx", "at"): {"type": "any", "default": None, "required": True,
+                    "desc": "配置時刻（秒）。数値1つ（at=2.5）か数値のリスト（at=[0.5, 1.5]）"},
     ("grid", "cols"): {"type": "int", "default": None, "required": True, "desc": "列数"},
     ("grid", "rows"): {"type": "int", "default": None, "required": True, "desc": "行数"},
     ("grid", "gap"): {"type": "int", "default": 0, "desc": "セル間の余白px"},
@@ -263,16 +270,27 @@ _MANIFEST_PARAM_META = {
                                           "min": 1, "desc": "字幕の最大行数（超過時はエラー）"},
     ("narrate", "subtitle_safe_area"): {"type": "any", "default": None,
                                           "desc": "字幕を収める画面比率マージン"},
-    ("normalize_audio", "true_peak"): {"type": "number", "default": -1.5,
-                                          "min": -9, "max": 0,
-                                          "desc": "最終lossy音声のtrue peak目標(dBTP)。内部で0.5dB余裕を確保"},
-    ("normalize_audio", "lra"): {"type": "number", "default": 11,
-                                    "min": 1, "max": 50, "desc": "目標LRA(LU)"},
-    ("normalize_audio", "limiter"): {"type": "bool", "default": True,
-                                        "desc": "loudnorm後のピークリミッター"},
-    ("normalize_audio", "sample_rate"): {"type": "int", "default": 48000,
-                                            "min": 8000, "max": 384000,
-                                            "desc": "最終音声sample rate。Noneで自動"},
+    # Project のメソッドは "Project.<名前>" で引かれる（manifest._manifest_entry）
+    ("Project.normalize_audio", "target"): {"type": "number", "default": -14,
+                                            "min": -70, "max": 0,
+                                            "desc": "目標の統合ラウドネス(LUFS)"},
+    ("Project.normalize_audio", "true_peak"): {"type": "number", "default": -1.5,
+                                               "min": -9, "max": 0,
+                                               "desc": "最終lossy音声のtrue peak目標(dBTP)。内部で0.5dB余裕を確保"},
+    ("Project.normalize_audio", "lra"): {"type": "number", "default": 11,
+                                         "min": 1, "max": 50,
+                                         "desc": "目標LRA(LU)。mode='dynamic' のみ有効"},
+    ("Project.normalize_audio", "limiter"): {"type": "bool", "default": True,
+                                             "desc": "正規化後のピークリミッター（alimiter。look-ahead 5ms）"},
+    ("Project.normalize_audio", "sample_rate"): {"type": "int", "default": 48000,
+                                                 "min": 8000, "max": 384000,
+                                                 "desc": "最終音声sample rate。Noneで自動"},
+    # choices は実装（project.py の normalize_audio の検証）と同じ集合を参照する
+    ("Project.normalize_audio", "mode"): {
+        "type": "choice", "default": "dynamic",
+        "choices": list(_NORMALIZE_AUDIO_MODES),
+        "desc": "dynamic=1パスloudnorm（BGMだけの区間が膨らむ）/ "
+                "linear=測定パス→一定の増幅+リミッター（区間の音量差を保つ）"},
     ("typewriter", "font"): {"type": "string", "desc": "フォントファイルパス（省略時は自動選択）"},
     ("counter", "font"): {"type": "string", "desc": "フォントファイルパス（省略時は自動選択）"},
     # choices（実装の検証コードと同じ集合を参照する）
@@ -342,6 +360,11 @@ _MANIFEST_PARAM_META = {
                          "desc": "拡大率（1.0=等倍。Expr/lambda で時間変化可）"},
     ("blur", "radius"): {"type": "number", "default": 5, "min": 0,
                          "desc": "ガウスぼかしの sigma（px 相当。大きいほど強い）"},
+    # *others（可変長）はシグネチャから導出できないので宣言する
+    ("duck_under", "others"): {"type": "object", "required": True,
+                               "desc": "下げる合図になる音声Object（1つ以上。"
+                                       "duck_under(a, b, c) / duck_under([a, b, c]) の"
+                                       "どちらでも可。Narration は .audio が使われる）"},
     ("duck_under", "ratio"): {"type": "number", "default": 8, "min": 1,
                               "desc": "圧縮比（大きいほど深く下がる。無次元）"},
     ("duck_under", "threshold"): {"type": "number", "default": 0.05,
@@ -376,6 +399,11 @@ _MANIFEST_PARAM_META = {
     ("Project.configure", "draft_web_fps"): {
         "type": "number", "default": None, "min": 1,
         "desc": "draft レンダ時の web クリップの fps 上限"},
+    ("Project.marker", "time"): {
+        "type": "any", "required": True,
+        "desc": "秒（数値）かアンカー名の文字列（例 'q2.start'）。アンカー名はレンダ時に解決"},
+    ("Project.marker", "label"): {
+        "type": "string", "required": True, "desc": "チャプター名（YouTube 目次の見出し）"},
     # choices は実装（audio.py の audio_viz）と同じ集合を参照する
     ("audio_viz", "kind"): {"type": "choice", "choices": list(_AUDIO_VIZ_KINDS),
                             "desc": "可視化方式。waves=波形 / spectrum=スペクトログラム "
@@ -421,11 +449,19 @@ _MANIFEST_PARAM_META = {
 
 # エントリごとの注記（AI が踏みがちな地雷。constraints の該当分をここにも展開する）
 _MANIFEST_NOTES = {
+    "Project.marker": [
+        "time にアンカー名（'q2.start' 等）を渡すと、レンダ時（タイムライン解決の後）に"
+        "時刻へ解決される。存在しない名前は候補つきの ValueError",
+        "アンカーはレンダでしか解決されないため、render() 前の export_chapters() / "
+        "export_metadata() は dry_run でタイムラインを解決してから書き出す",
+    ],
     "Project.param": [
         "型は default から推論する（int/float/bool/str）。解釈できない値は"
         "既定値へ黙って戻さず ValueError",
         "どの p.param() にも読まれなかった --param は誤記として ValueError"
-        "（SCRIPTVEDIT_PARAM_* 由来は共有されうるので警告）",
+        "（SCRIPTVEDIT_PARAM_* 由来は共有されうるので警告）。"
+        "ただし p.param() を1回も呼ばないプロジェクトでは --param を解釈しないので、"
+        "この検査も働かず黙って無視される",
         "`--param n=v` と `--param=n=v` は同値。`=` の無い指定は ValueError",
     ],
     "group": [
@@ -454,19 +490,87 @@ _MANIFEST_NOTES = {
                       "source は Object のみ（パス文字列は TypeError）。画像 media_type 限定",
                       "source に Transform/Effect が付いていると ValueError"],
     "rotate": ["時間依存の式（u を含む式）は不可。時間変化する回転は rotate_to() を使う"],
+    "flip": ["flip() は左右反転、flip(vertical=True) は上下反転だけ。"
+             "両方（180度回転と同じ絵）は flip(horizontal=True, vertical=True) と明示する",
+             "両方 False は ValueError。寸法は変わらない（静止画は PNG チェックポイントへ焼ける）"],
+    "pip": ["scale → rounded → outline → drop_shadow → move の組を返すプリセット。"
+            "配置の move は live なので、pip 全体がチェックポイントに焼けるわけではない"],
+    "loop": ["引数なしの time() と組み合わせない: time() は尺を素材の長さで確定させるので、"
+             "bgm.time() <= loop() は1回再生で終わる（loop(until=) も効かない）。"
+             "bgm <= loop()（time を呼ばない）なら総尺まで、bgm.time(30) <= loop() や "
+             "bgm.until('outro.end') <= loop() ならその尺までループする",
+             "尺の決まり方: time(N) / until() / show(N) で決まった尺 → loop(until=秒)"
+             "（タイムラインの絶対時刻）→ Project の総尺"],
+    "keyframes": ["時刻は秒ではなく u（0..1。表示区間の進行度）。obj.time(4) なら u=0.5 は"
+                  "表示開始から2秒後。範囲外の時刻は端の値で止まるだけでエラーにならないので、"
+                  "秒のまま渡すと u=1 より後のキーは黙って届かない",
+                  "最低2点・最大128点"],
+    "sfx": ["at は数値1つでも数値のリストでもよい（at=2.5 と at=[2.5] は同一・同じキャッシュ鍵）",
+            "p.audit() の重なり判定は [0, 最後の at + 素材長] ではなく各発音区間で行う"],
     "scale": ["pad サイズ決定のため、u のみに依存する数値評価可能な式であること"],
     "narrate": ['backend="voicevox"（既定候補）は VOICEVOX（別プロセス）の起動が必要',
+                'backend="voicevox" を明示していれば、VOICEVOX 停止中でも一度合成した台詞は'
+                "キャッシュ（__cache__/tts/engine_sig.json に控えたエンジン署名で鍵を作る）から"
+                "使える。合成が要る台詞だけ ConnectionError",
                 'backend="edge" なら pip install edge-tts で使える（オンライン必須）',
-                "backend=None は自動選択（VOICEVOX 起動中なら voicevox、無ければ edge）",
+                "backend=None は自動選択（VOICEVOX 起動中なら voicevox、無ければ edge）。"
+                "エンジン停止中は edge-tts があれば別の声で合成され（無ければ RuntimeError）、"
+                "VOICEVOX のキャッシュは使われない",
                 "subtitle_textで読み上げと表示文を分離でき、subtitle_max_charsは日本語禁則対応",
                 "subtitle_safe_areaは領域に収まる字幕矩形の位置を画面内へクランプする"],
-    "duck_under": ["sidechainは自動で無音延長され、other終了後もBGMは指定尺まで続く"],
+    "duck_under": ["sidechainは自動で無音延長され、others終了後もBGMは指定尺まで続く",
+                   "others は複数指定できる（duck_under(n1, n2, n3)）。サイドチェーンは各 other を"
+                   " amix(normalize=0) で合算した1本で、どれか1つでも鳴っている間は下がる",
+                   "1つのObjectに duck_under は1回だけ（相手が複数なら1回の呼び出しにまとめる）",
+                   "検出は各 other の形式統一（48kHz・ステレオ化）より前の音声で行う。"
+                   "モノラルのナレーションも元の音量のまま threshold と比べられる"
+                   "（揃えた後だと各チャンネル -3dB で検出され、ダッキングが浅くなる）。"
+                   "相手が複数なら各 other を 48kHz モノラルへダウンミックス"
+                   "（ステレオは (L+R)/2）してから合算する",
+                   "p.audit() の audio-overlap-no-duck は「BGM 役（duck_under / loop を持つ音声）と、"
+                   "それがダックしていない音声」の1秒以上の重なりを数える（前景同士は数えない）"],
     "audio_sequence": ["返却Objectのdurationは連結後の実尺へ自動設定される",
-                       "Narrationを渡すと字幕もcrossfade込みで配置され、数値@へ追従する"],
+                       "Narrationを渡すと字幕もcrossfade込みで配置され、数値@へ追従する",
+                       "連結前に各入力を 48kHz・ステレオへ揃える（acrossfade の出力形式は"
+                       "先頭入力に従うため）。モノラルは中央定位で各チャンネル約 -3dB"],
+    "Project.normalize_audio": [
+        "normalize_audio の有無に関わらず、音声は混ぜる前に全入力が 48kHz・ステレオへ揃う"
+        "（amix / sidechaincompress の出力形式は先頭入力に従うため）。"
+        "モノラル素材は中央定位になり各チャンネル約 -3dB（パンの法則）",
+        "入力がすべてモノラルだと出力はステレオ（各チャンネル約 -3dB）になり、"
+        "以前のモノラル出力より再生音量が約 3dB 下がる。音量を揃えるには normalize_audio を使う",
+        "mode='dynamic'（既定）は1パスの loudnorm で短期ラウドネスを目標へ寄せ続ける。"
+        "声の無い BGM だけの区間が持ち上がり、声が入ると沈む（ポンピング）。"
+        "ナレーション＋BGM の動画は mode='linear' を推奨",
+        "mode='linear' は本レンダの前に音声だけを全編1回 null 出力で流して統合ラウドネスと"
+        " true peak を測り（loudnorm print_format=json）、volume=(target-測定値)dB →"
+        " aresample → alimiter で仕上げる。区間どうしの音量差は変わらない",
+        "mode='linear' の測定結果は __cache__/artifacts/loudness/<鍵>.json に保存され、"
+        "音声グラフと音声素材が同じなら再測定しない（target / true_peak / limiter を"
+        "変えても測り直さない）。部分レンダ（start/end）も全編の測定値で増幅する",
+        "mode='linear' の dry_run は測定しない: 測定コマンドは cache 側に出し、main の"
+        "増幅量は volume=<MEASURED_GAIN>dB と表記する（キャッシュ状態に依存しない）",
+        "mode='linear' でピークの多い素材（TTS の声など）を大きく持ち上げると、上限を超える"
+        "ピークをリミッターが削る分だけ統合ラウドネスが目標よりやや低くなる"
+        "（実測: TTS の声 +8.8dB で -0.46 LU）。limiter=False のときは true peak が上限を"
+        "超える場合に限り、超えない所で増幅を止める（目標より低くなり、警告を出す）",
+    ],
     "voice": ['backend="voicevox"（既定候補）は VOICEVOX（別プロセス）の起動が必要',
+              'backend="voicevox" を明示していれば、VOICEVOX 停止中でも一度合成した台詞は'
+              "キャッシュ（__cache__/tts/engine_sig.json に控えたエンジン署名で鍵を作る）から"
+              "使える。合成が要る台詞だけ ConnectionError",
+              "backend=None（既定）はエンジン停止中は edge-tts があれば別の声で合成され"
+              "（無ければ RuntimeError）、VOICEVOX のキャッシュは使われない",
               'backend="edge" なら pip install edge-tts で使える（オンライン必須）',
               "speaker の意味はバックエンドごとに違う（数値ID / 音声名）"],
-    "beat_sync": ["scipy が必要（未インストールなら ImportError）"],
+    "beat_sync": ["scipy が必要（未インストールなら ImportError）",
+                  "beats / onsets は秒。keyframes の時刻は u（0..1）なので、"
+                  "scriptvedit.beat.beats_to_keyframes へ渡す前に表示尺で割る"
+                  "（beats_to_keyframes は単位を変換しない）"],
+    "Project.inspect": ["レイヤーを実行しない。render()（dry_run=True でよい）か audit() の"
+                        "後に呼ぶ。前に呼ぶとガントチャートではなく p.layer() の登録情報だけの表になる"],
+    "Project.layer": ["priority が同じレイヤーは p.layer() を呼んだ順に重なり、後が上"
+                      "（レイヤー内の Object は作った順で、後が上）"],
     "slide": ["HTML レンダリングに web 経路（Playwright 等）を使う"],
     "lut": [".cube 形式のみ"],
     "subtitles": ["SRT の文字コードは UTF-8"],
@@ -486,6 +590,8 @@ _MANIFEST_EXAMPLES = {
     "rotate_to": "img <= rotate_to(from_deg=0, to_deg=360)",
     "resize": "img <= resize(sx=0.3, sy=0.3)",
     "crop": "img <= crop(x=0, y=0, w=640, h=360)",
+    "flip": ("img <= flip()                # 左右反転\n"
+             "img2 <= flip(vertical=True)  # 上下反転"),
     "wipe": "img <= wipe(direction='left')",
     "text": "t = text('こんにちは', x=0.5, y=0.2, size=48, color='white')\nt.time(3) <= fade(lambda u: u)",
     "typewriter": "typewriter('タイプ表示', cps=12).time(4)",
@@ -501,8 +607,13 @@ _MANIFEST_EXAMPLES = {
     "transition": "transition(obj_a, obj_b, kind='wipeleft', duration=1.0)",
     "keyframes": "img <= scale(keyframes((0, 1.0), (0.5, 1.5), (1, 1.0), easing=ease_in_out_sine))",
     "avolume": "bgm <= avolume(0.3)",
-    "duck_under": "bgm <= duck_under(voice_obj, ratio=8)",
-    "sfx": "sfx('効果音.mp3', at=2.5, volume=0.8)",
+    "loop": ("bgm <= loop() & duck_under(narration_audio)   # time() は呼ばない（総尺までループ）\n"
+             "bgm2.time(30) <= loop()                        # 30秒までループ"),
+    "duck_under": ("bgm <= duck_under(voice_obj, ratio=8)\n"
+                   "# 相手が複数（どれかが鳴っている間は下がる）: "
+                   "bgm <= duck_under(n1, n2, n3, ratio=8)"),
+    "sfx": ("sfx('効果音.mp3', at=2.5, volume=0.8)              # 1回だけ\n"
+            "sfx('効果音.mp3', at=[0.5, 1.5, 3.0], volume=0.8)  # 同じ音を複数回"),
     "narrate": ("n = narrate('長い読み上げ原稿', speaker=1, subtitle_text='短い字幕', "
                 "subtitle_max_chars=14, subtitle_safe_area=0.05)"),
     "group": "g = group(obj_a, obj_b)\ng <= move(x=lambda u: u)",
@@ -529,12 +640,32 @@ _MANIFEST_CONSTRAINTS = [
                 "再び 0 秒から始まるので、レイヤーをまたいだ順次配置のつもりで"
                 "並べると黙って重なる（エラーにはならない）。"
                 "別レイヤーの後ろに置きたいときは、そのレイヤーの先頭で "
-                "pause.time(5) を挟む / obj @ 12 で絶対配置する / a >> b で"
-                "直後連結する / obj.time(3, name='intro') と "
+                "pause.time(5) を挟む / obj @ 12 で絶対配置する / "
+                "obj.time(3, name='intro') と "
                 "pause.until('intro.end') のアンカーで待ち合わせる、のいずれかを使う。"
                 "アンカー名は Project 全体で共有されるので、別レイヤーで打った "
                 "name= を pause.until() や @ 'intro.end' から参照できる。"
+                "a >> b（直後連結）は同じレイヤーの中だけで使える"
+                "（a を変数で参照するが、レイヤー .py は別々の名前空間で実行されるため"
+                "別レイヤーの Object は見えない）。"
                 "動画の総尺は全レイヤーの最大値から自動算出される。",
+    },
+    {
+        # 順次配置の並び順は「Object を作った順」（Object.__init__ が
+        # proj.objects へ append し、_resolve_anchors はその順でカーソルを進める）。
+        # time()/show() を呼んだ順ではないので、音声を作って time() で進めた後に
+        # 字幕を作ると字幕が後ろへずれる（実制作で踏んだ）。エラーにはならない。
+        "id": "object_registered_at_creation",
+        "topic": "タイムライン",
+        "severity": "warning",
+        "applies_to": ["Object", "Object.time", "Object.show", "text"],
+        "text": "Object（text() 等のファクトリが作るものも含む）は、コンストラクタを"
+                "呼んだ時点のカーソル位置で登録される。カーソル上の並び順は作った順で決まり、"
+                "後から呼んだ time() / show() では動かない。"
+                "音声 v を作って v.time(4) でカーソルを進めた後に字幕 t = text(...) を作ると、"
+                "t.show(4) は 4 秒の位置（音声の後ろ）に出る。音声と字幕を同時に出すなら、"
+                "字幕の text() を先に作ってから音声 Object を作る（または narrate() を使う）。"
+                "priority が同じ Object は登録順に重なり、後に登録したものが上になる。",
     },
     {
         "id": "group_time_is_sequential",
@@ -751,6 +882,8 @@ _MANIFEST_USAGE = {
     "dsl": {
         "apply": "obj <= fade(lambda u: u)            # Transform/Effect/AudioEffect を適用",
         "chain": "obj <= fade(0.5) & scale(1.2)       # Effect 同士は & で連結",
+        "audio_chain": "clip <= avolume(0.6) & atrim(3)   # AudioEffect 同士も &。"
+                       "Effect と AudioEffect は & で混ぜられない（TypeError。別々に <=）",
         "transform_chain": "obj <= resize(sx=0.5, sy=0.5) | blur(3)   # Transform 同士は |",
         "duration": "obj.time(3)                       # 表示尺3秒（省略時は素材の尺）",
         "start": "obj.show(3)                          # 時計を進めずに3秒表示（並行表示・非進行）",

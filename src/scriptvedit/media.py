@@ -8,6 +8,7 @@ from scriptvedit.context import current_project
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.cache import _sig_key, _src_signature
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache
+from scriptvedit.filters.audio import _MIX_AUDIO_FORMAT
 from scriptvedit.objects import Object
 from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIX_FMT, _BAKE_PIXFMT_VER, _ENGINE_VER, _detect_media_type, _suggest_hint
 from scriptvedit.validate import _require_number
@@ -322,6 +323,11 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
     sigs.extend([f"tr={transition}", f"tdur={t_dur}", f"size={w}x{h}",
                  f"fps={fps}", f"audio={all_audio}", f"ev={_ENGINE_VER}",
                  f"bpf={_BAKE_PIXFMT_VER}"])
+    if all_audio:
+        # 音声を連結するときだけ、入力形式の統一（下の aformat）を鍵へ入れる。
+        # 統一前に焼いた旧キャッシュを命中させないため。映像のみのときは
+        # 出力が変わらないので鍵も変えない（同一出力なら同一鍵）。
+        sigs.append(f"afmt={_MIX_AUDIO_FORMAT}")
     key = _sig_key(sigs)
     cache_path = os.path.join(_ARTIFACT_DIR, "xfade", f"{key}.mkv")
 
@@ -345,8 +351,12 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
         acc = offset + lengths[i]
     maps = ["-map", cur]
     if all_audio:
+        # 形式の統一（48kHz・ステレオ・fltp）: acrossfade の出力形式は先頭入力に
+        # 従うため、揃えずに連結すると先頭クリップがモノラルなだけで全体が
+        # モノラルに潰れる（filters/audio.py の _MIX_AUDIO_FORMAT 参照）
         for i, ln in enumerate(a_lengths):
-            parts.append(f"[{i}:a]atrim=duration={ln},asetpts=PTS-STARTPTS[at{i}]")
+            parts.append(f"[{i}:a]atrim=duration={ln},asetpts=PTS-STARTPTS,"
+                         f"{_MIX_AUDIO_FORMAT}[at{i}]")
         acur = "[at0]"
         for i in range(1, n):
             aout = f"[ax{i}]"

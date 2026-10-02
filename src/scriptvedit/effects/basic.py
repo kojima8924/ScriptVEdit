@@ -85,6 +85,33 @@ def eq(*, brightness=0, contrast=1, saturation=1, gamma=1):
                      saturation=saturation, gamma=gamma)
 
 
+def flip(horizontal=None, vertical=False):
+    """反転Transform。horizontal=True で左右反転（hflip）、vertical=True で上下反転（vflip）。
+
+    horizontal を省略したときは「vertical を指定していなければ左右反転」:
+      flip()                               → 左右反転だけ
+      flip(vertical=True)                  → 上下反転だけ（名前どおり）
+      flip(horizontal=True, vertical=True) → 両方（180度回転と同じ絵）
+    明示した値はその通りに使う。寸法は変わらない。
+    Transform なので bakeable（静止画は PNG チェックポイント）。
+    params には解決後の bool を入れる（flip() と flip(horizontal=True) は同じ鍵）。
+    """
+    if horizontal is not None and not isinstance(horizontal, bool):
+        raise TypeError(
+            f"flip: horizontal は True / False（省略可）で指定してください: {horizontal!r}")
+    if not isinstance(vertical, bool):
+        raise TypeError(
+            f"flip: vertical は True / False で指定してください: {vertical!r}")
+    if horizontal is None:
+        horizontal = not vertical
+    if not horizontal and not vertical:
+        raise ValueError(
+            "flip: horizontal と vertical が両方 False です（何も反転しません）。"
+            "左右反転は flip()、上下反転は flip(vertical=True)、"
+            "両方は flip(horizontal=True, vertical=True) と書きます")
+    return Transform("flip", horizontal=horizontal, vertical=vertical)
+
+
 # --- Effect関数 ---
 
 def scale(value=1):

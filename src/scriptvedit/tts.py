@@ -46,6 +46,11 @@ voicevox はさらに「正規化した接続先 endpoint + エンジンの /ver
 （同じ cache_dir で接続先やエンジンを切り替えたとき、別エンジンの旧音声を
 返さないようにするため。/version の取得は合成前の接続確認を兼ね、
 プロセス内でメモ化されるためナレーション行ごとには問い合わせない）。
+
+エンジンに届いたときの署名は <cache_dir>/engine_sig.json（endpoint ごと）へ
+原子的に保存する。エンジンが止まっていて届かないときは、その保存値で鍵を作り、
+キャッシュに当たればそのまま使う（プロセス内で1回だけ警告）。キャッシュに無く
+合成が要るときだけ、従来どおりの ConnectionError になる。
 """
 
 import argparse
@@ -61,7 +66,7 @@ import urllib.request
 import warnings
 import wave
 
-from scriptvedit.ffmpeg import _atomic_write_bytes, _unique_tmp_path
+from scriptvedit.ffmpeg import _atomic_write_bytes, _atomic_write_text, _unique_tmp_path
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 50021
@@ -127,7 +132,7 @@ def _cache_path(backend, text, speaker, speed, pitch, cache_dir, engine=None):
     backend を鍵に含めるのは、同じテキスト・話者でもバックエンドが違えば
     まったく別の音声になるため（キャッシュ衝突で意図しない声が使われるのを防ぐ）。
 
-    engine はエンジン識別署名（voicevox のみ。_voicevox_engine_sig の戻り値）。
+    engine はエンジン識別署名（voicevox のみ。_voicevox_engine_state の戻り値の署名）。
     同じ cache_dir で host/port やエンジン本体を切り替えても、別エンジンの
     旧音声がヒットしないよう鍵に混ぜる。None のバックエンド（edge/sapi）では
     鍵に含めない（既存キャッシュを無駄に無効化しないため）。
@@ -138,6 +143,11 @@ def _cache_path(backend, text, speaker, speed, pitch, cache_dir, engine=None):
         sig += f"||engine={engine}"
     key = hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
     return os.path.join(cache_dir, f"{key}.wav")
+
+
+def _is_cache_hit(cache_path):
+    """キャッシュ命中か（0 バイトの残骸は命中扱いにしない。tts() のコメント参照）"""
+    return os.path.exists(cache_path) and os.path.getsize(cache_path) > 0
 
 
 def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
@@ -158,7 +168,9 @@ def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
         生成された wav ファイルのパス（キャッシュ済みなら合成せず即返す）
 
     Raises:
-        ConnectionError: VOICEVOX 未起動 / edge のネットワーク不通
+        ConnectionError: VOICEVOX 未起動（キャッシュに無く合成が要るとき。
+                         キャッシュ済みなら保存済みの署名で命中させて返す） /
+                         edge のネットワーク不通
         ImportError:     edge-tts 未導入
         ValueError:      パラメータ不正
     """
@@ -169,11 +181,14 @@ def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
     # キャッシュ鍵に使う speaker は「解決後の値」にする。
     # （speaker=None と speaker=1 が voicevox では同じ音声なので同じ鍵にしたい）
     engine = None
+    offline = False
     if backend == "voicevox":
         resolved = _voicevox_speaker(speaker)
-        # 接続先とエンジンバージョンを鍵に含める（/version 取得は接続確認を兼ねる。
-        # 未起動なら合成前にここで既存どおりの ConnectionError になる）
-        engine = _voicevox_engine_sig(host, port)
+        # 接続先とエンジンバージョンを鍵に含める（/version 取得は接続確認を兼ねる）。
+        # エンジンに届かないときは cache_dir に保存した前回の署名で代用する
+        # （offline=True）。保存値も無ければここで既存どおりの ConnectionError。
+        engine, online = _voicevox_engine_state(host, port, cache_dir)
+        offline = not online
     elif backend == "edge":
         resolved = _edge_voice(speaker)
     else:
@@ -193,8 +208,20 @@ def tts(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0,
     #   * それでも 0 バイトの残骸（旧版が残したもの・ディスクフル等）は
     #     命中扱いにせず作り直す。空 wav は tts_duration が例外にするだけで、
     #     黙って無音のナレーションになる余地を残さない。
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+    if _is_cache_hit(cache_path):
+        if offline:
+            _warn_voicevox_offline_once(host, port, engine)
         return cache_path
+    if offline:
+        # 合成が要るのにエンジンへ届かない。途中で起動した可能性もあるので
+        # 1回だけ問い合わせ直し、届いたらその署名で鍵を作り直して続ける
+        engine, online = _voicevox_engine_state(host, port, cache_dir, retry=True)
+        if not online:
+            raise _needs_synth_error(host, port, text, engine)
+        cache_path = _cache_path(backend, text, resolved, speed, pitch, cache_dir,
+                                 engine=engine)
+        if _is_cache_hit(cache_path):
+            return cache_path
     os.makedirs(cache_dir, exist_ok=True)
 
     if backend == "voicevox":
@@ -269,9 +296,24 @@ def _voicevox_running(host, port, timeout=1.0):
 
 
 # エンジン識別署名のプロセス内メモ（endpoint → 署名文字列）。
-# ナレーション行ごとに /version を問い合わせないためのメモ化で、ディスクには
-# 永続化しない（CLAUDE.md のキャッシュ設計: 環境依存情報のディスク永続化は罠になる）。
+# ナレーション行ごとに /version を問い合わせないためのメモ化。
 _VOICEVOX_ENGINE_SIG_MEMO = {}
+
+# エンジンに届いたときの署名の保存先（cache_dir 直下。endpoint → {"version": ...}）。
+# **保存値を使うのはエンジンに届かないときだけ**で、届けば必ず /version の実測が
+# 勝ち、保存値も上書きされる。CLAUDE.md が禁じた ffp.json 型の罠（古い永続値が
+# 実測より優先されて「変えたのに反映されない」）とは逆向きの使い方であることに注意:
+# ここは「実測できない間だけ、最後に実測した値で既存の音声を引く」ための控え。
+_ENGINE_SIG_FILE = "engine_sig.json"
+
+# 保存値で代用した（＝エンジンに届かなかった）署名のメモ
+# （(endpoint, cache_dir の絶対パス) → 署名）。届かない接続の再試行は Windows では
+# 1回あたり約2秒（localhost 名なら約4秒）かかるため、行ごとに試さない。
+_VOICEVOX_OFFLINE_SIG_MEMO = {}
+# 保存済みの (endpoint, cache_dir の絶対パス)（プロセス内で1回だけ書く）
+_VOICEVOX_SIG_SAVED = set()
+# 「保存値で代用している」警告を出した endpoint（プロセス内で1回だけ警告する）
+_VOICEVOX_OFFLINE_WARNED = set()
 
 
 def _voicevox_endpoint(host, port):
@@ -279,24 +321,121 @@ def _voicevox_endpoint(host, port):
     return f"{str(host).strip().lower()}:{int(port)}"
 
 
-def _voicevox_engine_sig(host, port):
-    """VOICEVOX エンジンの識別署名「endpoint|バージョン」を返す（プロセス内メモ化）
+def _engine_sig_str(endpoint, version):
+    """署名文字列「endpoint|バージョン」（実測・保存値の復元で同じ式を使う）"""
+    return f"{endpoint}|{version}"
 
-    キャッシュ鍵に混ぜることで、同じ cache_dir のまま接続先(host/port)や
+
+def _voicevox_engine_state(host, port, cache_dir=None, *, retry=False):
+    """VOICEVOX エンジンの識別署名「endpoint|バージョン」と「エンジンに届いたか」を
+    返す: (署名, online)。実測はプロセス内でメモ化する。
+
+    署名をキャッシュ鍵に混ぜることで、同じ cache_dir のまま接続先(host/port)や
     エンジン本体（バージョン違い）を切り替えても旧エンジンの音声がヒットしない。
-    /version の取得は合成前の接続確認を兼ねる。未起動・接続不可の場合は
-    _request が既存の ConnectionError（_not_running_error）を投げる。
+    /version の取得は合成前の接続確認を兼ねる。
+
+    * 届いた（online=True）: /version の実測で署名を作り、cache_dir があれば
+      engine_sig.json へ原子的に保存する（プロセス内で endpoint×cache_dir ごとに1回）。
+    * 届かない（ConnectionError / TimeoutError）: cache_dir の保存値から署名を
+      復元して (保存値, False) を返す。保存値が無ければ例外をそのまま投げる。
+    retry=True は「保存値で代用中」のメモを捨てて問い合わせ直す（合成が要る直前用）。
     """
     endpoint = _voicevox_endpoint(host, port)
+    offkey = (endpoint, os.path.abspath(cache_dir)) if cache_dir else None
     sig = _VOICEVOX_ENGINE_SIG_MEMO.get(endpoint)
     if sig is None:
-        raw = _request(f"{_base_url(host, port)}/version", host=host, port=port,
-                       timeout=_CONNECT_TIMEOUT)
+        if offkey is not None and not retry and offkey in _VOICEVOX_OFFLINE_SIG_MEMO:
+            return _VOICEVOX_OFFLINE_SIG_MEMO[offkey], False
+        try:
+            raw = _request(f"{_base_url(host, port)}/version", host=host, port=port,
+                           timeout=_CONNECT_TIMEOUT)
+        except (ConnectionError, TimeoutError):
+            saved = _load_engine_sig(cache_dir, endpoint) if cache_dir else None
+            if saved is None:
+                raise
+            _VOICEVOX_OFFLINE_SIG_MEMO[offkey] = saved
+            return saved, False
         # /version は JSON 文字列（例: "0.14.0"）を返すため引用符を剥がす
         version = raw.decode("utf-8", errors="replace").strip().strip('"')
-        sig = f"{endpoint}|{version}"
+        sig = _engine_sig_str(endpoint, version)
         _VOICEVOX_ENGINE_SIG_MEMO[endpoint] = sig
-    return sig
+        if offkey is not None:
+            _VOICEVOX_OFFLINE_SIG_MEMO.pop(offkey, None)
+    if offkey is not None and offkey not in _VOICEVOX_SIG_SAVED:
+        _save_engine_sig(cache_dir, endpoint, sig.split("|", 1)[1])
+        _VOICEVOX_SIG_SAVED.add(offkey)
+    return sig, True
+
+
+def _engine_sig_path(cache_dir):
+    """engine_sig.json のパス"""
+    return os.path.join(cache_dir, _ENGINE_SIG_FILE)
+
+
+def _load_engine_sigs(cache_dir):
+    """engine_sig.json を dict で読む（無い・壊れている・形が違うときは空 dict）
+
+    壊れていても例外にしない: 次にエンジンへ届いたとき丸ごと書き直される。
+    """
+    try:
+        with open(_engine_sig_path(cache_dir), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_engine_sig(cache_dir, endpoint):
+    """保存済みの署名を返す（endpoint の記録が無ければ None）"""
+    entry = _load_engine_sigs(cache_dir).get(endpoint)
+    if not isinstance(entry, dict):
+        return None
+    version = entry.get("version")
+    if not isinstance(version, str) or not version:
+        return None
+    return _engine_sig_str(endpoint, version)
+
+
+def _save_engine_sig(cache_dir, endpoint, version):
+    """署名を engine_sig.json（endpoint ごと）へ原子的に保存する
+
+    保存に失敗してもレンダは止めない（失うのは「エンジン停止中にキャッシュを
+    引ける」ことだけ）。他の endpoint の記録は残す。
+    """
+    data = _load_engine_sigs(cache_dir)
+    data[endpoint] = {"version": version}
+    try:
+        _atomic_write_text(
+            _engine_sig_path(cache_dir),
+            json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    except OSError as e:
+        warnings.warn(
+            f"VOICEVOX のエンジン署名を保存できませんでした（{_engine_sig_path(cache_dir)}）: "
+            f"{e}。エンジン停止中のキャッシュ再利用ができなくなるだけで、合成は続けます",
+            stacklevel=3)
+
+
+def _warn_voicevox_offline_once(host, port, engine):
+    """保存値の署名でキャッシュを引いたことをプロセス内で1回だけ警告する"""
+    endpoint = _voicevox_endpoint(host, port)
+    if endpoint in _VOICEVOX_OFFLINE_WARNED:
+        return
+    _VOICEVOX_OFFLINE_WARNED.add(endpoint)
+    warnings.warn(
+        f"VOICEVOX に接続できません（{_base_url(host, port)}）。"
+        f"前回エンジンに届いたときの署名（{engine}）でキャッシュ済みの音声を使います。"
+        "キャッシュに無いテキストが出てきた時点で ConnectionError になります",
+        stacklevel=3)
+
+
+def _needs_synth_error(host, port, text, engine):
+    """保存値で代用中に未キャッシュのテキストが来たときの ConnectionError"""
+    snippet = text if len(text) <= 40 else text[:40] + "…"
+    return ConnectionError(
+        f"{_not_running_error(host, port)}\n"
+        f"  - このテキストはキャッシュに無いため合成が必要です: {snippet!r}\n"
+        f"    （キャッシュ済みのテキストは、前回エンジンに届いたときの署名 {engine} で"
+        "再利用しています）")
 
 
 def _voicevox_speaker(speaker):

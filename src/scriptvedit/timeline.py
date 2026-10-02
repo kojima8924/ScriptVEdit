@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import os
+import sys as _sys
 import warnings
 
 # context は scriptvedit 内 import を持たない葉なので先頭で import できる。
@@ -46,7 +48,9 @@ class Pause:
         self.priority = 0
         self._until_anchor = None
         self._until_offset = 0.0
-        self._fixed_start = None   # @ による絶対配置（Objectと共通の浮動配置属性）
+        # Object と共通の浮動配置属性。Pause は @ を持たない（pause.time(1) @ 3 は
+        # TypeError）ので常に None。_resolve_anchors が Object と同じ経路で読むためだけに置く
+        self._fixed_start = None
         self._start_after = None   # >> による直後連結
 
     def time(self, duration):
@@ -139,7 +143,8 @@ class Scene:
 
     def __enter__(self):
         # 開始位置にアンカー（他レイヤー/シーンからの参照点）
-        anchor(f"scene:{self.name}")
+        _add_anchor(self.project, f"scene:{self.name}",
+                    desc=f"scene('{self.name}')")
         self._start_index = len(self.project.objects)
         return self
 
@@ -161,19 +166,55 @@ class Scene:
         # 遅延パディングマーカー（_resolve_anchors でシーン開始+duration まで進める）
         self.project.objects.append(_ScenePad(self.name, self.duration))
         # 終端アンカー（pad 後の時刻 = シーン開始 + duration に解決される）
-        anchor(f"scene:{self.name}.end")
+        _add_anchor(self.project, f"scene:{self.name}.end",
+                    desc=f"scene('{self.name}')")
         return False
 
 
 # --- アンカー/同期 ---
 
-def _register_anchor_owner(proj, name):
-    """アンカー名の定義元レイヤーを登録し、別レイヤーでの再定義を拒否する。
+# scriptvedit パッケージのディレクトリ（利用者コードの呼び出し位置を探すときに飛ばす）
+_PKG_DIR = os.path.normcase(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _user_call_site():
+    """scriptvedit の外で最も内側の呼び出し位置 (ファイル名, 行番号) を返す。
+
+    レイヤー .py は exec(compile(code, filename, ...)) されるので、そのフレームの
+    co_filename はレイヤーファイルになる。scene() のようにパッケージ内部から
+    anchor() を呼ぶ経路でも、利用者が書いた行（with scene(...) の行）を指す。
+    """
+    frame = _sys._getframe(1)
+    while frame is not None:
+        fn = frame.f_code.co_filename
+        try:
+            d = os.path.normcase(os.path.dirname(os.path.abspath(fn)))
+        except (TypeError, ValueError):
+            d = ""
+        if d != _PKG_DIR and not d.startswith(_PKG_DIR + os.sep):
+            return fn, frame.f_lineno
+        frame = frame.f_back
+    return None, None
+
+
+def _register_anchor_owner(proj, name, *, owner=None, desc=None, shown=None):
+    """アンカー名の定義元レイヤーを登録し、重複定義を拒否する。
 
     明示 anchor() と time(name=...) の生成アンカー（X.start / X.end）の
-    共通経路。同一レイヤーファイルの再実行（Plan/Renderの複数pass）は許容し、
-    別レイヤーでの同名定義は last-write-wins にせずエラーにする
-    （監査 issue #14 P1）。
+    共通経路。
+    - 別レイヤーでの同名定義は last-write-wins にせず RuntimeError
+      （監査 issue #14 P1）。同一レイヤーファイルの再実行（Plan/Render の
+      複数 pass）はこちらでは許容する。
+    - **同じレイヤーの1回の実行の中**での同名定義（anchor('x') の2回、
+      time(name='x') の2回、anchor('x.start') と time(name='x') の混在）は、
+      定義した時点で行番号つきの ValueError にする。放置すると固定点反復が
+      2つの時刻の間で振動し、原因の分からない「タイムライン解決が
+      収束しませんでした」になる（位置が偶然同じだと黙って通る）。
+
+    owner: 定義したアイテム（anchor() は新しいマーカー、time(name=) は Object）。
+        同じ Object が time(name=) をやり直すのは再定義ではないので許す。
+    desc: エラー表示用の定義の書き方（例 "anchor('x')" / "time(name='x')"）。
+    shown: エラー表示用のアンカー名（time(name='x') なら 'x'）。
     """
     current_file = proj._current_layer_file or "(unknown)"
     if name in proj._anchor_defined_in:
@@ -183,7 +224,53 @@ def _register_anchor_owner(proj, name):
                 f"アンカー '{name}' は既に '{existing_file}' で定義されています "
                 f"('{current_file}' で再定義は禁止)"
             )
+    fn, line = _user_call_site()
+    desc = desc or f"anchor('{name}')"
+    sites = getattr(proj, "_layer_anchor_sites", None)
+    if sites is None:
+        sites = proj._layer_anchor_sites = {}
+    prev = sites.get(name)
+    if prev is not None and prev[0] is not owner:
+        _, prev_fn, prev_line, prev_desc = prev
+        now_desc = desc
+        if shown and prev_desc == desc:
+            # time(name='x') の2回 → 利用者が書いた名前 'x' で示す
+            label = f"'{shown}'"
+        else:
+            # anchor() の2回、または anchor('x.start') と time(name='x') の混在
+            label = f"'{name}'"
+            if shown and shown != name:
+                now_desc += f"（'{name}' を作る）"
+        where = f"{prev_line}行目" if prev_line else "行番号不明"
+        if prev_fn and fn and os.path.normcase(prev_fn) != os.path.normcase(fn):
+            where = f"{os.path.basename(prev_fn)} の {where}"
+        now = f"{line}行目の " if line else ""
+        raise ValueError(
+            f"アンカー名 {label} はこのレイヤーで既に定義されています"
+            f"（{where}: {prev_desc}）。{now}{now_desc} で再定義しようとしました。\n"
+            f"同じレイヤーの中でアンカー名は1回しか定義できません"
+            f"（2回定義するとタイムラインの時刻が1つに決まりません）。"
+            f"別の名前にしてください。")
+    sites[name] = (owner, fn, line, desc)
     proj._anchor_defined_in[name] = current_file
+
+
+def _unregister_anchor_site(proj, name, owner):
+    """owner が同じレイヤー実行中に登録したアンカー名を取り消す。
+
+    time(name='x') の後で同じ Object に time(name='y') をやり直したとき、
+    使われなくなった 'x.start' / 'x.end' が重複検査に残らないようにする。
+    """
+    sites = getattr(proj, "_layer_anchor_sites", None)
+    if sites and name in sites and sites[name][0] is owner:
+        del sites[name]
+
+
+def _add_anchor(proj, name, *, desc=None):
+    """アンカーマーカーを重複検査つきでタイムラインへ置く（anchor() / scene() 共通）"""
+    marker = _AnchorMarker(name)
+    _register_anchor_owner(proj, name, owner=marker, desc=desc)
+    proj.objects.append(marker)
 
 
 def anchor(name):
@@ -191,9 +278,7 @@ def anchor(name):
     proj = current_project()
     if proj is None:
         raise RuntimeError("anchor()にはアクティブなProjectが必要です")
-    _register_anchor_owner(proj, name)
-    marker = _AnchorMarker(name)
-    proj.objects.append(marker)
+    _add_anchor(proj, name)
 
 
 class _PauseFactory:

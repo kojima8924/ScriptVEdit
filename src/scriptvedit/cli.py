@@ -5,6 +5,7 @@ import os
 import sys
 import json
 import math as _math
+import re as _re
 import time as _time
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
@@ -26,10 +27,49 @@ _WATCH_EXTENSIONS = {
 _WATCH_SKIP_DIRS = {"__cache__", "__pycache__", ".git", "output"}
 
 
-def _watch_targets(script_path):
+def _watch_output_matcher(script_path, out):
+    """--out の出力パスとその一時ファイルを判定する述語を返す（out が無ければ None）。
+
+    出力（.mp4 / .webm / .gif / 連番 .png 等）は監視対象の拡張子でもあるため、
+    除外しないと「出力の更新 → 変更検知 → 再実行 → 出力の更新 …」が止まらない。
+    除外するのは次の3種（大文字小文字は OS の規則で比較する）:
+      * 出力パスそのもの
+      * レンダが確定前に書く一時ファイル（ffmpeg._unique_tmp_path の
+        `<base>.tmp<pid>_<8桁hex><ext>`。中断で残った残骸も含む）
+      * 連番 PNG（`frames/%04d.png`）の各フレーム
+    相対パスはスクリプトのディレクトリ基準で解決する（_run が cwd をそこにして
+    スクリプトへ out をそのまま渡すため、スクリプトが書く場所と一致する）。
+    """
+    if not out:
+        return None
+    script_dir = os.path.dirname(os.path.abspath(script_path))
+    full = os.path.normcase(os.path.abspath(os.path.join(script_dir, out)))
+    out_dir, out_name = os.path.split(full)
+    base, ext = os.path.splitext(out_name)
+    # 連番指定（%d / %04d）は数字列に置き換えて照合する
+    seq = _re.compile(r"%0?\d*d")
+    parts = seq.split(base)
+    base_re = r"\d+".join(_re.escape(p) for p in parts)
+    patterns = [
+        _re.compile(base_re + _re.escape(ext) + r"\Z"),
+        _re.compile(base_re + r"\.tmp\d+_[0-9a-f]{8}" + _re.escape(ext) + r"\Z"),
+    ]
+
+    def _is_output(path):
+        p = os.path.normcase(os.path.abspath(path))
+        if p == full:
+            return True
+        d, name = os.path.split(p)
+        return d == out_dir and any(pat.match(name) for pat in patterns)
+
+    return _is_output
+
+
+def _watch_targets(script_path, exclude=None):
     """監視対象ファイル集合を返す（スクリプト自身 + サブディレクトリを含む
     .py レイヤーおよび画像/音声/フォント等の素材ファイル）。
-    キャッシュ/生成物ディレクトリは除外する。"""
+    キャッシュ/生成物ディレクトリは除外する。exclude（パス→bool の述語）に
+    当たるファイル（--out の出力と一時ファイル）も除外する。"""
     script_path = os.path.abspath(script_path)
     targets = {script_path}
     d = os.path.dirname(script_path)
@@ -40,7 +80,10 @@ def _watch_targets(script_path):
             for name in files:
                 ext = os.path.splitext(name)[1].lower()
                 if ext in _WATCH_EXTENSIONS:
-                    targets.add(os.path.join(dirpath, name))
+                    path = os.path.join(dirpath, name)
+                    if exclude is not None and exclude(path):
+                        continue
+                    targets.add(path)
     except OSError:
         pass
     return targets
@@ -58,11 +101,18 @@ def _snapshot_mtimes(paths):
 
 
 def watch(script_path, *, out=None, interval=0.5, max_cycles=None):
-    """script_path と同ディレクトリの .py を監視し、変更時に再実行する。
+    """script_path のディレクトリ以下を監視し、変更時にスクリプトを再実行する。
 
+    監視対象はスクリプト自身と、そのディレクトリ以下（サブディレクトリを再帰的に）の
+    _WATCH_EXTENSIONS の拡張子（.py・画像・音声・動画・フォント・.html/.css/.js・
+    字幕・.cube）。_WATCH_SKIP_DIRS（__cache__ / __pycache__ / .git / output）は見ない。
+    起動時に1回、以後は変更のたびに `python <script> [out]` をスクリプトの
+    ディレクトリで実行する（out は第1引数として渡すだけ。スクリプト側が
+    sys.argv[1] を読む必要がある）。
     標準ライブラリのみ（os.stat ポーリング）。チェックポイント/レイヤー
     キャッシュが効くため差分再生成は高速。Ctrl-C で停止。
     max_cycles を指定するとその回数だけポーリングして戻る（テスト用）。
+    out（出力パス）とその一時ファイルは監視しない（_watch_output_matcher）。
     """
     script_path = os.path.abspath(script_path)
     if not os.path.isfile(script_path):
@@ -85,16 +135,19 @@ def watch(script_path, *, out=None, interval=0.5, max_cycles=None):
         status = "成功" if rc == 0 else f"失敗(rc={rc})"
         print(f"[watch] {status} ({dt:.2f}s) 変更を待機中... (Ctrl-Cで終了)")
 
+    # --out の出力と一時ファイルは監視しない（出力の更新で再実行が止まらなくなる）
+    exclude = _watch_output_matcher(script_path, out)
+
     print(f"[watch] 監視開始: {script_path}")
     _run()  # 起動時に1回実行
-    targets = _watch_targets(script_path)
+    targets = _watch_targets(script_path, exclude)
     last = _snapshot_mtimes(targets)
     cycles = 0
     try:
         while True:
             _time.sleep(interval)
             cycles += 1
-            targets = _watch_targets(script_path)  # 新規ファイル追加も検知
+            targets = _watch_targets(script_path, exclude)  # 新規ファイル追加も検知
             cur = _snapshot_mtimes(targets)
             changed = [p for p in cur if cur[p] != last.get(p)]
             if changed:

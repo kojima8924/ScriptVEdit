@@ -435,6 +435,10 @@ def beats_to_keyframes(beats, values, *, offset=0.0, decay=None, base=None,
     scriptvedit を import せず、(t0, v0, t1, v1, ...) のタプルを返すだけの
     データ整形ヘルパー。
 
+    **単位は変換しない**: beats・offset・decay・t_start/t_end がそのまま出力の時刻になる。
+    keyframes の時刻は秒ではなく u（0..1。表示区間の進行度）なので、beat_sync の
+    beats（秒）は表示尺で割ってから渡す（decay も同じ尺で割る）。
+
     Args:
         beats: ビート時刻のリスト
         values: 各ビートに割り当てる値。ビート数より短ければ循環使用
@@ -446,8 +450,9 @@ def beats_to_keyframes(beats, values, *, offset=0.0, decay=None, base=None,
     Returns:
         tuple: (t0, v0, t1, v1, ...) — scriptvedit.keyframes(*result) にそのまま渡せる
 
-    使用例:
-        kf = beats_to_keyframes(res["beats"], [1.15], decay=0.12, base=1.0)
+    使用例（obj と音声がどちらもタイムライン 0 秒から始まる場合）:
+        beats_u = [b / dur for b in res["beats"] if b < dur]   # 秒 → u
+        kf = beats_to_keyframes(beats_u, [1.15], decay=0.12 / dur, base=1.0)
         obj.time(dur) <= scale(keyframes(*kf))
     """
     values = list(values)

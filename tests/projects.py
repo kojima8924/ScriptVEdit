@@ -398,6 +398,13 @@ _SPECS = [
     ProjectSpec("test97", ["test97_live_fx.py"],
                 doc="live Effect: shake / inertia / repeat+arepeat（obj*n の loop/aloop）/ "
                     "delete（映像だけ除外）+ compute() 素材化と show_until() のアンカー解決"),
+    ProjectSpec("test98", ["test98_flip.py"],
+                doc="flip Transform: 左右(hflip)/上下(vflip)/両方 を PNG チェックポイントへ焼く"),
+    ProjectSpec("test99", ["test99_normalize_linear.py"],
+                setup=lambda p: p.normalize_audio(-14, mode="linear"),
+                render_kwargs={"start": 1, "end": 3},
+                doc="normalize_audio(mode='linear'): main は volume=<MEASURED_GAIN>dB"
+                    "（loudnorm なし）、cache に全編の測定パス（部分レンダでも -t は総尺）"),
     # --- 以下は実レンダ専用（dry_run では踏めない経路） ---
     ProjectSpec("test92", ["test92_formula_scale.py"], snapshot=False,
                 configure=_cfg(width=640, height=360, fps=15), needs=("web",),

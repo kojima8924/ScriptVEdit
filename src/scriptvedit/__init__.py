@@ -40,7 +40,7 @@ __all__ = [
     "VideoView", "AudioView",
     "FFmpegError",
     # ファクトリ関数
-    "resize", "rotate", "crop", "pad", "blur", "eq",
+    "resize", "rotate", "crop", "pad", "blur", "eq", "flip",
     "scale", "fade", "move", "morph_to", "rotate_to",
     "move_along", "path_bezier", "throw", "inertia", "look_at", "perlin",
     "explode_to", "assemble_from", "group", "tile",
@@ -186,8 +186,8 @@ from scriptvedit.project import (  # noqa: F401
     Project
 )
 from scriptvedit.effects.basic import (  # noqa: F401
-    adelete, atempo, atrim, avolume, blur, color_shift, crop, delete, eq, fade, move, pad,
-    resize, rotate, rotate_to, scale, shake, trim, wipe, zoom
+    adelete, atempo, atrim, avolume, blur, color_shift, crop, delete, eq, fade, flip, move,
+    pad, resize, rotate, rotate_to, scale, shake, trim, wipe, zoom
 )
 from scriptvedit.effects.paths import (  # noqa: F401
     inertia, look_at, move_along, path_bezier, perlin, throw

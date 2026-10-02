@@ -312,6 +312,12 @@ class Object:
     # にも既定を行き渡らせるためクラス属性で持つ。
     _audio_source = None
 
+    # sfx() が作った Object の発音区間（Object 先頭からの相対秒 (始, 終) のタプル）。
+    # 生成物は「開始0・尺は最後の at + 素材長」の1本だが、実際に鳴るのは
+    # この区間だけなので、p.audit() の重なり判定（audio-overlap-no-duck）が読む。
+    # sfx 以外は None。_audio_source と同じ理由でクラス属性で既定を持つ。
+    _sfx_hits = None
+
     def __init__(self, source, **kwargs):
         self.source = source
         self.transforms = []
@@ -452,11 +458,20 @@ class Object:
             self._duration_auto = False
         if name is not None:
             # 生成アンカー（X.start / X.end）も明示 anchor() と同じ重複管理に
-            # 載せる（別レイヤーでの同名定義は last-write-wins にせずエラー）
+            # 載せる（別レイヤーでの同名定義は last-write-wins にせずエラー。
+            # 同じレイヤー内の重複は行番号つき ValueError）
             proj = current_project()
             if proj is not None:
-                _register_anchor_owner(proj, f"{name}.start")
-                _register_anchor_owner(proj, f"{name}.end")
+                old = getattr(self, "_anchor_name", None)
+                if old is not None and old != name:
+                    # 同じ Object の名前の付け直し: 旧名は重複検査から外す
+                    _unregister_anchor_site(proj, f"{old}.start", self)
+                    _unregister_anchor_site(proj, f"{old}.end", self)
+                desc = f"time(name='{name}')"
+                _register_anchor_owner(proj, f"{name}.start", owner=self,
+                                       desc=desc, shown=name)
+                _register_anchor_owner(proj, f"{name}.end", owner=self,
+                                       desc=desc, shown=name)
             self._anchor_name = name
         self._ensure_registered()
         return self
@@ -716,7 +731,7 @@ class Object:
         return self
 
     def compute(self, duration=None):
-        """タイムライン外で素材を生成。PNG(静止) or WebM(動画)を返す
+        """タイムライン外で素材を生成。PNG(静止) か FFV1 bgra の .mkv(動画)へ差し替える
 
         自身を生成物（焼いた素材）へその場で変異させて返す。Project からは
         一旦除外されるが、time()/show()/until()/@ で再配置すればその時点の
@@ -816,6 +831,12 @@ class Object:
         finally:
             activate(parent)
         total = sub_project.duration
+        # 音声有無: dry_run解決済みのサブオブジェクトから確定（未生成キャッシュの
+        # probe不能でFalse固定になるのを防ぐ）。_build_ffmpeg_cmd が音声枝を組む
+        # 条件（has_audio な Object があること）と同じ。鍵の audio_graph と
+        # 返す Object の _has_audio の両方に使う。
+        sub_has_audio = any(
+            isinstance(o, Object) and o.has_audio for o in sub_project.objects)
 
         # 署名: configure + レイヤーファイルFFP群 + レイヤー参照素材FFP群
         sigs = ["from_project",
@@ -842,11 +863,27 @@ class Object:
         sigs.append(f"loudnorm={sub_project._loudnorm_target}")
         loudnorm_options = getattr(sub_project, "_loudnorm_options", None)
         if loudnorm_options is not None:
-            sigs.append(f"loudnorm_options={loudnorm_options}")
+            # 効く設定だけを署名へ入れる（CLAUDE.md §5「同一出力なら同一鍵」）。
+            # mode="dynamic"（既定）は mode 導入前と同じ署名のまま、"linear" は
+            # loudnorm を通さないので lra が効かない → 署名から外して mode を足す。
+            # linear の増幅量は測定値＝サブProjectの素材で決まり、素材は dep= で
+            # 署名済み
+            opts_sig = dict(loudnorm_options)
+            if opts_sig.pop("mode", "dynamic") == "linear":
+                opts_sig.pop("lra", None)
+                opts_sig["mode"] = "linear"
+            sigs.append(f"loudnorm_options={opts_sig}")
         # duck_under のsidechain padや最終音声グラフはレイヤー/素材FFPに
         # 現れない。音声グラフ変更後に旧subproject WebMを再利用しないための
         # 局所バージョン（高コストなWeb/画像キャッシュ全体は無効化しない）。
-        sigs.append("audio_graph=2")
+        # 3: 各音声入力を混ぜる前に 48kHz・ステレオへ揃える aformat を追加
+        #    （旧版は先頭入力の形式に潰れた音声を焼いていたため再生成させる）。
+        # 4: duck_under の検出用枝を形式統一の前から取る（3 の途中版はモノラルの
+        #    ナレーションを -3dB で検出し、ダッキングが浅い音声を焼いていた）。
+        # 音声の無いサブプロジェクトは音声グラフに出力が左右されないので 2 に
+        # 据え置く（上げると同一出力なのに Web/重い合成ごと作り直しになる。
+        # CLAUDE.md §5「同一出力なら同一鍵」）。
+        sigs.append("audio_graph=4" if sub_has_audio else "audio_graph=2")
         sigs.append(f"ev={_ENGINE_VER}")
         key = _sig_key(sigs)
         cache_path = os.path.join(_ARTIFACT_DIR, "subproject", f"{key}.webm")
@@ -894,10 +931,8 @@ class Object:
         obj = Object(cache_path)
         obj._origin_sources = list(layer_files) + list(dep_sources)
         obj._resolved_length = total
-        # 音声有無: dry_run解決済みのサブオブジェクトから確定（未生成キャッシュの
-        # probe不能でFalse固定になるのを防ぐ）
-        obj._has_audio = any(
-            isinstance(o, Object) and o.has_audio for o in sub_project.objects)
+        # 音声有無は鍵と同じ判定（上の sub_has_audio）を使う
+        obj._has_audio = sub_has_audio
         return obj
 
     def _compute_cache_path(self, duration=None):
@@ -1377,4 +1412,4 @@ from scriptvedit.cache import _build_unified_ops, _fold_time_effects, _op_prefix
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions
 from scriptvedit.plugins import _EFFECT_PLUGINS
-from scriptvedit.timeline import _link_after, _register_anchor_owner, pause
+from scriptvedit.timeline import _link_after, _register_anchor_owner, _unregister_anchor_site, pause

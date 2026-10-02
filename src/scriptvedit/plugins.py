@@ -163,7 +163,8 @@ def _coerce_plugin_param(plugin_name, key, spec, value):
             _require_number(plugin_name, key, resolved.value, lo, hi)
         return resolved
     if typ == "color":
-        # (r, g, b) タプルに解決（geq 等で使う）
+        # 検証だけして文字列のまま返す（(r, g, b) には変換しない）。geq 等で
+        # (r, g, b) が要るビルダーは ctx["parse_color"](params[key]) で変換する
         if not isinstance(value, str) or not value:
             raise ValueError(
                 f"{plugin_name}: {key} には色名か16進の文字列を指定してください: {value!r}")

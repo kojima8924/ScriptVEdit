@@ -25,7 +25,7 @@ from scriptvedit import (
     explode_to, assemble_from, move_along, path_bezier, throw, inertia, look_at, perlin,
     group, tile, scene, keyframes,
     subtitle, subtitle_box, bubble, diagram, circle, label,
-    crop, pad, blur, eq, wipe, zoom, color_shift, shake, scale,
+    crop, pad, blur, eq, flip, wipe, zoom, color_shift, shake, scale,
     chroma_key, vignette, pixelize, glow, lut, glitch,
     perspective_warp, lens, ken_burns, drop_shadow, outline,
     slideshow, transition,
@@ -2030,6 +2030,18 @@ def check_normalize_audio_range():
     except ValueError as e:
         msg = str(e)
         return (True, msg) if "target" in msg else (False, msg)
+
+
+def check_normalize_audio_bad_mode():
+    """normalize_audio: mode が dynamic / linear 以外 → 候補つき ValueError"""
+    p = _mk_project()
+    try:
+        p.normalize_audio(-14, mode="liner")  # linear の綴り間違い
+        return False, "例外が発生しませんでした"
+    except ValueError as e:
+        msg = str(e)
+        ok = "mode" in msg and "'dynamic'" in msg and "もしかして: linear" in msg
+        return (ok, msg)
 
 
 def check_text_drawtext_in_cmd():
@@ -4848,6 +4860,7 @@ ALL_TESTS = [
     ("audio_viz 不正kind", check_audio_viz_bad_kind),
     ("audio_viz ソース不在", check_audio_viz_missing_source),
     ("normalize_audio 範囲外", check_normalize_audio_range),
+    ("normalize_audio 不正mode", check_normalize_audio_bad_mode),
     ("text drawtext出力", check_text_drawtext_in_cmd),
     ("text 縁取り・影出力", check_text_border_shadow_in_cmd),
     ("text 既定で縁取り・影なし", check_text_default_no_border_shadow),
@@ -5254,8 +5267,12 @@ def check_avolume_replaces_again_and_afade():
     o.duration = 5
     o <= avolume(0.8) & avolume(lambda u: u)
     filters = _build_audio_effect_filters(o, 5)
+    # t は初期化時の NaN 評価を避けるため if(isnan(t),0,t) に包む
+    # （filters/audio.py の _VOLUME_T_EXPR。tests/test_volume_nan.py）。
+    # 時間で変わる音量の前には、フレームを 256 サンプルに刻む asetnsamples が入る
     expected = ["volume=volume='0.8':eval=frame",
-                "volume=volume='clip((t)/5\\,0\\,1)':eval=frame"]
+                "asetnsamples=n=256:p=0",
+                "volume=volume='clip(if(isnan(t)\\,0\\,t)/5\\,0\\,1)':eval=frame"]
     if filters != expected:
         return False, f"volume フィルタが変わった: {filters}"
     return True, str(filters)
@@ -5984,6 +6001,53 @@ def check_tts_zero_byte_cache_is_not_a_hit():
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 
+def check_flip_both_false():
+    """flip: horizontal/vertical が両方 False → ValueError（何も反転しない指定）"""
+    try:
+        flip(horizontal=False, vertical=False)
+        return False, "例外が発生しませんでした"
+    except ValueError as e:
+        msg = str(e)
+        return (True, msg) if "両方 False" in msg else (False, msg)
+
+
+def check_flip_non_bool():
+    """flip: bool 以外（1 / "yes"）→ TypeError（truthy で黙って通さない）"""
+    for kwargs in ({"horizontal": 1}, {"vertical": "yes"}):
+        try:
+            flip(**kwargs)
+            return False, f"{kwargs}: 例外が発生しませんでした"
+        except TypeError as e:
+            if "True / False" not in str(e):
+                return False, str(e)
+    return True, "bool 以外は TypeError"
+
+
+def check_unknown_transform_rejected():
+    """_build_transform_filters: 未知の Transform 名 → ValueError（黙って捨てない）"""
+    from scriptvedit.filters.video import _build_transform_filters
+    _mk_project()
+    obj = Object(asset("images/shape_badge.png"))
+    obj.transforms.append(Transform("no_such_transform"))
+    try:
+        _build_transform_filters(obj)
+        return False, "例外が発生しませんでした"
+    except ValueError as e:
+        msg = str(e)
+        return (True, msg) if "no_such_transform" in msg else (False, msg)
+
+
+def check_sfx_at_bool_rejected():
+    """sfx: at=True → ValueError（数値1つは受けるが bool は時刻ではない）"""
+    _mk_project()
+    try:
+        sfx(_require_asset("audio/効果音.mp3"), at=True)
+        return False, "例外が発生しませんでした"
+    except ValueError as e:
+        msg = str(e)
+        return (True, msg) if "at" in msg else (False, msg)
+
+
 ALL_TESTS += [
     # --- manifest / describe: レイヤー間タイムラインの独立性 ---
     ("describe レイヤー時間制約", check_describe_has_layer_timeline_constraint),
@@ -6018,6 +6082,11 @@ ALL_TESTS += [
     ("atempo 不正値拒否", check_atempo_invalid_rate_rejected),
     ("audit総尺は例外を伝播", check_audit_total_duration_propagates_attribute_error),
     ("tts 0バイト残骸は非命中", check_tts_zero_byte_cache_is_not_a_hit),
+    # --- flip / Transform ディスパッチ / sfx ---
+    ("flip 両方False", check_flip_both_false),
+    ("flip bool以外", check_flip_non_bool),
+    ("未知Transformを拒否", check_unknown_transform_rejected),
+    ("sfx at=True拒否", check_sfx_at_bool_rejected),
 ]
 
 

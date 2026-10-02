@@ -106,17 +106,20 @@ def _echo_stderr(line):
             pass
 
 
-def _tee_stderr(stream, tail):
+def _tee_stderr(stream, tail, echo=True):
     """stderr を読み切りながら親へ流し、末尾 maxlen 行を deque へ溜める。
 
     パイプを読まずに待つとバッファが埋まった時点で ffmpeg 側が
     ブロックしてデッドロックするため、必ず EOF まで読み切る。
+    echo=False なら親へは流さず deque へ溜めるだけにする（出力を解析する
+    測定用の実行。-loglevel info の大量の情報行で端末を埋めない）。
     """
     try:
         for raw in iter(stream.readline, b""):
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
             tail.append(line)
-            _echo_stderr(line)
+            if echo:
+                _echo_stderr(line)
     except Exception:
         pass
     finally:
@@ -126,10 +129,11 @@ def _tee_stderr(stream, tail):
             pass
 
 
-def _spawn_ffmpeg(run_cmd, timeout):
+def _spawn_ffmpeg(run_cmd, timeout, echo=True):
     """ffmpeg を起動し、(終了コード, stderr末尾200行) を返す。
 
-    stderr は読み取りスレッドで消費する（親 stderr へティーしつつ deque へ）。
+    stderr は読み取りスレッドで消費する（親 stderr へティーしつつ deque へ。
+    echo=False なら親へは流さない）。
     タイムアウト・Ctrl+C では kill してから読み取りスレッドを join し、
     例外はそのまま伝播させる（従来の subprocess.run(timeout=) と同じ型）。
     """
@@ -137,7 +141,7 @@ def _spawn_ffmpeg(run_cmd, timeout):
     proc = subprocess.Popen(
         run_cmd, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE)
     reader = _threading.Thread(
-        target=_tee_stderr, args=(proc.stderr, tail), daemon=True)
+        target=_tee_stderr, args=(proc.stderr, tail, echo), daemon=True)
     reader.start()
     try:
         returncode = proc.wait(timeout=timeout)
@@ -210,12 +214,18 @@ def _atomic_write_bytes(path, data):
 def _atomic_write_text(path, text, encoding="utf-8"):
     """テキスト版の原子的書き込み（_atomic_write_bytes と同じ機構）
 
-    テキストモードで書く（改行変換は既定のまま = 従来の open("w") と同一挙動）。
+    改行は**変換せず LF のまま**書く（newline="\\n"）。Windows の既定
+    （"\\n" → "\\r\\n"）で書くと、FFmpeg 8 の drawtext が textfile の "\\r\\n" を
+    改行2回として描き、複数行 text() の行間が倍になる（実測）。
+    drawtext 用に限らず全呼び出し元（karaoke の ASS・FFMETADATA チャプター・
+    concat リスト・anchors.json・チャプター目次/メタデータ）が LF で問題なく、
+    内容ハッシュ名のキャッシュが OS によらず同じバイト列になる利点もあるため、
+    ここで一律に LF へ揃える。
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp_path = _unique_tmp_path(path)
     try:
-        with open(tmp_path, "w", encoding=encoding) as f:
+        with open(tmp_path, "w", encoding=encoding, newline="\n") as f:
             f.write(text)
         os.replace(tmp_path, path)
     finally:
@@ -249,7 +259,9 @@ def _externalize_long_filters(cmd):
                     fd, path = tempfile.mkstemp(suffix=".txt", prefix="svfilter_")
                     # 書き込み前に記録する（途中で例外になっても掃除対象から漏れない）
                     tmp_files.append(path)
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    # 改行は変換しない（コマンドライン引数と同じバイト列にする。
+                    # CRLF 変換で引用値の中に CR が混じるのを防ぐ）
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
                         f.write(new_cmd[i + 1])
                     new_cmd[i] = f"-/{opt.lstrip('-')}"
                     new_cmd[i + 1] = path
@@ -293,18 +305,23 @@ def _check_ffmpeg_version():
             f"https://ffmpeg.org/ から 8 系を導入してください。")
 
 
-def _run_ffmpeg(cmd, timeout=600, *, context=None):
+def _run_ffmpeg(cmd, timeout=600, *, context=None, echo=True):
     """ffmpegコマンドを実行する（失敗時は診断可能な FFmpegError を送出）。
 
     長大フィルタは一時ファイル経由で渡す。**失敗時だけ一時ファイルを残し**、
     パスをメッセージに出す（ffmpeg が指した式そのものが消えると原因を追えない）。
     context には「どのオブジェクト・どの生成物のための実行か」を渡す。
+    戻り値は stderr の末尾200行（list）。出力を解析する呼び出し元
+    （loudness.py の測定パス）が使う。echo=False なら stderr を親へ流さない。
     """
     _check_ffmpeg_version()
     run_cmd, tmp_files = _externalize_long_filters(_normalize_ffmpeg_cmd(cmd))
     keep_tmp = False
     try:
-        returncode, tail = _spawn_ffmpeg(run_cmd, timeout)
+        # echo は既定（True）のときは渡さない。_spawn_ffmpeg を差し替える
+        # テスト用の偽物（(run_cmd, timeout) だけを受ける）をそのまま使えるように
+        spawn_kwargs = {} if echo else {"echo": False}
+        returncode, tail = _spawn_ffmpeg(run_cmd, timeout, **spawn_kwargs)
         if returncode != 0:
             keep_tmp = bool(tmp_files)
             raise FFmpegError(
@@ -318,6 +335,7 @@ def _run_ffmpeg(cmd, timeout=600, *, context=None):
                     os.remove(path)
                 except OSError:
                     pass
+    return tail
 
 
 def _run_ffmpeg_to_cache(cmd, cache_path, timeout=600, *, context=None):

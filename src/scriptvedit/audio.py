@@ -14,6 +14,7 @@ from scriptvedit.context import current_project
 from scriptvedit.cache import _sig_key, _src_signature
 from scriptvedit.effects.basic import avolume
 from scriptvedit.ffmpeg import _atomic_write_text
+from scriptvedit.filters.audio import _MIX_AUDIO_FORMAT
 from scriptvedit.media import _finalize_generated_object
 from scriptvedit.objects import AudioEffect, Object
 from scriptvedit.state import (
@@ -25,20 +26,69 @@ from scriptvedit.validate import _require_number, _validate_ffmpeg_color
 
 # --- オーディオ系ファクトリ ---
 
-def duck_under(other, *, ratio=8, threshold=0.05, attack=20, release=250):
-    """sidechaincompress で other（ナレーション等）再生中に自音量を下げるAudioEffect。
+def duck_under(*others, ratio=8, threshold=0.05, attack=20, release=250):
+    """sidechaincompress で others（ナレーション等）再生中に自音量を下げるAudioEffect。
 
-    other は同じProjectに存在する音声Objectを指定する。"""
-    if not isinstance(other, Object):
-        raise TypeError(f"duck_under: other は音声Objectを指定してください: {type(other)}")
-    return AudioEffect("duck_under", other=other, ratio=ratio,
+    others は同じProjectに存在する音声Object（Narration は自動で .audio）を
+    1つ以上指定する。duck_under(a, b, c) と duck_under([a, b, c]) のどちらでもよい。
+    複数渡すと、どれか1つでも鳴っている間は下がる（サイドチェーンは各 other を
+    合算した1本）。検出は各 other の形式統一（48kHz・ステレオ化）より前の音声で
+    行うので、モノラルのナレーションも元の音量のまま threshold と比べられる
+    （複数のときは合算のため各 other を 48kHz モノラルへダウンミックスする）。"""
+    targets = _normalize_duck_targets(others)
+    # params["other"] は常に Object のタプル（読む側は _duck_targets 経由で扱う）
+    return AudioEffect("duck_under", other=targets, ratio=ratio,
                        threshold=threshold, attack=attack, release=release)
+
+
+def _normalize_duck_targets(others):
+    """duck_under の相手を Object のタプルへ正規化する（検証込み）。
+
+    list/tuple は1段だけ展開し、Narration は .audio に置き換える。
+    同じ音声の重複指定は、サイドチェーンを二重に足して効きが変わるので拒否する。
+    """
+    flat = []
+    for arg in others:
+        if isinstance(arg, (list, tuple)):
+            flat.extend(arg)
+        else:
+            flat.append(arg)
+    if not flat:
+        raise TypeError(
+            "duck_under: other（下げる合図になる音声Object）を1つ以上指定してください"
+            "（例: bgm <= duck_under(narration_audio)）")
+    targets = []
+    for item in flat:
+        if isinstance(item, Narration):
+            item = item.audio
+        if not isinstance(item, Object):
+            raise TypeError(
+                f"duck_under: other は音声Object（Narration なら .audio）を"
+                f"指定してください: {type(item)}")
+        if any(t is item for t in targets):
+            raise ValueError(
+                f"duck_under: other に同じ音声が重複しています: {item.source}")
+        targets.append(item)
+    return tuple(targets)
+
+
+def _duck_targets(effect):
+    """duck_under の AudioEffect から相手の Object のタプルを返す"""
+    other = effect.params.get("other")
+    if other is None:
+        return ()
+    if isinstance(other, (list, tuple)):
+        return tuple(other)
+    return (other,)
 
 
 def loop(until=None):
     """aloop で音声を until 時刻までループさせるAudioEffect。
 
-    until 省略時は Project.duration までループする。"""
+    ループする尺は「time(N) / until() / show(N) で決まった尺 → until（タイムラインの
+    絶対秒）→ Project の総尺」の順で決まる（project.py の音声チェーン）。
+    引数なしの time() と組み合わせてはいけない: time() は尺を素材の長さで確定させるので
+    bgm.time() <= loop() は1回再生で終わる。bgm <= loop() と time を呼ばずに書く。"""
     return AudioEffect("loop", until=until)
 
 
@@ -165,7 +215,11 @@ def audio_sequence(*objs, crossfade=1.0):
     if any(volume != 1.0 for volume in input_volumes):
         sigs.append(
             "input_volumes=" + ",".join(repr(volume) for volume in input_volumes))
-    sigs.extend([f"cf={crossfade}", f"ev={_ENGINE_VER}"])
+    # 入力形式の統一（下の aformat）は出力の中身を変えるので鍵にも入れる。
+    # 入れないと、統一前に焼いた（先頭入力の形式に潰れた）旧キャッシュが
+    # 命中し続けて直らない。
+    sigs.extend([f"cf={crossfade}", f"afmt={_MIX_AUDIO_FORMAT}",
+                 f"ev={_ENGINE_VER}"])
     key = _sig_key(sigs)
     cache_path = os.path.join(_ARTIFACT_DIR, "aseq", f"{key}.m4a")
 
@@ -175,12 +229,14 @@ def audio_sequence(*objs, crossfade=1.0):
     parts = []
     input_refs = []
     for i, volume in enumerate(input_volumes):
-        ref = f"[{i}:a]"
-        if volume != 1.0:
-            out = f"[avol{i}]"
-            parts.append(f"{ref}volume={volume!r}{out}")
-            ref = out
-        input_refs.append(ref)
+        # 形式の統一（48kHz・ステレオ・fltp）: acrossfade の出力形式も先頭入力に
+        # 従うため、揃えずに連結するとモノラル 24kHz の TTS が先頭に来ただけで
+        # 後続のステレオ BGM まで 24kHz・L/R 平均に潰れる（_MIX_AUDIO_FORMAT 参照）
+        chain = [f"volume={volume!r}"] if volume != 1.0 else []
+        chain.append(_MIX_AUDIO_FORMAT)
+        out = f"[af{i}]"
+        parts.append(f"[{i}:a]{','.join(chain)}{out}")
+        input_refs.append(out)
     cur = input_refs[0]
     for i in range(1, n):
         out = f"[axf{i}]"
@@ -214,10 +270,17 @@ def audio_sequence(*objs, crossfade=1.0):
 def sfx(source, at, *, volume=1.0):
     """同一音源を複数時刻(at)に配置した1つの音声Objectを生成（adelay+amix合成）。
 
-    at は秒のリスト。生成Objectは開始0でタイムラインに配置する想定。"""
+    at は秒のリスト、または数値1つ（`at=2.5` は `at=[2.5]` と同じ）。
+    生成Objectは開始0でタイムラインに配置する想定。"""
     _validate_audio_source("sfx", source)
+    # 数値1つは1要素のリストとして扱う（describe の例 `sfx(..., at=2.5)` の形）。
+    # bool は int の派生だが時刻ではないので、ここでは包まず下の検証で弾く
+    if isinstance(at, (int, float)) and not isinstance(at, bool):
+        at = [at]
     if not isinstance(at, (list, tuple)) or len(at) == 0:
-        raise ValueError("sfx: at には配置時刻(秒)のリストを指定してください")
+        raise ValueError(
+            "sfx: at には配置時刻(秒)を数値1つ、または数値のリストで指定してください"
+            f"（例: at=2.5 / at=[0.5, 1.5]）: {at!r}")
     for t in at:
         _require_number("sfx", "at要素", t, 0, None)
     _require_number("sfx", "volume", volume, 0, None)
@@ -250,7 +313,10 @@ def sfx(source, at, *, volume=1.0):
     cmd = ["ffmpeg", "-y", "-i", source,
            "-filter_complex", ";".join(parts), "-map", "[a]",
            "-c:a", "aac", "-b:a", "192k", "-t", str(total), cache_path]
-    return _finalize_generated_object(cache_path, cmd, [source], total)
+    obj = _finalize_generated_object(cache_path, cmd, [source], total)
+    # 実際に鳴る区間（p.audit() の重なり判定が [0, total] ではなくこちらを使う）
+    obj._sfx_hits = tuple((t, t + srclen) for t in times)
+    return obj
 
 
 def voice(text, *, backend=None, speaker=None, speed=1.0, pitch=0.0, volume=1.0,

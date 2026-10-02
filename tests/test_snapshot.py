@@ -26,7 +26,7 @@ _FFPROBE_TESTS = frozenset({
     "test01", "test02", "test06", "test07", "test08", "test09", "test11",
     "test12", "test13", "test14", "test15", "test17", "test18", "test20",
     "test23", "test25", "test30", "test36", "test56", "test57", "test58",
-    "test79", "test80", "test82", "test84", "test89",
+    "test79", "test80", "test82", "test84", "test89", "test99",
 })
 
 _TEST91_CHECKPOINT_RE = re.compile(

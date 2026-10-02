@@ -16,7 +16,7 @@
     "-i",
     "assets/audio/bgm_loop.mp3",
     "-filter_complex",
-    "[1:a]atrim=duration=2,asetpts=PTS-STARTPTS[a0];[2:a]aloop=loop=-1:size=1435763,atrim=duration=5,asetpts=PTS-STARTPTS,volume=volume='0.7':eval=frame,adelay=2000:all=1[a1];[a0]asplit[dmix1][dside_src1];[dside_src1]apad[dside1];[a1][dside1]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=250[duck1];[dmix1][duck1]amix=inputs=2:normalize=0[aout]",
+    "[1:a]atrim=duration=2,asetpts=PTS-STARTPTS,asplit[apre0][dside_src1];[apre0]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];[2:a]aloop=loop=-1:size=1435763,atrim=duration=5,asetpts=PTS-STARTPTS,volume=volume='0.7':eval=frame,adelay=2000:all=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];[dside_src1]aformat=sample_fmts=fltp:sample_rates=48000,apad[dside1];[a1][dside1]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=250[duck1];[a0][duck1]amix=inputs=2:normalize=0[aout]",
     "-map",
     "0:v",
     "-map",

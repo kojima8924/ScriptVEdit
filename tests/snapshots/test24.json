@@ -16,7 +16,7 @@
     "-i",
     "assets/video/clip_with_audio.mp4",
     "-filter_complex",
-    "[1:v]trim=end=3.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,3)'[v1];[2:a]atrim=duration=3,asetpts=PTS-STARTPTS[a0]",
+    "[1:v]trim=end=3.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,3)'[v1];[2:a]atrim=duration=3,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0]",
     "-map",
     "[v1]",
     "-map",

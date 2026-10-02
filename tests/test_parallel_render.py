@@ -182,7 +182,7 @@ def test_parallel_chunk_command_structure(tmp_path, monkeypatch):
     assert fc0.count("drawtext") == 1
     assert fc1.count("drawtext") == 1
     # フィルタ式は絶対時刻基準のまま（chunk1 に b の絶対 enable が残る）
-    assert "between(t\\,3\\,6)" in fc1
+    assert "between(t\\,2.999999\\,6)" in fc1
 
     # フレーム数の正確さ: 6.0s*10fps=60 → 30+30
     for c in (c0, c1):
@@ -347,6 +347,64 @@ def test_parallel_real_render_writes_chapters(tmp_path):
     chapters = json.loads(probe.stdout)["chapters"]
     titles = [c.get("tags", {}).get("title") for c in chapters]
     assert titles == ["イントロ", "本編"], probe.stdout
+
+
+def test_parallel_draft_audio_leg_has_no_video_scale(tmp_path, monkeypatch):
+    """draft=True の音声レグには縮小フィルタ（出力先の無い [vdraft]）を付けない
+
+    音声レグは映像を -map しないため、縮小を付けると未接続の出力ラベルが
+    グラフに残り FFmpeg が失敗する。チャンク側は従来どおり縮小する。
+    """
+    from scriptvedit.filters.video import _DRAFT_SCALE_FILTER
+    calls = _mock_run(monkeypatch)
+    out = str(tmp_path / "draft.mp4")
+    _build_project(tmp_path, with_audio=True).render(out, parallel=2, draft=True)
+
+    audio_cmds = [c for c in calls if c[-1].endswith("audio.m4a")]
+    assert len(audio_cmds) == 1
+    ac = audio_cmds[0]
+    fc = ac[ac.index("-filter_complex") + 1] if "-filter_complex" in ac else ""
+    assert _DRAFT_SCALE_FILTER not in fc, fc
+    assert "[vdraft]" not in fc, fc
+
+    chunk_cmds = [c for c in calls
+                  if os.path.basename(c[-1]).startswith("chunk_")]
+    assert len(chunk_cmds) == 2
+    for c in chunk_cmds:
+        assert _DRAFT_SCALE_FILTER in c[c.index("-filter_complex") + 1]
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg/ffprobe が無い環境ではスキップ")
+def test_parallel_draft_with_audio_real_render(tmp_path):
+    """render(parallel=2, draft=True) が音声つきで実際に最後まで通ること
+
+    修正前は音声レグが "Error binding filtergraph inputs/outputs" で落ち、
+    RuntimeError（並列レンダの audio が失敗）になっていた。
+    """
+    wav = str(tmp_path / "tone.wav")
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=3", "-ar", "48000", wav],
+        check=True, timeout=60)
+    p = sv.Project()
+    p.configure(width=160, height=90, fps=10, background_color="#203040")
+    body = ("from scriptvedit import *\n"
+            f"tone = Object({wav!r})\n"
+            "tone.time(3)\n")
+    p.layer(_write_layer(tmp_path, "l_draft.py", body), priority=0)
+    out = str(tmp_path / "draft.mp4")
+    p.render(out, parallel=2, draft=True)
+
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "stream=codec_type,width,height", "-of", "json", out],
+        capture_output=True, text=True, timeout=60)
+    streams = json.loads(probe.stdout)["streams"]
+    kinds = sorted(s["codec_type"] for s in streams)
+    assert kinds == ["audio", "video"], probe.stdout
+    video = next(s for s in streams if s["codec_type"] == "video")
+    # ドラフト縮小（trunc(iw/4)*2 : trunc(ih/4)*2）がチャンク側に効いている
+    assert (video["width"], video["height"]) == (80, 44), probe.stdout
 
 
 def test_parallel_reports_failing_chunk(tmp_path, monkeypatch):

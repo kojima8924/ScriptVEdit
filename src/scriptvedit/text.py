@@ -149,7 +149,13 @@ def _ensure_textfile(content):
     「存在すればスキップ」ガードは置かない。ファイル名が内容ハッシュなので、
     中断/ディスクフルで切り詰められた残骸が一度でも出来ると以後どのレンダでも
     再生成されず、drawtext が途中までのテキストを黙って描き続けるため
-    （並列レイヤーからの同時到達も原子的書き込みで無害化する）。"""
+    （並列レイヤーからの同時到達も原子的書き込みで無害化する）。
+
+    改行は LF で書く（_atomic_write_text が改行を変換しない）。FFmpeg 8 の
+    drawtext は "\\r\\n" を改行2回として描くため、Windows 既定の CRLF 変換や
+    呼び出し側の文字列に混じった CR（CRLF ファイルをバイナリで読んだ等）が
+    あると複数行の行間が倍になる。CR は LF へ正規化してから鍵と本文を作る。"""
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
     body = _escape_textfile_content(content)
     key = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
     path = os.path.join(_ARTIFACT_DIR, "text", f"{key}.txt")

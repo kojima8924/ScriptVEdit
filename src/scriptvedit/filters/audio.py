@@ -10,6 +10,36 @@ from scriptvedit.context import current_project
 from scriptvedit.expr import Const
 
 
+# 音声を混ぜる前に全入力を揃える共通形式（48kHz・ステレオ・float planar）。
+# amix / sidechaincompress / acrossfade の出力のチャンネル配置と
+# サンプリング周波数は「先頭入力」に従う（FFmpeg 8 で実測）。入力の並びは
+# priority 順＋生成順なので、モノラル 24kHz の TTS が先頭に来ると、章全体が
+# 24kHz・モノラルになりステレオの BGM が L/R 平均に潰れる。これを防ぐため、
+# 各入力の加工チェーンの**末尾**にこれを付けてから混ぜる。
+# - 末尾に置くこと: aloop / arepeat の size は素材の実サンプルレートで
+#   見積もっているので、先頭で 48kHz へ変えると size が不足しうる。
+# - モノラル → ステレオの自動変換は各チャンネル約 -3dB（パンの法則。
+#   libswresample の再マトリクスが中央を左右へ 1/√2 ずつ振る。実測 -3.01dB）。
+# - 48000 は normalize_audio() の sample_rate 既定値・libopus の固定値と同じ。
+_MIX_AUDIO_FORMAT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+
+# duck_under（sidechaincompress）の検出用枝の形式。検出用枝は相手の加工チェーンの
+# _MIX_AUDIO_FORMAT より**前**から asplit で取り出す（project.py の _build_ffmpeg_cmd）。
+# 揃えた後から取ると、モノラルのナレーションは各チャンネル -3dB のステレオになり、
+# sidechaincompress の既定 link=average では検出レベルがそのまま 3dB 下がる
+# （既定値でダッキングが約 2.6dB 浅くなることを実測）。
+# - 相手が1つ: チャンネル構成は素材のまま、サンプリング周波数だけ本線（48kHz）へ
+#   明示的に揃える（sidechaincompress は全入出力で同じ周波数を要求する。自動の
+#   交渉に任せると、どちらの枝がリサンプルされるかがグラフの並びに左右されうる）。
+_SIDECHAIN_FORMAT = "aformat=sample_fmts=fltp:sample_rates=48000"
+# - 相手が複数: amix で合算するので全枝の形式を揃える必要がある（揃えないと
+#   合算結果が先頭入力の形式に従い、並び順で検出レベルが 3dB 変わる）。
+#   48kHz モノラルへダウンミックスする。rematrix_maxval=1 で係数を正規化するので
+#   ステレオは (L+R)/2 になり、link=average の検出（|L| と |R| の平均）と
+#   左右が同相の音で一致する。モノラルは変換されず元の音量のまま。
+_SIDECHAIN_MIX_FORMAT = "aresample=48000:ochl=mono:rematrix_maxval=1"
+
+
 def _atempo_chain_rates(rate):
     """atempoの有効範囲(0.5〜100)を超えるレートを複数段に分解する。
     範囲内はそのまま1段で返す（既存出力との互換維持）。"""
@@ -77,6 +107,20 @@ def _build_audio_pre_filters(obj):
     return filters
 
 
+# volume フィルタの式で使う時刻 t（NaN を 0 に読み替える）。
+# volume は eval=frame でも**初期化時に1回** t=NaN で式を評価する（FFmpeg 8 の
+# af_volume.c: config_output が変数を NAN で埋めて set_volume を呼ぶ）。
+# clip(NaN/dur,0,1) は NaN なので、式を使う音声1本ごとに
+# "Invalid value NaN for volume, setting to 0" の警告が出て、数百行で本当の
+# エラーが埋もれる。初期化時の値は使われず（各フレームで t を入れて評価し直す）
+# 実害は無いが、ログを汚さないよう NaN の間だけ 0 として評価させる。
+# フレームごとの t は NaN にならないので、出力音声は置き換え前と同一。
+_VOLUME_T_EXPR = "if(isnan(t)\\,0\\,t)"
+
+# 時間で変わる volume の前に入れるフレームの刻み（_build_audio_effect_filters の説明を参照）
+_VOLUME_EXPR_FRAMING = "asetnsamples=n=256:p=0"
+
+
 def _build_audio_effect_filters(obj, dur):
     """音声エフェクトフィルタを生成（avolume）。
 
@@ -87,7 +131,15 @@ def _build_audio_effect_filters(obj, dur):
     for e in obj.audio_effects:
         if e.name == "avolume":
             value_expr = e.params.get("value", Const(1))
-            u_expr = f"clip((t)/{dur}\\,0\\,1)"
+            u_expr = f"clip({_VOLUME_T_EXPR}/{dur}\\,0\\,1)"
             ffmpeg_str = value_expr.to_ffmpeg(u_expr)
+            if not isinstance(value_expr, Const):
+                # 時間で変わる音量は、フレームを細かく刻んでから評価する。
+                # volume（eval=frame）は音声フレーム1枚につき式を1回しか評価しない。
+                # デコーダのフレームは 1024〜4096 サンプル（44.1kHz で最大約 93ms）あり、
+                # 立ち上がりのフェード clip(u/a,0,1) は最初の1枚が丸ごと u=0（無音）になって
+                # 語の頭が最大 93ms 欠ける。256 サンプル（48kHz で約 5ms）に刻めば、
+                # フェードや音量の変化が 5ms 単位で効く。定数の音量は刻む必要が無い。
+                filters.append(_VOLUME_EXPR_FRAMING)
             filters.append(f"volume=volume='{ffmpeg_str}':eval=frame")
     return filters

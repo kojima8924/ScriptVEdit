@@ -7,6 +7,7 @@ import scriptvedit.audio as audio_mod
 import scriptvedit.tts as tts_mod
 from scriptvedit import Project
 from scriptvedit.expr import Const
+from scriptvedit.filters.audio import _MIX_AUDIO_FORMAT
 from scriptvedit.text import _build_drawtext_filter, _text_anchor_xy
 
 
@@ -244,8 +245,11 @@ def test_audio_sequence_accepts_narrations_and_keeps_subtitle_offsets(
 
     cmd = project._pending_compute_cmds[sequence.source]
     filtergraph = cmd[cmd.index("-filter_complex") + 1]
-    assert "[0:a]volume=0.5[avol0]" in filtergraph
-    assert "[avol0][1:a]acrossfade=d=0.1[axf1]" in filtergraph
+    # 各入力は音量の後に 48kHz・ステレオへ揃えてから連結する
+    # （acrossfade の出力形式は先頭入力に従うため）
+    assert f"[0:a]volume=0.5,{_MIX_AUDIO_FORMAT}[af0]" in filtergraph
+    assert f"[1:a]{_MIX_AUDIO_FORMAT}[af1]" in filtergraph
+    assert "[af0][af1]acrossfade=d=0.1[axf1]" in filtergraph
     assert sequence.duration == pytest.approx(0.9)
     assert subtitles[0]._timeline_owner is sequence
     assert subtitles[0]._timeline_offset == 0
