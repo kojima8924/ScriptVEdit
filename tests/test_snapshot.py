@@ -27,6 +27,8 @@ _FFPROBE_TESTS = frozenset({
     "test12", "test13", "test14", "test15", "test17", "test18", "test20",
     "test23", "test25", "test30", "test36", "test56", "test57", "test58",
     "test79", "test80", "test82", "test84", "test89", "test99",
+    # fly_to の anchor 補正は A の寸法（ffprobe）を overlay 式へ定数で入れる
+    "test130",
 })
 
 _TEST91_CHECKPOINT_RE = re.compile(
@@ -50,6 +52,27 @@ _RENDERER_KEY_RES = [
 _RENDERER_DEPENDENT_TESTS = frozenset({
     "test19", "test20", "test21", "test29", "test38", "test87", "test91",
 })
+
+# text_image の PNG の鍵はフォントの内容指紋と Pillow の版を含む（textimage.py）ので、
+# 環境ごとに鍵が変わる。その PNG を入力に取る生成物（fly_to の flight。バケットも
+# PNG のパスから決まる）の鍵ハッシュだけを比較時に畳む（フィルタ文字列・コマンド構造の
+# 検出力は落とさない）
+_TEXT_IMAGE_KEY_RES = [
+    (re.compile(r"(?<=/textimage/)[0-9a-fA-F]{16}(?=\.png)"), "<HASH16>"),
+    (re.compile(r"(?<=/flight/)[0-9a-fA-F]{8}/[0-9a-fA-F]{16}"), "<HASH8>/<HASH16>"),
+]
+_TEXT_IMAGE_DEPENDENT_TESTS = frozenset({"test131"})
+
+# 既定のフォント（OS ごとに違う）で文字を描く図（framekit.build の frames 生成物）は、
+# 鍵にフォントの内容指紋と Pillow の版が入る。生成物の鍵ハッシュだけを比較時に畳む
+_FIGURE_FONT_KEY_RES = [
+    (re.compile(r"(?<=/frames/)[0-9a-fA-F]{16}(?=\.mov)"), "<HASH16>"),
+]
+_FIGURE_FONT_DEPENDENT_TESTS = frozenset({"test126", "test120", "test121", "test122",
+                                          "test117", "test118", "test119",
+                                          # text_transition / odometer（同梱フォントで描くが、
+                                          # 鍵に Pillow の版が入る）
+                                          "test123", "test124", "test125"})
 
 
 def _rel_to_root(s):
@@ -92,20 +115,30 @@ def _normalize_snapshot_comparison(name, value):
     フィルタ文字列・コマンド構造・素材パスはレンダ内容そのものなので保持する。
     スナップショット保存前には呼ばず、具体的なキャッシュ鍵も記録に残す。
     """
-    if name != "test91" and name not in _RENDERER_DEPENDENT_TESTS:
+    if (name != "test91" and name not in _RENDERER_DEPENDENT_TESTS
+            and name not in _TEXT_IMAGE_DEPENDENT_TESTS
+            and name not in _FIGURE_FONT_DEPENDENT_TESTS):
         return value
     if isinstance(value, dict):
-        return {
-            _normalize_snapshot_comparison(name, key):
-            _normalize_snapshot_comparison(name, item)
-            for key, item in value.items()
-        }
+        # 鍵ハッシュを畳むと、同じ種類の生成物が2つ以上ある図（test119・test123〜125 の
+        # frames の .mov）で dict のキーがぶつかり、片方が黙って消える。キーと値の組の
+        # 並べ替えた列にして、どの生成物のコマンドも比較に残す（並び順はハッシュに依らない）
+        pairs = [[_normalize_snapshot_comparison(name, key),
+                  _normalize_snapshot_comparison(name, item)]
+                 for key, item in value.items()]
+        return sorted(pairs, key=lambda p: json.dumps(p, sort_keys=True, ensure_ascii=False))
     if isinstance(value, list):
         return [_normalize_snapshot_comparison(name, item) for item in value]
     if isinstance(value, str):
         text = _TEST91_CHECKPOINT_RE.sub(_TEST91_CHECKPOINT_TOKEN, value)
         if name in _RENDERER_DEPENDENT_TESTS:
             for pattern, repl in _RENDERER_KEY_RES:
+                text = pattern.sub(repl, text)
+        if name in _TEXT_IMAGE_DEPENDENT_TESTS:
+            for pattern, repl in _TEXT_IMAGE_KEY_RES:
+                text = pattern.sub(repl, text)
+        if name in _FIGURE_FONT_DEPENDENT_TESTS:
+            for pattern, repl in _FIGURE_FONT_KEY_RES:
                 text = pattern.sub(repl, text)
         return text
     return value

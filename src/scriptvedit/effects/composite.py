@@ -68,8 +68,10 @@ def mask_wipe(image_path, progress=None):
 def opacity(value):
     """不透明度Effect。value は 0〜1（0=完全透明 / 1=不透明）。
 
-    定数は colorchannelmixer（高速）、Expr/lambda は geq による
-    live アニメーションになる。
+    定数は colorchannelmixer。時間だけで決まる Expr/lambda（u・elapsed・keyframes_sec 等）も
+    コマごとに1回だけ評価して colorchannelmixer で掛ける（sendcmd。点の多い keyframes でも
+    速い。式はコマごとに解析し直すので、128 点で 1 コマ約 0.5ms 増える）。random 等の画素ごとの
+    式だけ geq になる（filters/video.py の _alpha_mul_filters）。
     """
     v = _resolve_param(value)
     if isinstance(v, Const):

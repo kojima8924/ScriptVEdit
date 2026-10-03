@@ -162,17 +162,41 @@ jobs:
           python -m pip install dist/*.whl
           python -c "import scriptvedit; print('import OK:', scriptvedit.MANIFEST_VERSION)"
           python -m scriptvedit describe --name fade > /dev/null
+      - name: 同梱データが wheel に入っていることの確認
+        # package-data の書き漏れは wheel でしか分からない（editable install では src/ を直接
+        # 読むのでテストが通ってしまう）。globe() の陸地の既定（Natural Earth の陸のマスク）と
+        # その出典・利用条件（data/NOTICE.md）、formula() の KaTeX が wheel に入り、
+        # インストールした先から読めることを確かめる
+        run: |
+          python - <<'EOF'
+          import glob, os, sys, zipfile
+          names = set(zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist())
+          need = ["scriptvedit/data/ne_110m_land_1440.png", "scriptvedit/data/NOTICE.md",
+                  "scriptvedit/templates/vendor/katex/katex.min.js"]
+          missing = [n for n in need if n not in names]
+          if missing:
+              print("wheel に入っていない同梱データ:", missing)
+              sys.exit(1)
+          EOF
+          cd /tmp && python -c "
+          import os, scriptvedit.fx_globe as G
+          assert os.path.dirname(G.__file__).find('site-packages') >= 0, G.__file__
+          assert os.path.isfile(G._EARTH_LAND), G._EARTH_LAND
+          print('同梱データ OK:', G._EARTH_LAND)"
       - name: 各 extra の単独クリーンインストール検証
         # extra を1つだけ入れて対応モジュールが import できること(issue #13 P1-5 の回帰防止)
         run: |
           set -e
           WHEEL=$(ls dist/*.whl)
-          declare -A MODS=( [morph]=scriptvedit.morph [beat]=scriptvedit.beat [tools]=scriptvedit.testkit [web]=scriptvedit.web [tts]=scriptvedit.tts )
-          for ex in morph beat tools web tts; do
+          declare -A MODS=( [morph]=scriptvedit.morph_flight [beat]=scriptvedit.beat [tools]=scriptvedit.testkit [web]=scriptvedit.web [tts]=scriptvedit.tts [figures]=scriptvedit.framekit )
+          for ex in morph beat tools web tts figures; do
             python -m venv "/tmp/venv_$ex"
             "/tmp/venv_$ex/bin/pip" install --quiet "${WHEEL}[$ex]"
             "/tmp/venv_$ex/bin/python" -c "import importlib; importlib.import_module('${MODS[$ex]}'); print('$ex OK')"
           done
+          # framekit は numpy・opencv-python・Pillow を関数の中で遅延 import するので、
+          # import だけでは extra の中身を確かめられない。need() で3つを実際に読み込む
+          /tmp/venv_figures/bin/python -c "import scriptvedit.framekit as fk; fk.need('ci'); print('figures deps OK')"
       - name: 成果物をアップロード
         uses: actions/upload-artifact@v4
         with:

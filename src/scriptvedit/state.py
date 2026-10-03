@@ -118,11 +118,23 @@ _BAKE_PIXFMT_VER = "1"
 _BAKEABLE_EFFECTS = {"scale", "fade", "trim", "morph_to", "rotate_to", "wipe", "color_shift",
                      "chroma_key", "vignette", "pixelize", "glow", "lut", "glitch",
                      "perspective_warp", "lens", "ken_burns", "drop_shadow", "outline",
-                     "explode_to", "assemble_from",
+                     "explode_to", "assemble_from", "fly_to",
                      "mask", "mask_wipe", "opacity", "rounded", "tint"}
 
 # 終端フレーム生成Effect（bakeable末尾に1つだけ・映像を生成する）
-_TERMINAL_FRAME_EFFECTS = {"morph_to", "explode_to", "assemble_from"}
+_TERMINAL_FRAME_EFFECTS = {"morph_to", "explode_to", "assemble_from", "fly_to"}
+
+# fly_to（morph_flight.py）の選択肢。実装（effects/terminal.py の検証・
+# morph_flight.py の分岐）と manifest の choices が同じ集合を見るように一本化する
+# （_AUDIO_VIZ_KINDS と同じ方式）。
+#   match      … 粒の対応の付け方。ot=スライスした最適輸送（移動の総量が小さい・
+#                道すじが交差しにくい）/ angle=重心まわりの角度の順 / random=無作為
+#   stagger_by … 粒が出発する順番。x / y=横 / 縦の並びで進む向きの先頭から /
+#                distance=遠くへ行く粒から / random=無作為
+#   color_path … 粒の色の通り道（morph.py の mix_oklab）。oklab=直線 / oklch=色相を回す
+_FLY_MATCH_MODES = ("ot", "angle", "random")
+_FLY_STAGGER_BY = ("x", "y", "distance", "random")
+_FLY_COLOR_PATHS = ("oklab", "oklch")
 
 # 終端フレーム生成Effect に共通の時間指定（秒）。フレーム生成（morph.py）には
 # 渡さず、チェックポイントの計画（checkpoint.py の _terminal_frame_plan）が読む:

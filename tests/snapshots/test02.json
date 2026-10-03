@@ -18,7 +18,7 @@
     "-i",
     "__cache__/artifacts/checkpoint/294bde45/7a4da4f1f6ee25b2.png",
     "-i",
-    "__cache__/artifacts/checkpoint/b00c4c21/dcc5990bf68676c6.mkv",
+    "__cache__/artifacts/checkpoint/b00c4c21/d5af1e0b099f2cf6.mkv",
     "-filter_complex",
     "[1:v]trim=end=4.066666666666666[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,4)'[v1];[2:v]trim=end=4.066666666666666[obj2];[v1][obj2]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,4)'[v2]",
     "-map",
@@ -51,7 +51,7 @@
       "rgba",
       "__cache__/artifacts/checkpoint/294bde45/7a4da4f1f6ee25b2.png"
     ],
-    "__cache__/artifacts/checkpoint/b00c4c21/dcc5990bf68676c6.mkv": [
+    "__cache__/artifacts/checkpoint/b00c4c21/d5af1e0b099f2cf6.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -66,7 +66,7 @@
       "-i",
       "assets/images/shape_figure.png",
       "-vf",
-      "scale=iw*0.35:ih*0.35,scale=w='trunc(iw*((0.5+(0.5*clip((t-0)/4/,0/,1))))/2)*2':h='trunc(ih*((0.5+(0.5*clip((t-0)/4/,0/,1))))/2)*2':eval=frame,format=rgba,pad=396:396:(ow-iw)/2:(oh-ih)/2:color=0x00000000:eval=frame,copy,format=rgba,geq=r='r(X/,Y)':g='g(X/,Y)':b='b(X/,Y)':a='alpha(X/,Y)*clip(clip((T-0)/4/,0/,1)/,0/,1)'",
+      "scale=iw*0.35:ih*0.35,scale=w='trunc(iw*((0.5+(0.5*clip((t-0)/4/,0/,1))))/2)*2':h='trunc(ih*((0.5+(0.5*clip((t-0)/4/,0/,1))))/2)*2':eval=frame,format=rgba,pad=396:396:(ow-iw)/2:(oh-ih)/2:color=0x00000000:eval=frame,copy,format=rgba,format=gbrap,sendcmd=c='0 [expr] colorchannelmixer@fxe1 aa clip(clip((T-0)/4//,0//,1)//,0//,1)',colorchannelmixer@fxe1=aa=0.0",
       "-c:v",
       "ffv1",
       "-level",
@@ -76,7 +76,7 @@
       "-an",
       "-t",
       "4.033333",
-      "__cache__/artifacts/checkpoint/b00c4c21/dcc5990bf68676c6.mkv"
+      "__cache__/artifacts/checkpoint/b00c4c21/d5af1e0b099f2cf6.mkv"
     ]
   }
 }

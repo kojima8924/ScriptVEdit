@@ -12,7 +12,7 @@
     "-i",
     "color=c=black:s=1280x720:d=2:r=30",
     "-i",
-    "__cache__/artifacts/checkpoint/ee04ebc2/229bca4fb39b9354.mkv",
+    "__cache__/artifacts/checkpoint/ee04ebc2/35859a5a21767e54.mkv",
     "-filter_complex",
     "[1:v]trim=end=2.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,2)'[v1]",
     "-map",
@@ -53,7 +53,7 @@
       "2",
       "__cache__/artifacts/web/test19_scene/cfe0447beba8b15b.webm"
     ],
-    "__cache__/artifacts/checkpoint/ee04ebc2/229bca4fb39b9354.mkv": [
+    "__cache__/artifacts/checkpoint/ee04ebc2/35859a5a21767e54.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -66,7 +66,7 @@
       "-i",
       "__cache__/artifacts/web/test19_scene/cfe0447beba8b15b.webm",
       "-vf",
-      "scale=iw*0.5:ih*0.5,format=rgba,geq=r='r(X/,Y)':g='g(X/,Y)':b='b(X/,Y)':a='alpha(X/,Y)*clip(clip((T-0)/2/,0/,1)/,0/,1)'",
+      "scale=iw*0.5:ih*0.5,format=rgba,format=gbrap,sendcmd=c='0 [expr] colorchannelmixer@fxe0 aa clip(clip((T-0)/2//,0//,1)//,0//,1)',colorchannelmixer@fxe0=aa=0.0",
       "-c:v",
       "ffv1",
       "-level",
@@ -76,7 +76,7 @@
       "-an",
       "-t",
       "2.033333",
-      "__cache__/artifacts/checkpoint/ee04ebc2/229bca4fb39b9354.mkv"
+      "__cache__/artifacts/checkpoint/ee04ebc2/35859a5a21767e54.mkv"
     ]
   }
 }

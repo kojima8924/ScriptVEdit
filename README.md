@@ -13,6 +13,9 @@
 - **時間分割並列レンダ** — 総尺をフレーム境界で N 分割し、別プロセスで並列レンダして無劣化 concat。
   実測（2分56秒・87オブジェクトの実プロジェクトを20コアPCで計測）で**逐次 1012 秒 → 並列8 で 106 秒**（→「時間分割並列レンダ」節）
 - **AI が読める機能マニフェスト** — `python -m scriptvedit describe` で全機能のシグネチャ・引数レンジを JSON / Markdown 出力（→「ケイパビリティ・マニフェスト」節）
+- **図解アニメ** — 正規表現の照合の後戻り（`regex_view`）・番号つきの箱の列（`slots`）・文字列の組み替え（`text_transition` / `odometer`）・
+  点と線の上を流れるパケット（`flow_graph` / `flow_tree`）・点で描いた地球（`globe`）を、コマごとに Python で描いた透過動画の
+  Object として1行で置ける。共通部品 `scriptvedit.framekit` で自作の図も描ける（→「図を描く部品（framekit）」節）
 
 素材は画像・動画・音声のほか、HTML（Playwright 経由）・LaTeX 数式（KaTeX 同梱・オフライン）・TTS 音声も
 同じ Object として扱える。出力は mp4 / gif / webp / 連番PNG / 透過webm。
@@ -33,6 +36,9 @@ FFmpeg 8 の機能を使うため、初回実行時にメジャーバージョ�
 - Playwright + Chromium（テンプレート / web Object / slide / `formula` 使用時。KaTeX は同梱のためネットワーク不要）
 - numpy + scipy（`beat_sync` 使用時。scipy はビート検出に必須）
 - numpy + PIL（`scriptvedit.testkit` の SSIM検証。scipy は任意で高速化）
+- numpy + opencv-python + Pillow（図解アニメ `regex_view` / `slots` / `text_transition` / `odometer` /
+  `flow_graph` / `flow_tree` / `globe` と、その部品 `scriptvedit.framekit`。`pip install "scriptvedit[figures]"`）
+- numpy + scipy + opencv-python + Pillow + tqdm（`morph_to` / `explode_to` / `assemble_from` / `fly_to`。`pip install "scriptvedit[morph]"`）
 - Pillow（`storyboard` 使用時）
 - TTS（`voice` / `narrate` 使用時。`scriptvedit.tts` 経由。いずれか1つ）
   - VOICEVOX エンジン（`backend="voicevox"`。オフライン・キャラボイス。別途起動が必要）
@@ -44,7 +50,7 @@ FFmpeg 8 の機能を使うため、初回実行時にメジャーバージョ�
 ```
 git clone https://github.com/kojima8924/ScriptVEdit.git && cd ScriptVEdit
 pip install -e .            # コアは標準ライブラリのみ
-pip install -e .[all]       # morph / web / beat / tts(edge-tts) / tools の全機能
+pip install -e .[all]       # morph / figures / web / beat / tts(edge-tts) / tools の全機能
 ```
 
 `pip install -e .` 後はどのディレクトリからでも `from scriptvedit import *` で使える。
@@ -378,14 +384,14 @@ checkpointで焼き込まれるか、レンダリング時にoverlay座標で解
 | Effect | trim | bakeable | 時間影響あり（ベイク尺に反映される唯一の例外） |
 | Effect | chroma_key, vignette, pixelize, glow, lut, glitch, perspective_warp, lens, ken_burns, drop_shadow, outline | bakeable | 「映像エフェクト」節 |
 | Effect | mask, mask_wipe, opacity, rounded, tint | bakeable | 「合成・コンポジション」節（tint は色の塗り替え） |
-| Effect | morph_to, explode_to, assemble_from | bakeable | 終端フレーム生成。bakeable ops の末尾に1つだけ置ける |
+| Effect | morph_to, explode_to, assemble_from, fly_to | bakeable | 終端フレーム生成。bakeable ops の末尾に1つだけ置ける |
 | Effect | move（move_along / path_bezier / throw / inertia も内部は move） | live | overlay座標で解釈 |
 | Effect | shake | live | overlay座標にsin/cosオフセット加算 |
 | Effect | delete | live | overlay除外 |
 | Effect | speed, reverse, freeze_frame, repeat（`obj * n`） | live | 時間軸を変える（「時間操作」節） |
 | Effect | blend_mode, blur_background_fill | live | 合成経路の切り替え / キャンバス固定 |
 
-bakeable な Effect の正は `src/scriptvedit/state.py` の `_BAKEABLE_EFFECTS`（25種）で、
+bakeable な Effect の正は `src/scriptvedit/state.py` の `_BAKEABLE_EFFECTS`（26種）で、
 Transform は全て bakeable。`describe` の各エントリの `bakeable` でも確認できる。
 `pip()` は scale → rounded → outline → drop_shadow → move の組を返すプリセットなので、
 配置（move）の部分は live のまま残る。
@@ -1058,6 +1064,40 @@ bar.time(5)                         # 2 秒より後は最後のコマが残る
 - **`frames` の `key` は必須**で、`draw` のコードは鍵に入らない。同じ `key`（とコマ数・fps・size）なら `draw` を呼ばずに前回の動画を使う。**描き方や元データを変えたら `key` を変える**（版番号や元データを `key` に入れる。文字列か JSON にできる値）。`size` 省略時は Project の解像度で、`draw` はその寸法で描く。`draw` は実レンダでキャッシュが無いときだけ呼ばれる（dry_run では呼ばれない）
 - 生成物は `__cache__/artifacts/stills/<鍵>.mov` / `frames/<鍵>.mov`（可逆の QuickTime Animation（qtrle）・alpha つき）。前のコマと同じ画素は書かないので、同じ絵が続く区間はほぼ 0 バイト（文字ページ 20枚×6秒 = 1.0MB。FFV1 だと 353MB）。写真のように圧縮の効かない絵は1枚あたり 6〜8MB（1080p）になるが、枚数に比例するだけで尺には比例しない。`stills` の鍵は各画像の内容指紋・各絵のフレーム数・fps・size（パスは入らない。`__cache__` の下に自分で書き出した画像も内容で見る）。生成した動画はコマ数を確かめてからキャッシュへ確定する（`draw` が例外を出した・途中の画像を読めなかった場合は何も残さない）
 
+#### 図を描く部品（framekit）
+
+図解アニメの関数（`regex_view` ほか）が共通で使う内部モジュール `scriptvedit.framekit`（`from scriptvedit import *` には入らない）。
+レイヤーで `import scriptvedit.framekit as fk` すれば、自作の図にも使える。numpy・opencv-python・Pillow が要る（`pip install "scriptvedit[figures]"`）。
+
+```python
+import scriptvedit.framekit as fk
+pal = fk.palette("myfig")                          # 白・灰・赤（fg / accent / muted / line / dim / panel）
+title = fk.label("myfig", "後戻り", size=64, border=4)  # text_image と同じ書式・同じ画素の Sprite
+ease, ease_key = fk.easing("myfig", "ease_out_cubic")
+n = fk.n_frames_for(3.0, 30)
+static = fk.layer_cache()                          # 動かない層は1回だけ描く
+
+def draw(i):
+    d = static(0, lambda: fk.blit(fk.canvas(1920, 1080), title, 120, 80)).copy()
+    u = ease(i / (n - 1))
+    fk.arrow(d, (200, 500), (200 + 1400 * u, 500), pal["accent"], 4, head=20, curve=0.1)
+    fk.dots(d, [(960 + 0.4 * i, 700)], pal["fg"], 3)      # 端数位置でも滑らかに動く
+    return d
+
+fig = fk.build("myfig", kind="myfig", ver=1, params={"ease": ease_key}, draw=draw,
+               n_frames=n, size=(1920, 1080), fonts=[title],   # Sprite の文字・書式も鍵に入る
+               text=fk.text_meta([title], width=1920, height=1080))
+fig.time(5)                                        # 3 秒より後は最後のコマが残る
+```
+
+- 鍵は `['fig', kind, ver, framekit の版, params, size, フォントの内容指紋, Sprite の署名, files の内容指紋, PIL の版]`。`draw` のコードは入らないので、**描き方を変えたら `ver` を上げる**。図に描く文字は **`fonts=` に Sprite（`label` の戻り値）を渡す**（文字・書式・色・縁取りの署名が鍵に入る）か、`params` に入れる。`draw` の中で作る文字や `fonts=` に渡さない文字を直しても、鍵が変わらず古い図が使われる
+- `tests/framekit_golden.py` の金型テストが見張るのは本体の図（framekit と図解ファクトリ）の版定数で、`--golden-update` でも版を上げずに絵だけ変えたものは書き換えずに失敗させる。レイヤーで自作する図の `ver` は見張れないので、描き方を変えたら自分で上げる
+- 生成物の .mov はフォント・`files=` と一緒にレイヤーの依存に載るので、`params` が環境変数や import したデータから来ても、`cache='auto'` のレイヤーキャッシュは鍵が変われば作り直す
+- 座標は SVG と同じ連続座標（画素 (i, j) の中心は (i+0.5, j+0.5)）。線・円・多角形は縁までの距離と向きから画素の面積の被覆率を求めるので、端数位置・端数の幅でも幅どおりに描け、まっすぐな縁はどの角度でも α の量が揺れない（45° の線を 0.05px ずつ動かして 0.02%）。円・丸い端は半径 2px 以上で揺れ 0.4% 以下（もっと小さい点は `dots`）。`dots` は端数位相のスタンプを混ぜて α の量を保ったまま連続に動く。`blit` の縮小はどの倍率でも面積の平均で縮めてから置くので、ズームアウトの途中で急にぼけない
+- `dash=(0, 隙間)` は点線（丸い端なら点・`cap="square"` なら正方形。SVG と同じ）
+- 合成の前の絵だけが欲しいとき（何チャンネルでもよい）は `fk.warp_patch(src, x, y, scale=, angle=, pivot=)` が `blit` と同じ変換で写した `(x0, y0, 絵)` を返す（`text_transition` の字もこれで写す）
+- 時刻は `fk.sec_frame(秒, fps)`（stills と同じ丸め）、拍の並びは `fk.pace(n, first=, ratio=, total=)`（だんだん速くなる数え上げ）
+
 ### 合成・コンポジション
 
 ネストコンポジション・マスク・合成モードなど、素材を重ねて加工する機能。
@@ -1091,7 +1131,7 @@ progress_bar(height=8, color="orange", bg="white@0.15", y=1.0)
 
 - `Object.from_project(sub_project, *, cache="auto")` は `layer()` 登録済みの Project を透過webmにキャッシュ生成して1Objectとして返す（キャッシュ鍵は configure+レイヤーFFP+素材FFP、素材更新で自動再生成）
 - `mask` / `mask_wipe` の画像は輝度をアルファに使う。`mask_wipe(image, progress=None)` の `progress` は 0→1 の進行で Expr/lambda 可（省略時は線形）。グラデーション画像で方向・形状を制御できる
-- `opacity(value)` は定数（0〜1）だと colorchannelmixer で高速、Expr/lambda だと geq によるアニメーション（どちらも bakeable）
+- `opacity(value)` / `fade(alpha)` は定数（0〜1）だと colorchannelmixer。時間だけで決まる Expr/lambda（`u`・`elapsed()`・`ramp()`・`keyframes_sec()` 等）はコマごとに1回だけ評価して colorchannelmixer で掛けるので、点の多い keyframes でも速い（1080p・10 秒の書き出しが 8 / 56 / 128 点で 4.1 / 4.3 / 4.3 秒。式はコマごとに解析し直すので、点が多いほど 1 コマあたり少し（128 点で約 0.5ms）増える）。`fade` の入りと出だけの単純なランプは native の fade、`random()` 等の画素ごとに変わる式だけ geq になる（どちらも bakeable）
 - `blend_mode(mode)` の有効モード: addition/screen/multiply/overlay/darken/lighten/difference/hardlight/softlight/dodge/burn/negation ほか（`add`/`plus` は addition のエイリアス）。overlay フィルタは合成モード非対応のため、このObjectのみ blend + maskedmerge 経路に切り替わる（**キャンバス内合成が前提**）
 - `pip(x=0.7, y=0.7, scale=0.3, radius=12, border=2, border_color="white", shadow=True)` は既存Effectの組（scale→rounded→outline→drop_shadow→move）を返すプリセット
 - `blur_background_fill(blur=20)` / `blend_mode` は live Effect（checkpoint非対象）。`opacity` は式指定でも bakeable
@@ -1185,6 +1225,39 @@ a.time(1.5) <= morph_to(b)
 - 色は `text()` と同じ ffmpeg 形式（色名 / `色名@alpha` / `#RRGGBB[AA]`）
 - 生成物は content-addressed キャッシュ（`__cache__/artifacts/textimage/*.png`）。鍵は文字列・書式・**フォントファイルの内容指紋**・Pillow の版で、フォントのパスには依らない。PNG は構築時（レイヤー実行時）に描く
 - `p.audit()` は `text_image` の文字を `text()` と同じ基準（`text-too-small` / `text-no-decoration` / `text-overflow` / `font-missing-glyph`）で検査する。大きさと幅は **`resize` / `scale` の倍率を掛けた画面上の実寸**（区間ごとに大きさが違うときは最小の区間。`scale` がアニメーションのときは最大の時点）。`zoom` / `crop` と `compute()` で素材化した後の倍率は見ない。`rotate`（0 / 180 度以外）・`rotate_to` で回した文字は幅を求められないので `text-overflow` を出さない。自前の PNG・動画・HTML の中の文字は見ない
+
+### 文字列の組み替え（text_transition / odometer）
+
+文字列の状態 A→B→… を**字単位で組み替える**透過の動画 Object。残る字は滑り、入れ替わる組は上下に離れて運ばれ、
+変わる数字は字の窓の中で回り（roll）、消える字は落ち、新しい字は現れる。各状態のコマは `text_image` と**画素が一致**する。
+numpy・opencv-python・Pillow が要る（dry_run は Pillow とフォントだけ）。
+
+```python
+# 公式の式から要らない部品が落ち、残りが滑って大きな \s+$ になる（エスケープを1トークンに）
+t = text_transition([official, [(r"\s+$", {"size": 150})]], unit=r"\\.|.", leave="fall",
+                    anchor="center", font=mono, size=96, hold=[0.5, 0.8], duration=1.6)
+t.time(3) <= move(x=0.5, y=0.5, anchor="center")
+
+# 赤い '+' が1つ降りる（色は後の状態の区間で決める。残る字の色は oklab で補間）
+text_transition([r"\s+$", [r"\s+", ("+", {"color": "#e0241b"}), "$"]], duration=0.8, enter="drop")
+text_transition(["Fundation", "Foundation"], enter="drop", size=140)
+text_transition(["[1, 2, 10]", "[1, 10, 2]"], unit="code")      # '10' は上、'2' は下へ離れて入れ替わる
+
+# 32ビットの数え盤（変わる桁を右から 0.04 秒ずつ遅らせて回す）と、日時の巻き戻し
+odometer(2**31 - 1, 2**31, base=2, digits=32, signed="twos", group=8, sep=" ", font=mono)
+odometer(2147483647, -2147483648, group=3)                        # 10進の桁区切り
+odometer.text("2038-01-19 03:14:07", "1901-12-13 20:45:52", roll_dir="down")
+```
+
+- `text_transition(states, *, duration=1.2, hold=0.0, unit="char", match="auto", prefer=("replace", "insert", "delete"), move="slide", replace="auto", leave="fade", enter="fade", stagger=0.02, easing="ease_in_out_cubic", anchor="left", roll_dir="auto", motion_blur=True, swing=1.0, **fmt)`
+- **状態**: 文字列か `text_image` と同じ区間のリスト。状態ごとの大きさ・色は区間の書式で変える（対応した字は動きながら拡大・縮小する。縁取りの太さは途中でも `border` px のまま）。`fmt` は `text_image` の書式（`max_width` は受けない）。1状態 400 トークン・3行まで
+- **時間**: `duration` は遷移ごと、`hold` は状態ごと（数かリスト）。コマ数 = (Σhold + Σduration) × fps。`obj.figure.starts` が各状態に着いた秒、`obj.figure.state_frames` がそのコマ
+- **トークン**: `unit` は `char` / `word`（空白もトークン）/ `code`（識別子・数・文字列リテラル・空白・1字の記号）/ 正規表現の文字列
+- **対応**: `match="auto"` は LCS（自前の DP。タイは左を残す）→ 残りの同じ字を近い順に `move` → LCS の隙間で位置のそろう同じ種類の字を `replace` → 残りは `leave` / `enter`。`"edit"`（レーベンシュタイン。タイは `prefer` の順）/ `"position"`（`anchor` 側から位置で）/ `[(i, j), …]`（手で）。結果は `obj.figure.pairs`（番号は `obj.figure.tokens` の添字）
+- **動き**: 消える字が先に去り、残る字が詰め、空いた所へ新しい字が入る。入れ替わる組（`move`）は上下に離れ（左へ行く字が上）、運ばれ、置かれる。残る字は組が離れきっている間だけ滑り、離れる高さはほかの字に重ならないよう構築時に選ぶ。離れる量は `swing` × 行の字の高さ（ascent + descent。既定 1 倍）まで（行の字をちょうど避ける量より浅くはしない。0 で、いつもちょうど避ける高さ）。キャンバスの高さもこれで決まる（以前は `'[1, 2, 10]'` の組が字の 2.2〜2.5 倍振れ、`size=110` で画面の下で切れた）。`replace="auto"`（既定）は数字どうしだけ回し（roll）、ほかは薄れて入れ替わる。`"roll"` は字の窓で縦横とも切り抜いて縦に流す（窓の横は字の送り幅、縦は数字の帯 = 縁取りを含む `0`〜`9` のインク + size × 0.08。字のマスまで流すと ascent の大きいフォントで行の上下へ流れ出た。1字 0.25 秒以上。`roll_dir="auto"` は増えるなら上・減るなら下）。消える字は下の層。`leave="fall"` は行の高さの 0.6 倍落ちて 6 度まで傾く、`"scatter"` は上向きの扇（-135〜-45 度）へ行の高さの 0.5 倍飛んで 20 度まで回り 1.1 倍まで膨らむ（キャンバスの中に収める）、`enter="drop"` / `"rise"` は行の高さの 0.45 倍から入る。`stagger`（既定 0.02 秒）の広がりは `duration` の 30% まで。途中のコマを騒がしくしない大きさにしてある。1コマで字幅の 0.5 倍以上動く字はモーションブラー
+- **揃え**: `anchor`（`left` / `right` / `center`）は共通キャンバスの中の横の揃え。全体の幅が変わっても変わらない字は止まったまま。各状態のコマは `text_image(状態, **fmt, **obj.figure.text_image_kwargs)` と一致する（`text_image_kwargs` は `canvas` と、`fmt` に無ければ `align` と `padding`。`align` / `padding` に `None` は渡さない）。鍵にはフォントの内容指紋と Pillow の版が入る
+- `odometer(from_, to, *, base=10, digits=None, signed=False, group=None, sep=None, duration=1.5, carry="ripple", ripple=0.04, roll_dir="auto", **fmt)` は糖衣（位置で対応・`anchor="right"`）。`carry="together"` で全部同時。`odometer.text(a, b)` は書式つきの文字列の数字の位置だけを回す
+- 使いすぎると忙しくなる。「答えが変わる」瞬間だけに置く。長い日本語の字幕には向かない
 
 ### 数式レンダリング（formula / formula_lines）
 
@@ -1288,6 +1361,199 @@ logo.time(3) <= assemble_from(Object("logo.png"), from_point=(-600, 300), durati
 - `assemble_from(source)` の `source` は集合アニメに消費され、Project のタイムラインから自動除外される
 - 生成エンジンは `scriptvedit.morph`（`generate_explode_frames` / `generate_assemble_frames`）
 - `python -m scriptvedit.morph a.png b.png -o out.mp4` という CLI もあるが（実体は `morph_cli.py`）、こちらは **scriptvedit の ffmpeg パイプラインを通らない**（OpenCV が mp4v で直接書き出す＝アルファ無し・品質指定不可）。プレビュー用途で、本番は `morph_to()` を使う
+
+### 粒子の輸送モーフ（fly_to）
+
+絵 A（fly_to を掛けた Object）の粒が飛んで、離れた所に置いた絵 B（`target`）になる終端フレーム Effect。
+重なる形どうしの変形は `morph_to`（sdf。離れた形だとクロスフェードになる）、離れた形どうしは `fly_to`。
+
+```python
+# 一覧表の赤い「今の状態」（白い部分は透明にした絵）が飛んで、締めの一文になる
+red = text_image([("Stack Overflow　", {"color": "white@0"}), ("34分、止まった", {"color": "#e0241b"}),
+                  "\n", ("Cloudflare　", {"color": "white@0"}), ("今も、書く人しだい", {"color": "#e0241b"})],
+                 size=44, align="right")
+close = text_image("事件は、まだ、終わっていない。", size=96, color="#e0241b")
+red.time(3) <= fly_to(close, offset=(-420, -160), arc=0.2, stagger=0.35, delay=0.3, duration=2.2)
+red <= move(x=0.68, y=0.62, anchor="center")
+```
+
+- `offset=(dx, dy)` は A の中心から B の中心までのずれ（A の絵の px。fly_to の前の Transform を掛けた後）。B の左上は A の左上から `(⌈Wa/2⌉ + ⌊dx − Wb/2⌋, ⌈Ha/2⌉ + ⌊dy − Hb/2⌋)`（A の中心を整数の画素に置いたとき、中心を「A の中心 + offset」に置いた静止画の B と同じ丸め）
+- **最初のコマは A、最後のコマは offset の位置の B と画素一致**する。`delay` の間は A、`duration` の後は B を Object の尺の終わりまで保持（前後に同じ絵の静止画を置かなくてよい）
+- 着いた B を出し続けるなら、別の Object へ引き継がず **fly_to の Object の `time()` を延ばす**（B を保持するだけなので軽い。消すときは `-fade(...)` を後ろに置ける）。別の静止画の B（`anchor="center"`・中心 = A の中心 + offset）へ引き継ぐときは、A の中心を整数の画素に置き、`⌈Wa/2⌉ + ⌊dx − Wb/2⌋` と `⌈Ha/2⌉ + ⌊dy − Hb/2⌋` が偶数になるよう offset を 1px 調整すると画素一致する（overlay は左上を 4:2:0 の 2px 格子へ切り捨てるので、静止画どうしのずれは常に偶数。奇数だと 1px 跳ねる）
+- 粒: A と B の不透明な画素（α>0.1）を α の重みで N 粒ずつ取る（N = min(`max_pixels`, 多い方の画素数)。少ない側は複製して ±0.35px 揺らし、α を分け合う）
+- 対応 `match`: `"ot"`（既定。スライスした最適輸送: 64 方向への射影のソートで 40 回流してから Hilbert 曲線の順で組む。移動の総量はハンガリアン法とほぼ同じで、1.2 万粒でも 1〜2 秒）/ `"angle"` / `"random"`
+- 道すじ: 2次ベジェ。`arc` は制御点を中点から 距離×arc だけ進む向きの右手側へずらす（全粒で同じ側なので交差しない。負で左手側）。`swirl` は中点のまわりに回す角度 rad
+- 時間: `stagger`（出発の遅れの幅）と `stagger_by`（`"x"` / `"y"` は進む向きの先頭の粒から先に出る、`"distance"` は遠くへ行く粒から、`"random"`）。各粒は残りの時間で smoothstep で加減速する
+- `dissolve=(a, b)`: 最初の a の区間で A の絵から粒へ、最後の b の区間で粒から B の絵へ移る。色は `color_path`（`"oklab"` / `"oklch"`）
+- 粒はサブピクセルの位置の円（縁 1px のアンチエイリアス）を、リニア光 × 事前乗算で足し合わせて描く（ゆっくり動く粒も 1px 単位で跳ねない）。A と B が同じ色なら、どのコマのどの画素もその色のまま（α だけが変わる）
+- **キャンバス**は A の箱・B の箱・全粒子の道すじを覆い、**A の中心に対して左右・上下それぞれ対称**に広がる。`move` の anchor は余白を除いた A の箱が基準なので、`topleft` 等でも A は静止画と同じ画素に映る（キャンバスが画面の外へ出ても 1px もずれない）。4096px を超えると ValueError
+- 制約: 終端フレーム Effect の規則どおり（1つの Object に1回・bakeable の末尾・後ろは live だけ）。`target` は加工していない画像 Object（`text_image` 可。加工つき・`text()` 系・動画は ValueError）。不透明な画素が無い絵は ValueError
+- 重さ: 1.2 万粒・1080p の文字どうしで前処理 1〜2 秒 + 1コマ 35〜95ms（CPU の空き具合で倍ほど変わる。1 秒ぶんで 2〜5 秒。2回目からはキャッシュ）。粒の描画は「粒の数 × `particle_size`²」に比例する（1.2 万粒で半径 32 は 1コマ約 1.5 秒。メモリは分けて描くので頭打ち）。生成エンジンは `scriptvedit.morph_flight`（`generate_flight_frames`）
+- 粒子は最も目を引く道具。`explode_to` / `assemble_from` と合わせて1本に2〜3回まで。粒の数に意味を持たせない（お金が均等に分かれたように見える）。道すじが字幕を横切らないよう、`arc` の向きと重ね順は呼び出し側で決める
+
+### 点で描いた地球と世界地図（globe）
+
+正射影の地球（`projection="ortho"`）か正距円筒の世界地図（`"plate"`）を等間隔の点で描き、回転・都市の点・大円の弧・波紋・昼夜の境・札を時刻つきで積んで、透過動画 Object にする（framekit.build。`frames()` と同じ qtrle の .mov）。
+
+```python
+from datetime import datetime, timezone
+
+# 世界地図。陸は同梱の地球（Natural Earth 1:110m）、中心の経度は弧に合わせて自動（view="auto"）
+g = globe(projection="plate", size=(1400, 700))
+g.points(sites)                                      # 拠点（出典を書くか「模式図」と明記する）
+g.arc((37.8, -122.4), (35.7, 139.7), t=1.0)          # 太平洋を渡る弧も端で切れず1本につながる
+g.ripple((35.7, 139.7), t=1.8)
+g.night(datetime(2024, 7, 19, 4, 9, tzinfo=timezone.utc))   # 夜の側の点を暗く
+g.label((35.7, 139.7), "東京 13:09", t=2.0)
+obj = g.build()                                      # obj.figure.xy(座標, 秒)・obj.figure.view
+obj.time(5) <= move(x=0.5, y=0.5, anchor="center")
+
+e = globe(size=900)                                  # 地球（既定で陸・縁の淡い光あり）
+e.turn(0.5, (35.7, 139.7), dur=1.5)                  # 四元数の slerp（等角速度・遠回りしない）
+e.points(cities, appear=("staged", [(0.5, 1), (0.8, 300)]))   # 1点 → 300点が一斉に
+```
+
+- 座標は `(緯度, 経度)` の度。`land` の多角形だけ `(経度, 緯度)`。|緯度| が 90 を超えると ValueError
+- **陸地は同梱の地球が既定**（`land=True`）。Natural Earth（パブリックドメイン）の 1:110m の陸を 1440×720・1bit の PNG（約 12KB）にして `src/scriptvedit/data/` に入れてある。同梱の素材・データ（`assets/` と `data/`）は全部自作・第三者素材ゼロの方針で、これが唯一の例外（ライブラリとして同梱している `formula()` 用の KaTeX は別扱い。自作の大陸の形は不正確な地図が実データに見え、同梱しないと既定が陸の無い地球になるため。出典・利用条件・元データの SHA-256 は同じフォルダの `NOTICE.md` と PNG の tEXt）。地図を出すときは「地図: Natural Earth」と添えることを勧める（義務ではない）。`land=False` は陸を描かず 15 度の経緯線だけ、`land="<PNG のパス>"` は自前の正距円筒の白黒マスク（`python scripts/make_land_mask.py <出力> --width 2880` で細かいものも作れる）、`land=[[(経度, 緯度), …], …]` は手作りの模式図。`land=None` は ValueError（以前の「陸なし」と取り違えないよう `False` と書く）。鍵には陸地の内容指紋が入る（パスは入らない）
+- 既定の見た目: 陸の点は不透明度 0.55 で、拠点の点（`points`）はまわりの陸の点を抜いて（堀）淡い光の輪を敷くので、既定の白のままでも陸に埋もれない。点が密なとき（plate 1400×700 に数千点で密度を見せる、など）は `points(..., halo=False)`（堀も光の輪も無しで芯だけ。付けたままだと堀が陸をほとんど消し、光の輪がつながって霞になる。900px の地球に 300 点ほどなら既定のままで陸が読める）。堀と光の輪は点の数に比例しないメモリで描く（円を分けて計算する。plate 1400×700 に 2 万点で 1 コマのピークは halo=False と同じ約 170MB、時間は約 1 秒で halo=False の約 2.5 倍）。ortho は縁の外に淡い光（`atmosphere=0.25`。0 で無し。光のぶんキャンバスが広がる）
+- plate の中心の経度: `view` の既定（`None`）は ortho で `(20, 0)`、plate で `"auto"`。`"auto"` は build のときに、弧が地図の左右の端をまたがず、点・弧・波紋・札が端の近くで切れず、端の経線がなるべく大陸を切らない経度を選ぶ（何も無ければ 0。選んだ向きは `obj.figure.view`。手で同じ経度を書いたのと同じ鍵）。`view=(0, 150)` のように書けば固定。日付変更線をまたぐ弧を端で分けて描く動き（右端から出て左端から続く）は、端をまたがせたときにだけ起きる
+- 点: ortho は Fibonacci 球、plate は画面上の格子。`step=None`（既定）は画面上の点の間隔 ≒ 3.9×`dot` px になる角度（ortho は地球の中心で。`size=900` で 1.19 度＝全体約 2.9 万点・陸に約 8 千点、`size=300` で 3.56 度）なので、小さい地球でも点がつぶれて面にならない（間隔が点の直径を下回る `step` は警告）。明るさ = `limb + (1 − limb)·√z`、縁で詰まった点は不透明度を下げて白い筋にしない。`dot`（半径 px）は 2 以上（2 未満は回転で瞬く）
+- 隠れ: 地表の点は z ≤ 0 で裏。持ち上げた弧は「z < 0 かつ投影が円の内側」のときだけ隠れ、縁の外へ出た部分は描く（境目は二分法）。plate の弧は日付変更線で分けて描く。plate の弧の反りは弦に垂直で上向き（弦が縦に近いときは地図の内側へ）で、反りで日付変更線をまたいで反対の端に描かれるときは反りを縮める
+- 出来事: `turn(t, (lat, lon), dur, easing)`・`spin(t0, t1, 度/秒)`・`points(coords, appear="at" | ("wave", 起点, 度/秒) | ("staged", [(秒, 件数), …]), halo=True)`・`arc(src, dst, t=, height, width, head, trail)`・`ripple(coord, t=, max_deg)`・`night(when, dim, twilight)`（when は UTC の datetime。naive は ValueError。太陽の真下は NOAA の簡略式）・`label(coord, text, side)`（裏へ回ると消える。重なり・はみ出しは警告）
+- キャンバスは絵の外接矩形: 地球（地図）の箱に、縁の外へ出る弧・大気の光・札が切れないだけの余白を上下・左右に対称に足す（地球は真ん中のまま。`obj.figure.center` / `obj.figure.margin` で分かる）
+- `spin` は既定では使わない。毎コマ全面が変わり qtrle が効かない（900×900 で 5 秒回すと約 80MB）。3 度/秒を超えると警告
+- 重さ（1コマ。900×900・同梱の地球）: 回転なし 約 22ms（地球の点の層を使い回す）、spin / turn 中 約 60ms（毎コマ点の層を描き直す）。plate 1400×700・night で 約 30ms。1 秒ぶんで 1.5〜2.5 秒
+- 使い方の推奨: 1回 10 秒以内、1本の動画に 2 回まで。色は白・灰・赤だけ、国境と国旗は描かない。都市の点は実データに見えるので、出典を書くか「模式図」と明記する
+
+### 後戻り型の正規表現の照合を描く（regex_trace / regex_count / regex_view）
+
+正規表現の後戻り（ReDoS）を、**実際に記録した手順から**描く。手で数えたコマ列は要らない。
+
+```python
+tr = regex_trace(r"\s+$", "x" + " " * 10 + "x")       # 照合を1手ずつ記録（教育用のモデル）
+tr.span, tr.counts["tests"]                            # → None, 123（= n²+2n+3）
+big = regex_count(r"\s+$", lambda n: "x" + " " * n + "x", 20000, count="matches")
+big.value, big.method, big.formula                     # → 200010000, 'poly', '(n^2 + n)/2'
+
+# 開始位置ごとに1行。帯が最後の x で赤く止まり、行が積もって三角形になる。
+# 最後にカウンタを regex_count の値まで回す（count_label の数は「このモデルの回数」）。
+# 書式は (拍と回転の間, 最後) の組: 回している間は桁が動き、回し終えたら「約2億回」
+fig = regex_view(tr, view="rows", count="matches", at=[1.2], count_to=big.value,
+                 count_label=("{n:,} 回", "約{oku:.0f}億回（模式）"))
+fig @ 3.0
+fig.time() <= move(x=0.5, y=0.6, anchor="center")
+# 三角形ができた所から回転だけを見せる場面は、同じ図を切り出す（素材時間のスライス）
+# roll = regex_view(…同じ引数…); roll[roll.figure.beats_end:] @ 9.0
+
+# 2つの .* が xxxxx を分け合う位置を、= の判定ごとに1拍で（56 拍がちょうど 12 秒を埋める）
+fig2 = regex_view(regex_trace(r".*(?:.*=.*)", "xxxxx"), view="tape",
+                  beats="literal:=", duration=12)
+```
+
+- `regex_trace(pattern, text, mode='search'|'match'|'fullmatch', max_steps=200000)` → `RegexTrace`（`span`・`groups` は `re` と同じ。`counts`（steps / tests / matches / backtracks / attempts）・`nodes`（式の部品）・`quantifiers`（greedy / lazy / possessive）・`events`（`(kind, pos, node, ok, spans)`。kind は start / test / assert / backtrack / match / fail、spans は量指定子の取り分 `(番号, 開始, 終了)`）・`attempts`）
+- 対応する構文: リテラル・エスケープ・`.`・`\s \S \d \D \w \W`（Python の str パターンと同じ）・`[...]`・`* + ? {m} {m,} {,n} {m,n}`（n は 1000 まで）とその最小・所有（`*+` など）・`( )` `(?: )` `(?> )` `|`・`^ $ \A \Z`・先読み・後読み（固定幅）。後方参照・名前つきグループ・フラグ・`\b`・条件分岐・`\p` は「regex_trace が対応しない構文」の ValueError（黙って違う動きはしない）
+- エンジンは標準ライブラリだけの後戻り型 VM（`scriptvedit.regex_vm`）。**再帰を使わない**（空白 5 万個でも RecursionError にならない）。search は開始位置を 0 から全部試し、処理系の最適化（必須文字の先読み・自動所有化）はしない。`re` との一致は seed 固定の差分ファジング（3,000 組 × 3 モード）で確かめている
+- 1手の数え方: `tests`（1字の判定と ^ $ 先読み等の assert）/ `matches`（成功した1字の判定）/ `backtracks` / `steps`（命令数）/ `attempts`。x＋空白 n 個＋x に `\s+$` は tests = n²+2n+3・matches = n(n+1)/2
+- `regex_count(pattern, make_text, n, count=, direct_limit=3000000, fit_ns=None)`: 手数が direct_limit 以内なら直接数え、超えるなら小さい n（既定 8〜64）で数えて次数1〜4の多項式を Fraction で当て、使っていない2点で検算してから外挿する（`^(a+)+$` のような指数型は ValueError）。純 Python で約 300〜600 万手/秒
+  - 上限のある量指定子（`\s{1,100}$` など）は、取り分が上限に届くと増え方が変わる（空白 100 個までは2次、その先は1次）。式の中の有限の回数・幅の最大が fit_ns の最小以上なら、既定の fit_ns を「最大 + 8, 12, …」へずらし（明示した fit_ns が上限以下なら ValueError）、`{m,n}` 型の量指定子がある式は fit_ns の最大の2倍の n でも検算する（外れたら ValueError）
+- `regex_view(trace, view='tape'|'rows'|'both', beats='test'|'backtrack'|'attempt'|'literal:<字>'|'step', pace=, at=, duration=, window=, show=, count=, count_label=, count_to=, ...)`:
+  - tape: 式の箱・文字のマス（空白は ␣）・取り分の下線（1本目 実線・2本目 破線・3本目 点線。式の箱の下にも同じ線）・照合位置 ▼・開始位置 ▲ と縦線・失敗の赤い ×（0.25 秒）・後戻りの弧の矢印（0.3 秒）
+  - rows: 開始位置ごとに1行。成功した判定は白い帯、失敗は赤の縦棒、assert の失敗は赤の点、同じマスを1つの試行の中で何度も（成功して）判定すると明るく（熱。一番熱い帯が白）。1判定で終わった試行は `trivial='mark'` で点だけ
+  - 拍: 最初の3拍は 0.6 秒、以降 0.82 倍ずつ速くなり、最後は1コマに4拍（カウンタだけが走る）。拍と拍の間の event はまとめて反映。`at=[秒]` で先頭の拍を語の時刻に合わせる。`duration` を渡すと拍がちょうどその長さを埋める（最後の拍 + hold_end + count_roll = duration。多ければ速く、少なければ加速を緩め、それでも余れば1拍を最大 1.2 秒まで延ばして残りは最後の絵）。`pace` を明示したときの `duration` は長さだけを決める
+  - × と矢印は次の拍で消える（重ならない）。間隔の短い拍は照合位置が滑り終わるのを待たずに × を出すので、中くらいの速さでも × が見える。1コマに3拍を超える区間では描かない（点滅させない）
+  - `count_label` は書式1つか (拍と回転の間, 最後) の組。`'約{oku:.0f}億回'` のような粗い書式1つだけだと拍の間「約0億回」のまま動かない（警告する）ので組にする。三角形ができた所から回転だけを見せるなら `fig[fig.figure.beats_end:]`
+  - 戻り値の `obj.figure`: `beat_times`・`beats_end`・`count_final`・`n_frames`・`size`・`count_at(i)`・`count_text(i)`（コマ i のカウンタの文字列。字幕との突き合わせに）・`cell_box(p)`（文字 p のマスの矩形。注記を置く位置に）
+  - 長い文字列は `window=(開始, 終了)` の範囲だけをマスで描き、外は「…」に畳む（48 字を超えて window を省くと ValueError）。拍は 5,000 まで。図は幅・高さとも 4096px まで（超えると ValueError）、Project の画面より大きいと警告（cell を小さくするか window で切る）
+  - 色は framekit の PALETTE（赤は失敗と停止だけ）。図の下に panel の面を敷く。文字は cell × 0.61（64 で 39px）で `p.audit()` に申告する
+- 重さ（1コマの描画。平均・括弧は最悪）: xxxxx の tape 約 3.5ms（8ms）、空白 10 個の rows 約 1ms（6ms）・both 約 2ms（12ms）、空白 20 個・cell=64 の both（1652×970）約 6ms（27ms）、空白 30 個・cell=48 の both（1812×914）約 10ms（29ms）。最悪は開始位置が変わってマスの列を描き直すコマ。1 秒ぶんの生成は ffmpeg の符号化込みで約 0.1〜0.3 秒
+- 画面の数は「このモデルの回数」で、処理系の手順数とも実演の秒とも別物。count_label に「模式」など分かる言葉を添える
+
+### 番号つきの箱の列（slots）
+
+配列・バッファ・設定の項目のような「番号つきの箱の列」に、塊が流れ込んで上限を超えてあふれる・針が範囲外を読みにいく・矢印の先に相手がいない・文字として比べて入れ替える、を時刻つきで積んで透過動画 Object にする（framekit.build。`frames()` と同じ qtrle の .mov）。
+
+```python
+# 「200」の棚から、倍に膨らんだファイルがあふれる
+s = slots()
+s.row("shelf", 200, label="項目の上限", capacity=200, elide=(6, 3))   # 1 2 3 4 5 6 … 198 199 200
+s.fill(1.0, "shelf", 400, dur=2.5)    # 上限の線に当たった分は赤くなって外へ落ちる（間隔を空けて描ける分だけ描く）。「上限 200」の右に入った数「400件」
+s.halt(3.8)                           # 全体を不透明度 0.45 へ（style="freeze" は以後動かない）
+s.build().time() <= move(x=0.5, y=0.5, anchor="center")
+
+# 21 個と 20 個。21 個目には相手がいない
+t = slots()
+t.row("rule", 21, label="ルールの型:\n受け取る項目 21個")
+t.row("input", 20, label="プログラムが\n渡す項目: 20個", ghost=[21])   # 21 は点線の箱
+t.put(0.5, "rule", 21, "条件")                     # 札が上から降りて収まる
+t.link(1.2, ("rule", 21), ("input", 21))           # 先が ghost なので矢印の先と点線の箱が赤く
+t.read(2.0, "input", 21, dur=1.2)                  # 針が等速で歩き、斜線の区画「?」に入って赤く
+fig = t.build()
+fig.figure.cell_xy("input", 21)                    # 箱の中心の px（注記を置く位置に）
+
+# [1, 2, 10].sort() は文字として並べる
+u = slots(cell=96)
+u.row("arr", 3, values=[1, 2, 10], index_base=0)
+u.to_str(0.4, "arr")                               # 数の両側に引用符が現れる
+u.compare(1.0, "arr", 1, 2, by="str")              # 最初に違う字（'2' と '1'）を赤で囲み、不等号
+u.swap(2.2, "arr", 1, 2)                           # 上下に分かれた弧で入れ替わる
+```
+
+- 出来事: `fill(t, row, count, dur=1.0, order='left', source='right', spill=True, spill_visible=24)` / `read(t, row, index, dur=0.3)` / `link(t, (row_a, i), (row_b, j), dur=0.5, label=None)` / `put(t, row, index, text, dur=0.4)` / `set(t, row, index, value, dur=0.3)` / `mark(t, row, index, color='accent', style='frame'|'fill')` / `unmark` / `to_str(t, row)` / `compare(t, row, i, j, by='str'|'num', dur=0.6)` / `swap(t, row, i, j, dur=0.5)` / `halt(t, style='dim'|'freeze', dur=0.3)`。時刻は Object の先頭からの秒
+- 行: `row(name, n, label=, values=, index=True, index_base=1, capacity=, elide=(先頭, 末尾), ghost=[番号], offset=, overflow_label='total')`。elide なしは 64 箱まで（n は 100,000 まで）。capacity・ghost・出来事が触る番号の前後は畳んでも見せる。番号の列は全行で揃う（offset は cell 単位のずれ）
+- あふれの札（`overflow_label`。fill があふれたら「上限 N」の右、線の外にも箱があれば番号の帯の下に accent で出し、あふれが線に着くたびに数が増える）: `'total'`（既定。入った数の合計「400件」）/ `'over'`（上限を超えた数「+200」）/ `'undrawn'`（描かなかった塊の数「+190」。描かない塊があるときだけ）/ `None`（出さない）か、書式の文字列（名前は `total` / `over` / `undrawn` / `limit`。例 `'{total:,}件（上限{limit}）'`。数として `{undrawn}` だけを使う書式は描かない塊があるときだけ出し、`{limit}` だけの書式は最初のあふれから出す）。以前の「+N」は描かなかった数だけを数え、400 を入れて「+190」と出て数として誤解された
+- 範囲外の番号を受けるのは read と link だけ（行の外の斜線の区画「?」へ。区画は一番外の ghost のさらに外。ghost の番号はその点線の箱）。put / set / mark などの範囲外・負の時刻・無い行・values の長さ違い・`build(duration=)` より後に終わる出来事は ValueError
+- fill のあふれは、描く塊どうしが線に着く間隔を 0.12 秒以上に保つ（足りなければあふれの時間を fill の 65% まで延ばし、それでも入らない分は描かない。`spill_visible` は描く数の上限。数はあふれの札が示す）。塊は縁取りつきで、重なっても 1 つずつ見分けられる。count は 1,000 万でもよい（1 個ずつの表を作らない）
+- compare の直後に swap / set / put を続けてよい（持ち上げた箱を下ろしながら動かすので、字は箱から外れない。赤い枠と不等号は字が動き出す前に消える）
+- 箱の中の字は行の中で大きさを揃える（数字・ASCII は等幅の mono_font）。ただし 1 つの長い字のために行全体を 32px（value_size がそれより小さければ value_size）未満へは縮めず、その字だけを縮める。elide で隠れた箱の values は大きさの計算にも入らない。札（put）は行の端なら外側へ広がり、左端の札のために箱の列を右へ寄せる（ラベルを隠さない）
+- 行をまたぐ矢印の札は行の間に置き（その高さを空ける）、矢印の線と鏃に掛からない所へ寄せる。複数行のラベルも上下の行と重ならないよう行の間を空ける
+- 色は framekit の PALETTE（白・灰・赤）に fill / pointer / card / halo / bg を足したもの。`colors={"fill": "#5b8bd6"}` で上書き。ghost の番号も muted（読ませる字）
+- 文字は `p.audit()` に申告する（size で縮めた倍率込み）。既定（label 36・番号 32・箱の字 cell の半分）で audit の warning は出ない。左右に並べるときは size を縮めず `cell=48, gap=12, value_size=32` にする（3 桁の番号も 32px のまま入る）
+- 戻り値の `obj.figure`: `cell_xy(row, index)`・`rows`・`size`・`scale`・`duration`・`frame(t)`（1コマの RGBA 配列）・`state(t)`（箱の中の塊の数・あふれの数）
+- 重さ: 1コマの描画は平均 1〜3ms（1080p 全面でも最大 15ms）。1 秒ぶんの生成は ffmpeg 込みで 0.2〜0.3 秒
+- 描かないもの: 番地・16進のダンプ・命令、特定の OS の停止画面の意匠、点滅・ノイズ
+
+### 点と線の図の上を流れるパケット（flow_graph / flow_tree）
+
+ネットワーク・配信・送金・感染の図（ノードと辺）を描き、パケットを流す・一斉に配る・ノードを灰色にする・辺を切る、を秒で書いて透過動画 Object にする（framekit.build。`frames()` と同じ qtrle の .mov）。**模式図であって実際の経路ではない**（「模式図」の注記は呼び出し側が付ける）。
+
+```python
+# ロードバランサーのヘルスチェック。遅れたサーバーを外す
+g = flow_graph({"lb": {"label": "ロードバランサー", "shape": "box"},
+                "s1": {"label": "サーバー1"}, "s2": {"label": "サーバー2"}},
+               [("lb", "s1"), ("lb", "s2")], layout="layered")
+g.send(0.5, ["lb", "s1"]); g.send(0.9, ["s1", "lb"])     # 送って戻す
+g.send(0.5, ["lb", "s2"]); g.send(0.9, ["s2", "lb"], fate=("drop", 0.5))   # 戻りが途中で消える
+g.state(2.0, "s2", dim=0.6, mark="x")                    # 灰色にして ×
+g.cut(2.0, ("lb", "s2"))                                 # 辺が dim の破線になって薄れる
+fig = g.build()                                          # 最後の出来事の終わり + 1 秒
+fig.time() <= move(x=0.5, y=0.45, anchor="center")
+
+# 35 件のうち 30 件が NY の手前で止まって並び、5 件が通る
+h = flow_graph({"bb": {"pos": (200, 420)}, "ny": {"pos": (1150, 420)}, "ph": {"pos": (1560, 220)}},
+               [("bb", "ny", {"curve": 0.18}), ("ny", "ph")])
+h.send(0.3, ["bb", "ny", "ph"], n=30, every=0.09, fate=("stop", "ny"))
+h.send(3.2, ["bb", "ny", "ph"], n=5, every=0.09)
+
+# 1 → 50 → 3000 へ一斉に散る（葉が 500 を超える段は点の塊。amount で直径が √(量)）
+t = flow_tree([1, 50, 3000], t=0.5, amount=400000)
+fig3 = t.build()
+fig3.figure.arrival["L2_0"]      # 葉に届く秒（字幕・効果音の時刻合わせに）
+```
+
+- `flow_graph(nodes, edges=(), *, layout='given'|'layered'|'radial'|'rings', direction='down', size=None, padding=40, node='dot'|'box', node_radius=10, box=(240, 72), edge_width=3, curve=0.0, colors=None, font=None, weight=None, label_size=36, label_pos='auto', seed=0)`。nodes は `{名前: {'pos', 'label', 'shape', 'layer'}}` か名前のリスト。`nodes()` と `edges()` を持つグラフ（networkx など）も duck typing で読む（networkx は import しない）。edges は `(a, b)` か `(a, b, {'delay': 秒, 'curve': 0.2})`
+- `curve`（図全体の曲がり）は、辺の集まるノードで自動で弱める: ノードから出る辺の組・入る辺の組ごとに、弦の向きの角の間（中央値 g）の半分までしか端で傾かないよう、curve を tan(g/2)/2 までにする。上限は辺の本数ではなく隣の辺との角の間で決まる: 周りに均等に散った辺（radial の `flow_tree`）なら 3〜4 本の組で 0.3 はそのまま、40 本なら約 0.04。片側へ開く扇（layered や given で子が同じ側に並ぶ）は角の間が狭いので少なくても弱まる（layered の根から子へ 2 本で約 0.28、3 本で約 0.16、4 本で約 0.11）。どの辺も同じ向きに曲がって隣の辺へ倒れ込み、渦（風車）に見えるのを防ぐ（`flow_tree([1, 40, 3000], curve=0.3)` で起きた）。辺ごとの `'curve'` は指定どおり
+- 配置: given は pos の通り。layered は BFS の段（`'layer'` で上書き）で、段の中の順は重心法を2往復して交差を減らす。radial は根が中心で、角度は部分木の葉の数に比例。rings は段ごとの同心円。layered / radial で根から辿れないノードがあると ValueError。配置も経路（BFS・Dijkstra）も自前なので、ライブラリの版で結果が変わらない
+- 出来事（秒は Object の先頭から）:
+  - `send(t, path, n=1, every=0.12, speed=700, color='fg', size=7, trail=0.25, fate='pass', label=None)` → 各パケットが止まる秒のリスト。パケットは辺を細かい折れ線にした道の上を弧長で等速に進む（曲がった辺でも辺から外れず、隣り合うコマの移動量がそろう）。size は直径。`fate=('stop', 名前)` はそのノードの手前で止まって accent になり、前のパケットとの中心の間隔 1.6 ×（2つの直径の平均）で手前へ並ぶ（大きさが違っても重ならない。列が手前のノードに届いたら、そのノードを跨いでさらに手前の辺へ並ぶ）。`('drop', 0.6)` は最初の辺の 60% で止まり、0.4 秒で薄れて消える。`label` は先頭のパケットと一緒に端数の位置で動く文字。ノードの枠・点・ノードの文字・先に出た札には重ねない: 重なるコマでは隠し、0.15 秒手前から薄れて、離れてから 0.15 秒で現れる（出るときも薄く現れ、pass は着く手前で薄れる。見える間が 0.3 秒に満たなければ出さない。どのコマでも出せない札は警告する）。置き場所は画面の上・進行方向の左右・画面の下から、パケットが見えている間（止まったパケットは終わりまで）に隠れる間・辺が下を通る間・キャンバスの外へのはみ出しが最も少ないものを札ごとに選び、動く間は保つ（ぱたぱた入れ替わらない。進行方向の左右に置く札は曲がり角で回り込む。斜めの辺でも辺が札を貫かない）。側が変わりうるのは、途中のノードの先（次の辺へ移る所）で1回と、`fate=('stop', …)` で止まる所で1回だけで、変わる所では札が一度消えてから現れる（止まった札は、パケットより後ろの進行方向の左右に、札の前の端をパケットの前の端にそろえて残る。中央のままだと止まる先のノードに掛かる）。途中の box の中（文字の上）ではパケットを描かない（手前で薄れて消え、出る辺の端から現れる）。途中の点を通る間はパケットの暗い縁を消す
+  - `broadcast(t, root, hop=0.35, color='accent', packets=True, ripple=True)` → `{名前: 届く秒}`。辺の delay（無ければ hop）で Dijkstra。届いた順に色が変わり、波紋が出る
+  - `state(t, node, color=None, dim=None, mark='x'|'check'|'none'|None, dur=0.25)`・`cut(t, (a, b), dur=0.3)`
+- `flow_tree(levels, *, t=0, hop=0.4, layout='radial', amount=None, **kw)`: 名前は `'L段_番号'`。葉が 500 を超える段は点の塊（直径 5px・seed で散らす）で、そこへの辺は細く薄い扇、broadcast のパケットは親1つあたり 4 個に束ねる（量は束ねた分の合計）。子が 64 を超える親からの辺も扇にする（何百本も 3px で描くと根の周りが白く潰れる）。`curve=` を渡すと扇の辺も曲線で描く（パケットは同じ曲線の上を走る）。子の多い親からの辺の曲がりは自動で弱まる（下の `curve` の項）
+- 絵: 辺は line 色の 3px、ノードは fg の点か角丸の枠（文字は中）、パケットは panel の縁つきの点と、trail 秒ぶんの α が下がる点3つ。届く・止まる・外す瞬間に波紋（半径 1.0 → 2.2 倍、0.4 秒）。文字は 30px 以上（下回ると ValueError）で、重なり・はみ出しは警告する。点の文字（`label_pos='auto'`）は、layered では葉だけを流れの向きに置き、根は逆の側、途中の点は横（down / up は右、right / left は上）。radial / rings は外向き、given は下が第一候補で、配置の後に辺・ほかのノードと重ならない側を選び直す。どの側も辺が通るとき（radial の根など）は、文字の下に panel 色の板を敷いて警告する。色は framekit の PALETTE（`colors=` で上書き）。同時に動くのは白のパケット1系統と赤1色を推奨
+- 戻り値の `obj.figure`: `pos`（{名前: (x, y)} キャンバスの px）・`arrival`（broadcast で最初に届く秒）・`size`・`duration`・`levels`・`amount`
+- 上限: ノード 5,000・辺 10,000・同時に見えるパケット 2,000（止まって残るものを含む）。超えたら ValueError
+- 鍵: ノード・辺・layout の引数・出来事・使う色（fg・accent・line・dim・panel）・寸法（文字があるときだけフォントの内容指紋）と版 `_FLOW_VER`。配置の結果は鍵に入らない。効かない値（n=1 の every）は入れない
+- 依存: 構築（`flow_graph()` の呼び出し）にも numpy・opencv-python・Pillow が要る（`pip install "scriptvedit[figures]"`）
+- 重さ（1920x1080・1コマの描画。ffmpeg の符号化は別）: 葉 3000＋パケット 200 の broadcast で平均 約 7ms・最大 約 25ms、LB＋サーバー6台で平均 約 3ms（cut の間も 12ms 以下）、35 個の送金で 約 3ms、上限の同時 2,000 個で平均 約 70ms（最初の1コマだけ辺の層を描くので 0.04〜0.9 秒）。1 秒ぶんの書き出しは ffmpeg 込みで LB の図が約 0.3 秒、葉 3000 の木が約 0.9 秒（ほかの重い処理と並行すると 2〜3 倍）。生成が終わると描画の作業領域（1080p で約 100MB）を手放す
 
 ### タイムライン構成
 
@@ -1744,11 +2010,11 @@ result = p.render("output.mp4", dry_run=True)
 
 ### ディレクトリ構成
 
-本体は `src/scriptvedit/` の50モジュール（合計約2.2万行）のパッケージ。
+本体は `src/scriptvedit/` の59モジュール（合計約4.7万行）のパッケージ。
 
 ```
 ScriptVEdit/
-├── src/scriptvedit/     パッケージ本体（50モジュール）
+├── src/scriptvedit/     パッケージ本体（59モジュール）
 │   ├── project.py       Project / render / ffmpegコマンド構築
 │   ├── checkpoint.py    チェックポイント計画・ベイク（project から抽出した自由関数）
 │   ├── layercache.py    レイヤーキャッシュの鮮度判定・生成・再生
@@ -1761,12 +2027,20 @@ ScriptVEdit/
 │   ├── effects/         basic / visual / composite / paths / time / terminal
 │   ├── filters/         video / audio フィルタ生成
 │   ├── expr.py easing.py  Expr式ビルダー・イージング
+│   ├── expr_scan.py     Expr の解析（区分線形の展開・選んだ枝だけを辿る評価。scale の pad と native fade の判定が使う）
 │   ├── cache.py ffmpeg.py media.py  キャッシュ鍵・ffmpeg実行・probe
 │   ├── formula.py       数式レンダ（formula / formula_lines、KaTeX同梱）
 │   ├── textimage.py     文字を透過 PNG に焼く（text_image。PIL。部分的な色・太さ、可変フォント、折り返し）
 │   ├── stillseq.py      絵の列を1本の動画にまとめる（stills / frames）
+│   ├── framekit.py      図解アニメの共通部品（鍵・点と線の描画・文字・時刻。frames の上。内部モジュール）
+│   ├── fx_regex.py regex_vm.py  正規表現の照合を描く（regex_view） / 手順を記録する照合器（regex_trace / regex_count）
+│   ├── fx_slots.py      番号つきの箱の列（slots。上限の線・あふれ・範囲外を読む針・比べて入れ替え）
+│   ├── fx_textmove.py   文字列の組み替え（text_transition / odometer）
+│   ├── fx_flow.py       点と線の図の上を流れるパケット（flow_graph / flow_tree）
+│   ├── fx_globe.py      点で描いた地球と世界地図（globe。正射影・正距円筒・弧・昼夜）
 │   ├── text.py audio.py web.py      テキスト・karaoke / オーディオ（voice・narrate・sfx・beat_sync 等） / web Object・テンプレート
 │   ├── morph.py morph_cli.py  モーフィング・パーティクル生成 / その CLI 入口
+│   ├── morph_flight.py  粒子の輸送モーフ（fly_to の本体）
 │   ├── tts.py           音声合成エンジン層（tts() / speakers。VOICEVOX / edge-tts / SAPI。voice・narrate 本体は audio.py）
 │   ├── beat.py          ビート検出エンジン（beat_sync の実体・beats_to_keyframes / snap_times）
 │   ├── viz.py           タイムライン検査・可視化（Project.inspect）
@@ -1775,13 +2049,15 @@ ScriptVEdit/
 │   ├── manifest.py manifest_data.py cli.py  describe の導出エンジン / 手書き補助テーブル / CLI
 │   ├── scaffold.py      プロジェクト雛形生成（scriptvedit new）
 │   ├── assets.py        素材パス解決（asset / here / layer、共有ライブラリ取り込み）
-│   └── templates/       テンプレートHTML + vendor/katex（同梱、CDN参照なし）
+│   ├── templates/       テンプレートHTML + vendor/katex（同梱、CDN参照なし）
+│   └── data/            globe の陸地の既定（Natural Earth 1:110m の陸のマスク。パブリックドメイン。出典は NOTICE.md）
 ├── assets/              素材（images/ video/ audio/）
 ├── tests/               pytest（スナップショット/エラーケース/実レンダ等）
 │   ├── layers/          レイヤー定義（testNN_*.py）とフィクスチャ
-│   └── snapshots/       ffmpegコマンドのスナップショット
+│   ├── snapshots/       ffmpegコマンドのスナップショット
+│   └── golden/          図解アニメ・fly_to の金型（コマの PNG と版。textmove/ に自作のテスト用フォント）
 ├── plugins/             サンプルプラグイン（cwd/plugins は自動読込）
-└── scripts/             開発用スクリプト
+└── scripts/             開発用スクリプト（素材の生成・import の検査・globe の陸のマスク作り）
 ```
 
 ### テスト
@@ -1793,7 +2069,12 @@ pytest tests/                             # 全テスト（スナップショッ
 pytest tests/test_snapshot.py             # スナップショットのみ
 pytest tests/test_errors.py -k plugin     # 名前で絞り込み
 pytest tests/test_snapshot.py --snapshot-update   # スナップショット再生成
+pytest tests/test_fx_slots.py -k golden --golden-update   # 図の金型（tests/golden/）の作り直し（絵を目視してから）
 ```
+
+図解アニメと `fly_to` の絵は金型（`tests/golden/<種類>/*.png`）と突き合わせる。金型には描画の版定数が
+記録されていて、`--golden-update` でも**版を上げずに絵だけ変わったものは書き換えずに失敗する**
+（描き方を変えたら版を上げてから作り直す）。金型と別のフォントの環境では文字を含む金型だけ skip する。
 
 実レンダリング（dry_run では踏めない経路の検証）は既定で除外されており、明示的に有効化する。
 
@@ -1824,7 +2105,10 @@ LF/CRLFだけの違いをCRLFへ正規化してハッシュするため、改行
 
 ## ライセンス
 
-[MIT License](LICENSE)。同梱の `assets/` はすべて自作のテスト用素材で（`scripts/generate_test_assets.py` が生成）、コードと同じく MIT が適用されます（[ASSETS.md](ASSETS.md)）。`src/scriptvedit/templates/vendor/katex/` の KaTeX のみ同ディレクトリのライセンスに従います。
+[MIT License](LICENSE)。同梱の `assets/` はすべて自作のテスト用素材で（`scripts/generate_test_assets.py` が生成）、コードと同じく MIT が適用されます（[ASSETS.md](ASSETS.md)）。同梱している第三者のものは次の2つだけで、それぞれの条件に従います。
+
+- `src/scriptvedit/templates/vendor/katex/` の KaTeX: `formula()` 用に同梱したライブラリ（MIT。同ディレクトリのライセンスに従います）。
+- `src/scriptvedit/data/ne_110m_land_1440.png`（`globe()` の陸地の既定）: [Natural Earth](https://www.naturalearthdata.com/) の 1:110m の陸から作ったもので、パブリックドメインです（Made with Natural Earth. 出典と元データの SHA-256 は同じフォルダの `NOTICE.md`）。同梱の素材・データ（`assets/` と `data/`）の「全部自作」の唯一の例外です。
 
 ## 作者・AI利用について
 

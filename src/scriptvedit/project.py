@@ -1391,7 +1391,7 @@ class Project:
         need_render = (step["policy"] == "force") or not os.path.exists(path)
         if not need_render:
             return
-        if kind in ("morph", "particle"):
+        if kind in ("morph", "particle", "flight"):
             self._execute_frames_step(step, obj)
             return
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1401,7 +1401,7 @@ class Project:
                              context=_step_context(step, obj))
 
     def _execute_frames_step(self, step, obj=None):
-        """morph/particle 共通: 一時dirへPNG連番を生成しffv1中間へエンコードする。
+        """morph/particle/flight 共通: 一時dirへPNG連番を生成しffv1中間へエンコードする。
 
         フレーム生成（PIL）は実レンダでのみ行う（dry_runはプレースホルダの
         フレームパターンを持つコマンドだけを収集する）。
@@ -1438,6 +1438,11 @@ class Project:
                     _warn(self, f"morph_to（{os.path.basename(str(step['src']))} → "
                                 f"{os.path.basename(str(op._morph_target.source))}）: "
                                 f"{crossfade}")
+            elif step["kind"] == "flight":
+                # fly_to: 本体は morph_flight.py（キャンバスは A・B・道すじで決まる）
+                from scriptvedit.morph_flight import generate_flight_frames
+                generate_flight_frames(step["src"], op._fly_target.source,
+                                       tmpdir, n_frames, blend_fn=blend_fn, **gen_kw)
             else:
                 from scriptvedit.morph import (generate_explode_frames,
                                    generate_assemble_frames)

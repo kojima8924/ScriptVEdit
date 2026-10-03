@@ -43,7 +43,7 @@ __all__ = [
     "resize", "rotate", "crop", "pad", "blur", "eq", "flip",
     "scale", "fade", "move", "morph_to", "rotate_to",
     "move_along", "path_bezier", "throw", "inertia", "look_at", "perlin",
-    "explode_to", "assemble_from", "group", "tile",
+    "explode_to", "assemble_from", "fly_to", "group", "tile",
     "wipe", "zoom", "color_shift", "shake",
     "chroma_key", "vignette", "pixelize", "glow", "lut", "glitch",
     "perspective_warp", "lens", "ken_burns", "drop_shadow", "outline", "tint",
@@ -108,6 +108,16 @@ __all__ = [
     "formula", "formula_lines",
     # 文字を透過 PNG に焼く（PIL）
     "text_image",
+    # 文字列の組み替え（字単位で滑る・回る・落ちる）
+    "text_transition", "odometer",
+    # 後戻り型の正規表現の照合（記録した手順・回数・図）
+    "regex_trace", "regex_count", "regex_view",
+    # 点で描いた地球と世界地図（正射影・正距円筒）
+    "globe",
+    # 点と線の図の上をパケット・送金が流れて広がる
+    "flow_graph", "flow_tree",
+    # 番号つきの箱の列・読みにいく針・上限の線
+    "slots",
     # 図形ビルダー
     "circle", "rect", "arrow", "label", "spotlight",
     # プラグイン機構
@@ -200,7 +210,7 @@ from scriptvedit.effects.paths import (  # noqa: F401
     inertia, look_at, move_along, path_bezier, perlin, throw
 )
 from scriptvedit.effects.terminal import (  # noqa: F401
-    assemble_from, explode_to, morph_to
+    assemble_from, explode_to, fly_to, morph_to
 )
 from scriptvedit.effects.visual import (  # noqa: F401
     chroma_key, drop_shadow, glitch, glow, ken_burns, lens, lut, outline, perspective_warp,
@@ -229,6 +239,24 @@ from scriptvedit.formula import (  # noqa: F401
 )
 from scriptvedit.textimage import (  # noqa: F401
     text_image
+)
+from scriptvedit.fx_textmove import (  # noqa: F401
+    odometer, text_transition
+)
+from scriptvedit.regex_vm import (  # noqa: F401
+    regex_count, regex_trace
+)
+from scriptvedit.fx_regex import (  # noqa: F401
+    regex_view
+)
+from scriptvedit.fx_globe import (  # noqa: F401
+    globe
+)
+from scriptvedit.fx_flow import (  # noqa: F401
+    flow_graph, flow_tree
+)
+from scriptvedit.fx_slots import (  # noqa: F401
+    slots
 )
 from scriptvedit.plugins import (  # noqa: F401
     PluginError, effect_plugin, load_plugin, load_plugins, plugin_manifest, unregister_plugin

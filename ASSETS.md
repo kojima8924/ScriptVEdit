@@ -1,6 +1,10 @@
 # 素材台帳（assets/）
 
-**同梱素材はすべて自作物です。** 第三者の著作物は含みません。
+**同梱素材はすべて自作物です。** 第三者の著作物は含みません（同梱の素材・データ＝`assets/` と
+`src/scriptvedit/data/` の中で唯一の例外は、下の「例外」に書いた Natural Earth の陸地のマスク。
+パブリックドメイン）。素材ではなくライブラリとして同梱している `formula()` 用の KaTeX
+（`src/scriptvedit/templates/vendor/katex/`。MIT）はこの台帳の対象外で、同じディレクトリの
+ライセンスに従います。
 `scripts/generate_test_assets.py` が図形描画（Pillow）と合成音・合成映像（FFmpeg の
 lavfi）だけで生成しており、生成手順そのものがリポジトリに入っています。
 
@@ -38,12 +42,35 @@ lavfi）だけで生成しており、生成手順そのものがリポジトリ
   実効尺が違う場合の `length()` の挙動をテストが検証しているためです。
 - 大容量の検証用動画（`assets/video/flowerbg_noaudio.mp4` 等）は git 管理外です。
   無い環境では該当テストが `pytest.skip` されます。
+- `assets/` の外にも、テスト専用の自作物が1つあります:
+  `tests/golden/textmove/svtm_block.ttf`（5x7 のドット文字の自作フォント。
+  `text_transition` のスナップショットと金型を環境に依らず作るため。生成は同じ所の
+  `make_font.py`（fonttools が要る）。MIT）。
+
+## 例外: Natural Earth の陸地のマスク（第三者のデータ・パブリックドメイン）
+
+| ファイル | 仕様 | 内容 | 主な用途 |
+|---|---|---|---|
+| `src/scriptvedit/data/ne_110m_land_1440.png` | 1440×720 1bit PNG・11,867 バイト | 正距円筒の陸のマスク（白が陸） | `globe()` の陸地の既定（`land=True`） |
+
+- 出典: Natural Earth — Land（1:110m physical vectors, `ne_110m_land`, v4.1.0）。
+  利用条件はパブリックドメイン（<https://www.naturalearthdata.com/about/terms-of-use/>）。
+  クレジットの表記は任意（推奨は "Made with Natural Earth."）。
+- 出典・利用条件・元データ（zip）の SHA-256 は同じフォルダの `NOTICE.md` と PNG の tEXt に書いてある。
+  作り直しは `python scripts/make_land_mask.py`（配布元の zip を SHA-256 で照合してから塗る。
+  `--zip <zip> --check` で同梱の PNG が再現できるかを確かめられる）。
+- 例外にした理由: 大陸の形を自作で描くと不正確な地図が実データに見えてしまい、同梱しないと
+  `globe()` の既定が「陸の無い地球」になって、利用者ごとにネットへ出てマスクを作る手間がかかって
+  いた。パブリックドメインなので MIT のコード・素材と一緒に配っても条件はぶつからない
+  （ユーザーの承認のうえで同梱。2026-10-03）。
+- `assets/` ではなくパッケージのデータ（wheel に入る。`pyproject.toml` の package-data）。
+  テスト用のフィクスチャではなく、ライブラリの既定値の一部。
 
 ## 素材を追加・差し替えるとき
 
 1. `scripts/generate_test_assets.py` に生成処理を追加して再生成する
    （第三者の素材を持ち込まない。持ち込む場合は出典・ライセンス・帰属を
-   本表へ必ず記録する）
+   本表へ必ず記録し、上の「例外」の節のように理由も書く）
 2. 内容が変わると内容ハッシュ＝キャッシュ鍵が変わるため、スナップショットを
    再生成する（`pytest tests/test_snapshot.py --snapshot-update`。差分が
    鍵ハッシュのみであることを確認してから）

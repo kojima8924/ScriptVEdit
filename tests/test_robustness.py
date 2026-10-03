@@ -36,7 +36,7 @@ from scriptvedit.scaffold import new_project  # noqa: E402
 # --- issue #9: native fade の線形判定 -------------------------------------
 
 def test_native_fade_rejects_step_window():
-    """矩形窓はランプへ近似せず、正確なgeq経路へフォールバックする"""
+    """矩形窓はランプへ近似せず、式そのものを評価する経路（コマごとの評価）へ回す"""
     from scriptvedit import Var, and_, gt, lt
 
     u = Var("u")
@@ -66,7 +66,9 @@ def test_step_window_fade_real_render_has_no_alpha_leak(tmp_path):
     effect = fade(lambda _u: and_(gt(u, 0.25), lt(u, 0.75)))
     obj = SimpleNamespace(effects=[effect])
     filters, _ = _build_effect_filters(obj, 0, 4)
-    assert any(part.startswith("geq=") for part in filters)
+    # native fade へ近似せず、式そのものを評価する経路へ行く（時間だけの式なので
+    # geq ではなくコマごとに1回の評価。filters/video.py の _alpha_mul_filters）
+    assert any(part.startswith("sendcmd=") for part in filters)
     assert not any(part.startswith("fade=t=") for part in filters)
 
     rendered = tmp_path / "step-window.mkv"

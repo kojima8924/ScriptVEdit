@@ -322,6 +322,7 @@ def test_object_typed_params_reject_strings():
     callers = {
         "morph_to": lambda v: sv.morph_to(v),
         "assemble_from": lambda v: sv.assemble_from(v),
+        "fly_to": lambda v: sv.fly_to(v),
         "transition": lambda v: sv.transition(v, v),
         "duck_under": lambda v: sv.duck_under(v),
     }

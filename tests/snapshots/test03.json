@@ -24,7 +24,7 @@
     "-i",
     "__cache__/artifacts/checkpoint/ac9b64e5/0ababf7f991ab6e3.png",
     "-i",
-    "__cache__/artifacts/checkpoint/fa445802/41e66c796447b32b.mkv",
+    "__cache__/artifacts/checkpoint/fa445802/e5a9a8b888212510.mkv",
     "-filter_complex",
     "[1:v]trim=end=5.066666666666666[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,5)'[v1];[2:v]trim=end=5.066666666666666[obj2];[v1][obj2]overlay=trunc(clip((t-0)/5/,0/,1)*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,5)'[v2];[3:v]trim=end=5.066666666666666[obj3];[v2][obj3]overlay=trunc((1.0+(-1.0*clip((t-0)/5/,0/,1)))*W-w/2):trunc((0.3+(0.39999999999999997*clip((t-0)/5/,0/,1)))*H-h/2):eof_action=pass:enable='between(t/,0/,5)'[v3]",
     "-map",
@@ -75,7 +75,7 @@
       "rgba",
       "__cache__/artifacts/checkpoint/ac9b64e5/0ababf7f991ab6e3.png"
     ],
-    "__cache__/artifacts/checkpoint/fa445802/41e66c796447b32b.mkv": [
+    "__cache__/artifacts/checkpoint/fa445802/e5a9a8b888212510.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -90,7 +90,7 @@
       "-i",
       "assets/images/banner_wide.png",
       "-vf",
-      "scale=iw*0.25:ih*0.25,format=rgba,geq=r='r(X/,Y)':g='g(X/,Y)':b='b(X/,Y)':a='alpha(X/,Y)*clip(clip((T-0)/5/,0/,1)/,0/,1)'",
+      "scale=iw*0.25:ih*0.25,format=rgba,format=gbrap,sendcmd=c='0 [expr] colorchannelmixer@fxe0 aa clip(clip((T-0)/5//,0//,1)//,0//,1)',colorchannelmixer@fxe0=aa=0.0",
       "-c:v",
       "ffv1",
       "-level",
@@ -100,7 +100,7 @@
       "-an",
       "-t",
       "5.033333",
-      "__cache__/artifacts/checkpoint/fa445802/41e66c796447b32b.mkv"
+      "__cache__/artifacts/checkpoint/fa445802/e5a9a8b888212510.mkv"
     ]
   }
 }

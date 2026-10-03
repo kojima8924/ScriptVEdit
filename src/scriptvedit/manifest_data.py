@@ -11,7 +11,7 @@ scriptvedit 内の import は state.py（パッケージ内 import ゼロの葉�
 dict のキー順序は describe の出力順に直結する。**定義順を変えないこと。**
 """
 
-from scriptvedit.state import _AUDIO_VIZ_KINDS, _NORMALIZE_AUDIO_MODES
+from scriptvedit.state import _AUDIO_VIZ_KINDS, _FLY_COLOR_PATHS, _FLY_MATCH_MODES, _FLY_STAGGER_BY, _NORMALIZE_AUDIO_MODES
 
 MANIFEST_VERSION = "1.1"
 
@@ -35,10 +35,10 @@ _MANIFEST_CATEGORY_MEMBERS = {
              "blur_background_fill", "progress_bar"],
     "時間操作": ["speed", "reverse", "freeze_frame", "trim", "delete",
                  "atrim", "atempo", "adelete"],
-    "生成効果": ["morph_to", "explode_to", "assemble_from"],
+    "生成効果": ["morph_to", "explode_to", "assemble_from", "fly_to"],
     "テキスト・字幕": ["text", "typewriter", "counter", "subtitles", "karaoke",
                        "subtitle", "subtitle_box", "bubble", "diagram",
-                       "text_image"],
+                       "text_image", "text_transition", "odometer"],
     "数式": ["formula", "formula_lines"],
     "オーディオ": ["avolume", "duck_under", "loop", "audio_sequence",
                    "sfx", "audio_viz", "voice", "narrate", "normalize_audio"],
@@ -48,6 +48,10 @@ _MANIFEST_CATEGORY_MEMBERS = {
     "グループ": ["group", "tile"],
     "図形ビルダー": ["circle", "rect", "arrow", "label", "spotlight"],
     "ノイズ": ["perlin"],
+    "地図": ["globe"],
+    "正規表現の照合": ["regex_trace", "regex_count", "regex_view"],
+    "ネットワーク図": ["flow_graph", "flow_tree"],
+    "データ構造の図": ["slots"],
 }
 _MANIFEST_CATEGORIES = {}
 for _cat, _members in _MANIFEST_CATEGORY_MEMBERS.items():
@@ -201,6 +205,37 @@ _PARTICLE_PARAM_META = {
 }
 
 
+# text_transition / odometer が **fmt で受ける文字の書式（text_image と同じ名前・既定値。
+# max_width / canvas / background / missing は受けない）
+_TEXTMOVE_FMT_META = {
+    "size": {"type": "number", "default": 64, "min": 1, "max": 2000,
+             "desc": "文字サイズpx（状態ごとの大きさは区間の書式 {'size': …} で変える）"},
+    "font": {"type": "string", "default": None,
+             "desc": "フォントファイルパス（省略時は text() と同じ既定の探索）。"
+                     "等幅にしたいときは mono のフォント"},
+    "font_index": {"type": "int", "default": 0, "min": 0, "desc": ".ttc の中の書体番号"},
+    "weight": {"type": "any", "default": None,
+               "desc": "可変フォントの太さ（wght 軸の値か、名前つきインスタンス）"},
+    "color": {"type": "ffcolor", "default": "white", "desc": "文字色（区間ごとに上書きできる）"},
+    "markup": {"type": "bool", "default": False,
+               "desc": "True で状態の文字列を簡易マークアップ {書式|文字} として読む"},
+    "styles": {"type": "any", "default": None, "desc": "名前つき書式の辞書"},
+    "line_spacing": {"type": "number", "default": 1.5, "min": 0.1, "max": 20,
+                     "desc": "行送り ÷ その行の文字サイズ"},
+    "align": {"type": "choice", "default": None, "choices": ["left", "center", "right"],
+              "desc": "省略する（共通キャンバスの中の横の揃えは anchor。違う値・None は ValueError）"},
+    "border": {"type": "int", "default": 0, "min": 0, "max": 500, "desc": "縁取りの太さpx"},
+    "border_color": {"type": "ffcolor", "default": "black", "desc": "縁取りの色"},
+    "shadow": {"type": "any", "default": [0, 0], "desc": "影のずらし (x, y) px"},
+    "shadow_color": {"type": "ffcolor", "default": "black@0.6", "desc": "影の色"},
+    "shadow_blur": {"type": "number", "default": 0, "min": 0, "max": 500,
+                    "desc": "影のぼかし半径px"},
+    "padding": {"type": "any", "default": None,
+                "desc": "共通キャンバスの余白px（数値か (横, 縦)）。省略時は text_image の"
+                        "自然な寸法と同じ（縁取り + 影 + size の15%）。None は渡さず省略する"},
+}
+
+
 # パラメータのメタ情報の上書き（型/説明/範囲/choices）。
 # 自動導出（既定値の型・_resolve_param の有無）で足りない箇所だけを宣言する。
 _MANIFEST_PARAM_META = {
@@ -332,6 +367,99 @@ _MANIFEST_PARAM_META = {
         "desc": "フォントに無い字（豆腐）があったときの扱い（error は ValueError）"},
     ("text_image", "duration"): {"type": "number", "default": None, "min": 0.01,
                                  "desc": "表示秒数（省略時は .time(秒) で指定）"},
+    # 文字列の組み替え（fx_textmove.py）。書式は **fmt で受ける
+    ("text_transition", "states"): {
+        "type": "any", "required": True,
+        "desc": "2つ以上の状態。各状態は文字列か text_image と同じ区間のリスト"
+                "（状態ごとの大きさ・色は区間の書式で変える）。1状態 400 トークン・3行まで"},
+    ("text_transition", "duration"): {
+        "type": "any", "default": 1.2, "unit": "秒",
+        "desc": "遷移ごとの秒（数か、遷移の数のリスト）"},
+    ("text_transition", "hold"): {
+        "type": "any", "default": 0.0, "unit": "秒",
+        "desc": "状態ごとに止まる秒（数か、状態の数のリスト）"},
+    ("text_transition", "unit"): {
+        "type": "string", "default": "char",
+        "desc": "トークンの単位。char / word（空白もトークン）/ code（識別子・数・文字列"
+                "リテラル・空白・1字の記号）/ 正規表現の文字列（例 r'\\\\.|.'）"},
+    ("text_transition", "match"): {
+        "type": "any", "default": "auto",
+        "desc": "auto（LCS → 同じ字を近い順に move → 隙間の同じ種類の字を replace）/ "
+                "edit（レーベンシュタイン。タイは prefer の順）/ position（anchor 側から位置で）/ "
+                "[(i, j), …]（手で対応。番号は obj.figure.tokens）"},
+    ("text_transition", "prefer"): {
+        "type": "any", "default": ["replace", "insert", "delete"],
+        "desc": "match='edit' のタイの決め方（3つを並べ替えた順）"},
+    ("text_transition", "move"): {"type": "choice", "default": "slide",
+                                  "choices": ["slide", "arc"],
+                                  "desc": "位置の変わる残る字の道筋（入れ替わる組はいつも上下に"
+                                          "離れて運ばれる U 字の道）"},
+    ("text_transition", "replace"): {"type": "choice", "default": "auto",
+                                     "choices": ["auto", "roll", "fade", "swap"],
+                                     "desc": "入れ替わる字。auto=数字どうしは roll・ほかは fade / "
+                                             "roll=字の窓（縦横で切る）の中を縦に流れる"
+                                             "（1字 0.25 秒以上）"},
+    ("text_transition", "leave"): {"type": "choice", "default": "fade",
+                                   "choices": ["fade", "fall", "scatter"],
+                                   "desc": "消える字（下の層に置く）"},
+    ("text_transition", "enter"): {"type": "choice", "default": "fade",
+                                   "choices": ["fade", "drop", "rise"],
+                                   "desc": "現れる字（drop=上から / rise=下から）"},
+    ("text_transition", "stagger"): {"type": "number", "default": 0.02, "min": 0, "max": 10,
+                                     "unit": "秒",
+                                     "desc": "字ごとの遅れ（roll は anchor の反対側から、"
+                                             "ほかは左から。広がりは duration の 30% まで）"},
+    ("text_transition", "easing"): {"type": "any", "default": "ease_in_out_cubic",
+                                    "desc": "動きの緩急（名前・イージング関数・Expr）"},
+    ("text_transition", "anchor"): {"type": "choice", "default": "left",
+                                    "choices": ["left", "right", "center"],
+                                    "desc": "共通キャンバスの中の横の揃え（変わらない字は止まったまま）"},
+    ("text_transition", "roll_dir"): {"type": "choice", "default": "auto",
+                                      "choices": ["auto", "up", "down"],
+                                      "desc": "回る向き。auto=増えるなら上・減るなら下"},
+    ("text_transition", "motion_blur"): {
+        "type": "bool", "default": True,
+        "desc": "1コマで字幅の 0.5 倍以上動く区間だけ、中間位置の平均で描く"
+                "（3〜10 点。間隔が 3px 以下になるよう速いほど増やす）"},
+    ("text_transition", "swing"): {
+        "type": "number", "default": 1.0, "min": 0, "max": 10,
+        "desc": "入れ替わる組が行から離れる量の上限（行の字の高さ = ascent + descent の倍）。"
+                "行の字をちょうど避ける量より浅くはしない（0 でいつもちょうど避ける高さ）"},
+    **{("text_transition", k): v for k, v in _TEXTMOVE_FMT_META.items()},
+    ("odometer", "from_"): {"type": "int", "required": True, "desc": "最初の値（整数）"},
+    ("odometer", "to"): {"type": "int", "required": True, "desc": "最後の値（整数）"},
+    ("odometer", "base"): {"type": "int", "default": 10, "min": 2, "max": 36,
+                           "desc": "基数（11 以上は A〜Z）"},
+    ("odometer", "digits"): {"type": "int", "default": None, "min": 1, "max": 400,
+                             "desc": "桁数（0 で埋める）"},
+    ("odometer", "signed"): {"type": "any", "default": False,
+                             "desc": "False（負は '-'）/ True（正にも '+'）/ "
+                                     "'twos'（digits 桁の2の補数。base は2の累乗）"},
+    ("odometer", "group"): {"type": "int", "default": None, "min": 1,
+                            "desc": "この桁数ごとに sep を挟む"},
+    ("odometer", "sep"): {"type": "string", "default": None,
+                          "desc": "桁区切りの文字（既定 ','。2進の数え盤なら ' '）"},
+    ("odometer", "duration"): {"type": "number", "default": 1.5, "min": 0, "unit": "秒",
+                               "desc": "回る秒数"},
+    ("odometer", "carry"): {"type": "choice", "default": "ripple",
+                            "choices": ["ripple", "together"],
+                            "desc": "ripple=変わる桁を右から ripple 秒ずつ遅らせる / "
+                                    "together=全部同時"},
+    ("odometer", "ripple"): {"type": "number", "default": 0.04, "min": 0, "max": 10,
+                             "unit": "秒", "desc": "桁ごとの遅れ（1桁は 0.25 秒以上回す）"},
+    ("odometer", "roll_dir"): {"type": "choice", "default": "auto",
+                               "choices": ["auto", "up", "down"],
+                               "desc": "回る向き。auto=増えるなら上・減るなら下"},
+    ("odometer", "hold"): {"type": "any", "default": 0.0, "unit": "秒",
+                           "desc": "前後の状態で止まる秒（数か2個のリスト）"},
+    ("odometer", "easing"): {"type": "any", "default": "ease_in_out_cubic",
+                             "desc": "1桁の回り方の緩急"},
+    ("odometer", "anchor"): {"type": "choice", "default": "right",
+                             "choices": ["left", "right", "center"],
+                             "desc": "横の揃え（桁が増えても右端の桁は止まったまま）"},
+    ("odometer", "motion_blur"): {"type": "bool", "default": True,
+                                  "desc": "速く回る桁を中間位置の平均で描く（3〜10 点）"},
+    **{("odometer", k): v for k, v in _TEXTMOVE_FMT_META.items()},
     # 既定値が None のため型を推定できない引数
     ("speed", "factor"): {"type": "number", "min": 0.1, "desc": "再生速度倍率（2.0で2倍速）"},
     ("zoom", "from_value"): {"type": "number", "desc": "開始スケール"},
@@ -443,6 +571,166 @@ _MANIFEST_PARAM_META = {
                                  "draw はこの寸法で描く"},
     ("frames", "fps"): {"type": "number", "default": None, "min": 1, "max": 1000,
                         "desc": "省略時は Project の fps"},
+    # 点で描いた地球と世界地図（fx_globe.py）
+    ("globe", "size"): {"type": "any", "default": 900,
+                        "desc": "ortho は正方形の一辺 px。plate は (幅, 高さ)（2:1）か幅。64〜4096"},
+    ("globe", "projection"): {"type": "choice", "default": "ortho", "choices": ["ortho", "plate"],
+                              "desc": "ortho=正射影の地球（裏側は描かない）/ plate=正距円筒の世界地図"},
+    ("globe", "radius"): {"type": "number", "default": None, "min": 8,
+                          "desc": "地球の半径 px（ortho だけ）。None は 0.46×size"},
+    ("globe", "view"): {"type": "any", "default": None,
+                        "desc": "最初の向き (緯度, 経度)（中心・北が上）。plate は経度だけ。None は "
+                                "ortho で (20, 0)・plate で 'auto'。'auto'（plate だけ）は弧が地図の端を"
+                                "またがず点が端で切れず、端の経線が大陸を切らない中心の経度を選ぶ"
+                                "（obj.figure.view）"},
+    ("globe", "land"): {"type": "any", "default": True,
+                        "desc": "True=同梱の地球（Natural Earth 1:110m の陸。パブリックドメイン）/ "
+                                "False=陸なし（15 度の経緯線と縁）/ 正距円筒の白黒 PNG のパス（白が陸。"
+                                "asset() でも探す）/ 多角形 [[(経度, 緯度), …], …]。None は ValueError"},
+    ("globe", "step"): {"type": "number", "default": None, "min": 0.6, "max": 5, "unit": "度",
+                        "desc": "点の間隔。None は画面上の間隔 ≒ 3.9×dot px になる角度（ortho は地球の"
+                                "中心で。size=900 で 1.19 度・300 で 3.56 度。小さい地球で点がつぶれない）。"
+                                "画面上の間隔が点の直径を下回ると警告"},
+    ("globe", "dot"): {"type": "number", "default": 2.2, "min": 2, "max": 20,
+                       "desc": "点の半径 px（2 未満は回転で瞬くので ValueError）"},
+    ("globe", "land_color"): {"type": "any", "default": "line",
+                              "desc": "陸の点の色（図の色の名前・色表記・(r, g, b[, a])）。"
+                                      "不透明度 0.55 で描く（拠点の白と弧の赤が浮く）"},
+    ("globe", "graticule"): {"type": "any", "default": None, "unit": "度",
+                             "desc": "経緯線の間隔。None は陸が無ければ 15・あれば無し。False / 0 で無し"},
+    ("globe", "limb"): {"type": "number", "default": 0.35, "min": 0, "max": 1,
+                        "desc": "縁の明るさ（点の明るさ = limb + (1 − limb)·√z）"},
+    ("globe", "back"): {"type": "bool", "default": False,
+                        "desc": "裏側の点を 0.15 の明るさで描く（ortho）"},
+    ("globe", "atmosphere"): {"type": "number", "default": 0.25, "min": 0, "max": 1,
+                              "desc": "縁の外の淡い光（ortho。0 で無し）。光のぶんキャンバスが広がる"
+                                      "（0.25 で縁の外へ半径の約 24%）"},
+    ("globe", "colors"): {"type": "any", "default": None,
+                          "desc": "図の色の差し替え {名前: 色}（fg / accent / muted / line / dim / panel）"},
+    ("globe", "font"): {"type": "string", "default": None, "desc": "札のフォントファイルパス"},
+    ("globe", "weight"): {"type": "any", "default": None, "desc": "札の太さ（可変フォントの wght）"},
+    ("globe", "label_size"): {"type": "number", "default": 32, "min": 8, "max": 400,
+                              "desc": "札の文字サイズ px"},
+    ("globe", "seed"): {"type": "int", "default": 0,
+                        "desc": "points(appear=('staged', …)) の1段の中のばらつき"},
+    # 後戻り型の正規表現の照合（regex_vm.py / fx_regex.py）。choices は
+    # regex_vm._MODES / _COUNT_KINDS・fx_regex._VIEWS / _TRIVIAL と同じ
+    # （tests/test_fx_regex.py が突き合わせる）
+    ("regex_trace", "mode"): {"type": "choice", "default": "search",
+                              "choices": ["search", "match", "fullmatch"]},
+    ("regex_trace", "max_steps"): {"type": "int", "default": 200_000, "min": 1,
+                                   "desc": "記録する手数（命令の数）の上限。超えたら RuntimeError"
+                                           "（数だけなら regex_count）"},
+    ("regex_count", "make_text"): {
+        "type": "any", "required": True,
+        "desc": "make_text(n) → 文字列（例 lambda n: 'x' + ' ' * n + 'x'）"},
+    ("regex_count", "count"): {"type": "choice", "default": "tests",
+                               "choices": ["tests", "matches", "backtracks", "steps",
+                                           "attempts"]},
+    ("regex_count", "mode"): {"type": "choice", "default": "search",
+                              "choices": ["search", "match", "fullmatch"]},
+    ("regex_count", "fit_ns"): {"type": "any", "default": None,
+                                "desc": "外挿に使う小さい n の列（既定 (8, 12, 16, 24, 32, 48, 64)。"
+                                        "式に上限のある量指定子（{1,100} など）があれば既定は"
+                                        "上限の先へずらす）"},
+    ("regex_view", "trace"): {"type": "any", "required": True,
+                              "desc": "regex_trace(式, 文字列) の戻り値（RegexTrace）"},
+    ("regex_view", "view"): {"type": "choice", "default": "tape",
+                             "choices": ["tape", "rows", "both"]},
+    ("regex_view", "beats"): {
+        "type": "string", "default": "test",
+        "desc": "1拍の単位（'test'・'backtrack'・'attempt'・'step'・'literal:<字>'）"},
+    ("regex_view", "pace"): {
+        "type": "any", "default": None,
+        "desc": "None（0.6 秒×3拍から 0.82 倍ずつ速く）・1拍の秒・framekit.pace の引数の dict"},
+    ("regex_view", "at"): {"type": "any", "default": None, "unit": "秒",
+                           "desc": "先頭の拍の時刻のリスト（Object の先頭からの秒）"},
+    ("regex_view", "duration"): {"type": "number", "default": None, "min": 0, "unit": "秒",
+                                 "desc": "図の長さ。pace を省くと拍がちょうどこの長さを埋める速さに"
+                                         "する（pace を渡したときは長さだけ）"},
+    ("regex_view", "size"): {"type": "any", "default": None,
+                             "desc": "(幅, 高さ) px。省略時は中身に合わせる（4096 まで）"},
+    ("regex_view", "count_label"): {
+        "type": "any", "default": "判定 {n:,} 回",
+        "desc": "カウンタの書式（n・man・oku）。(拍と回転の間, 最後) の2つの組にもできる"
+                "（例 ('判定 {n:,} 回', '約{oku:.0f}億回（模式）')）"},
+    ("regex_view", "cell"): {"type": "int", "default": 64, "min": 24, "max": 256,
+                             "desc": "1マスの大きさ px（文字は cell × 0.61）"},
+    ("regex_view", "window"): {"type": "any", "default": None,
+                               "desc": "(開始, 終了)。この範囲だけをマスで描き、外は「…」に畳む"},
+    ("regex_view", "show"): {"type": "any",
+                             "desc": "描く要素の組（pattern・cells・spans・cursor・start・arrow・"
+                                     "fail・count）"},
+    ("regex_view", "count"): {"type": "choice", "default": "tests",
+                              "choices": ["tests", "matches", "backtracks", "steps",
+                                          "attempts"]},
+    ("regex_view", "colors"): {"type": "any", "default": None,
+                               "desc": "色の上書き（fg・accent・muted・line・dim・panel）"},
+    ("regex_view", "trivial"): {"type": "choice", "default": "mark", "choices": ["mark", "hide"]},
+    # 点と線の図（fx_flow.py）。choices は fx_flow の _LAYOUTS / _DIRECTIONS / _SHAPES /
+    # _LABEL_POS と同じ（tests/test_fx_flow.py が突き合わせる）
+    ("flow_graph", "nodes"): {
+        "type": "any", "required": True,
+        "desc": "{名前: {'pos': (x, y), 'label': 文字, 'shape': 'dot'|'box', 'layer': 段}} か"
+                "名前のリスト。nodes() と edges() を持つグラフも読む（networkx は import しない）"},
+    ("flow_graph", "edges"): {
+        "type": "any", "default": [],
+        "desc": "(a, b) か (a, b, {'delay': 秒, 'curve': 0.2}) のリスト"},
+    ("flow_graph", "layout"): {
+        "type": "choice", "default": "given", "choices": ["given", "layered", "radial", "rings"],
+        "desc": "given=pos の通り / layered=BFS の段（段の中は重心法を2往復）/ "
+                "radial=根が中心で角度は葉の数に比例 / rings=段ごとの同心円"},
+    ("flow_graph", "direction"): {"type": "choice", "default": "down",
+                                  "choices": ["down", "up", "right", "left"],
+                                  "desc": "layered の向き（根のある側から）"},
+    ("flow_graph", "size"): {"type": "any", "default": None,
+                             "desc": "キャンバス (幅, 高さ) px。省略時は Project の解像度"},
+    ("flow_graph", "padding"): {"type": "number", "default": 40, "min": 0,
+                                "desc": "自動配置の余白 px（文字・box のはみ出しは別に空ける）"},
+    ("flow_graph", "node"): {"type": "choice", "default": "dot", "choices": ["dot", "box"],
+                             "desc": "既定のノードの形（nodes の 'shape' で個別に変えられる）"},
+    ("flow_graph", "node_radius"): {"type": "number", "default": 10, "min": 1, "max": 200,
+                                    "desc": "点の半径 px"},
+    ("flow_graph", "box"): {"type": "any", "default": [240, 72],
+                            "desc": "box の (幅, 高さ) px。文字が収まらなければ広げる"},
+    ("flow_graph", "edge_width"): {"type": "number", "default": 3, "min": 0.5, "max": 50,
+                                   "desc": "辺の幅 px（line 色）"},
+    ("flow_graph", "curve"): {"type": "number", "default": 0.0, "min": -2, "max": 2,
+                              "desc": "辺の曲がり（中点から 長さ×curve だけ進行方向の左へ。負で右）。"
+                                      "ノードから出る辺・入る辺の組ごとに、隣の辺との角の間 g に"
+                                      "応じて tan(g/2)/2 までに自動で弱める（渦に見えない。"
+                                      "均等に散った 3〜4 本はそのまま、layered の 3 本の扇は約 0.16。"
+                                      "辺ごとの 'curve' は指定どおり）"},
+    ("flow_graph", "colors"): {"type": "any", "default": None,
+                               "desc": "図の色の差し替え {名前: 色}（fg / accent / muted / line / dim / panel）"},
+    ("flow_graph", "font"): {"type": "string", "default": None,
+                             "desc": "ノードの文字のフォントファイルパス"},
+    ("flow_graph", "weight"): {"type": "any", "default": None,
+                               "desc": "文字の太さ（可変フォントの wght か名前つきインスタンス）"},
+    ("flow_graph", "label_size"): {"type": "number", "default": 36, "min": 30, "max": 400,
+                                   "desc": "文字サイズ px（30 未満は ValueError）"},
+    ("flow_graph", "label_pos"): {
+        "type": "choice", "default": "auto",
+        "choices": ["auto", "below", "above", "right", "left", "center"],
+        "desc": "点の文字の位置。auto は layered では葉だけ流れの向き（根は逆の側・途中は横）、"
+                "radial / rings は外向き、given は下を第一候補にし、辺・ほかのノードと重なる側を"
+                "避ける（box の文字はいつも中）"},
+    ("flow_graph", "seed"): {"type": "int", "default": 0,
+                             "desc": "点の塊（flow_tree の 500 を超える葉）の散らばり"},
+    ("flow_tree", "levels"): {
+        "type": "any", "required": True,
+        "desc": "段ごとのノードの数（例 [1, 50, 3000]）。名前は 'L段_番号'"},
+    ("flow_tree", "t"): {"type": "number", "default": 0, "min": 0, "unit": "秒",
+                         "desc": "根から broadcast する秒（None で配らない）"},
+    ("flow_tree", "hop"): {"type": "number", "default": 0.4, "min": 0, "unit": "秒",
+                           "desc": "1段あたりの秒"},
+    ("flow_tree", "layout"): {"type": "choice", "default": "radial",
+                              "choices": ["radial", "layered", "rings"]},
+    ("flow_tree", "amount"): {
+        "type": "number", "default": None, "min": 0,
+        "desc": "根の量。分かれるたびに等分し、パケットの直径を √(量) に比例させる（合計は保つ）"},
+    ("flow_tree", "size"): {"type": "any", "default": None,
+                            "desc": "flow_graph と同じ（**kw で受ける。colors・node_radius・seed なども同様）"},
     # transition は Object のみ受ける（実装は文字列パスを TypeError で拒否）
     ("transition", "obj_a"): {"type": "object", "required": True,
                               "desc": "前半の Object（Transform/Effect 未適用の素材）"},
@@ -621,6 +909,55 @@ _MANIFEST_PARAM_META = {
         "type": "any", "default": None,
         "desc": "(dx, dy)。素材の中心からこれだけずれた1点から粒が出て、絵に集まる"
                 "（px。右と下が正）"},
+    # --- fly_to。既定値は morph_flight.py の generate_flight_frames と同じ
+    #     （tests/test_fly_to.py が突き合わせる）。choices は state.py の集合 ---
+    ("fly_to", "target"): {"type": "object", "required": True,
+                           "desc": "行き先の絵（加工していない画像 Object。text_image も可。"
+                                   "パス文字列は不可）。消費されて Project から外れる"},
+    ("fly_to", "offset"): {"type": "any", "default": [0, 0],
+                           "desc": "(dx, dy)。A の中心から B の中心までのずれ px（A の絵の px。"
+                                   "右と下が正）。B の左上は A の左上から "
+                                   "(⌈Wa/2⌉ + ⌊dx − Wb/2⌋, ⌈Ha/2⌉ + ⌊dy − Hb/2⌋)（A の中心を整数の"
+                                   "画素に置いたとき、中心を A の中心 + offset に置いた静止画の B と"
+                                   "同じ丸め）"},
+    ("fly_to", "max_pixels"): {"type": "int", "default": 12000, "min": 1, "max": 100000,
+                               "desc": "粒の数の上限。粒の数は min(max_pixels, A と B の"
+                                       "多い方の不透明な画素数)。少ない側は複製して揃える"},
+    ("fly_to", "match"): {"type": "choice", "default": "ot",
+                          "choices": list(_FLY_MATCH_MODES),
+                          "desc": "粒の対応。ot=スライスした最適輸送（移動の総量が小さく道すじが"
+                                  "交差しにくい）/ angle=重心まわりの角度の順 / random=無作為"},
+    ("fly_to", "arc"): {"type": "number", "default": 0.25, "min": -4, "max": 4,
+                        "desc": "道すじのふくらみ（2次ベジェの制御点を中点から 距離×arc だけ"
+                                "ずらす）。正で進む向きの右手側（右へ進む粒は下側）、負で左手側"},
+    ("fly_to", "swirl"): {"type": "number", "default": 0.0, "min": -50, "max": 50,
+                          "desc": "道すじを中点のまわりに回す角度 rad（道の半ばで最大、両端で 0。"
+                                  "正で時計回り）"},
+    ("fly_to", "stagger"): {"type": "number", "default": 0.3, "min": 0, "max": 0.95,
+                            "desc": "出発の遅れの幅（全体の進行度に対する比）。0 で全粒が同時に"
+                                    "出る。残りの時間で各粒が smoothstep で加減速する"},
+    ("fly_to", "stagger_by"): {"type": "choice", "default": "x",
+                               "choices": list(_FLY_STAGGER_BY),
+                               "desc": "出発の順番。x / y = 横 / 縦の並びで、進む向きの先頭の粒から"
+                                       "（右へ飛ぶなら右端から。粒の列が途中で詰まらない）/ "
+                                       "distance=遠くへ行く粒から / random=無作為"},
+    ("fly_to", "particle_size"): {"type": "number", "default": 2, "min": 0.5, "max": 32,
+                                  "desc": "粒（円）の半径 px（サブピクセルの位置・縁 1px の"
+                                          "アンチエイリアス）。推奨 2（1080p）。描く時間は"
+                                          "粒の数 × 半径² に比例する（1.2万粒で半径 2 は 1コマ"
+                                          "約 50ms、半径 32 は約 1.5 秒。大きな粒は max_pixels を"
+                                          "減らす）"},
+    ("fly_to", "color_path"): {"type": "choice", "default": "oklab",
+                               "choices": list(_FLY_COLOR_PATHS),
+                               "desc": "粒の色の通り道。oklab=直線 / oklch=色相を回す"},
+    ("fly_to", "dissolve"): {"type": "any", "default": [0.15, 0.15],
+                             "desc": "(a, b)。最初の a の区間で A の絵から粒へ、最後の b の区間で"
+                                     "粒から B の絵へ移る（全体の進行度に対する比。a + b <= 1）"},
+    ("fly_to", "seed"): {"type": "int", "default": 0, "desc": "乱数の種（同じ値なら同じ絵）"},
+    ("fly_to", "delay"): _PARTICLE_PARAM_META["delay"],
+    ("fly_to", "duration"): {
+        "type": "number", "default": None,
+        "desc": "動く秒数（None は残り全部）。終わった後は B を Object の尺の終わりまで保持する"},
     ("narrate", "text_content"): {"type": "string", "required": True, "desc": "読み上げテキスト"},
     ("voice", "text"): {"type": "string", "required": True, "desc": "読み上げテキスト"},
     # TTS バックエンド（None で自動選択: env SCRIPTVEDIT_TTS_BACKEND → VOICEVOX 起動判定 → edge）
@@ -681,6 +1018,30 @@ _MANIFEST_NOTES = {
         "生成物は __cache__/artifacts/stills/<鍵>.mov（可逆の qtrle。同じ絵が続く区間は"
         "ほぼ 0 バイト）。鍵は各画像の内容指紋・各絵のフレーム数・fps・size",
     ],
+    "slots": [
+        "s = slots() → s.row(...) で行 → 出来事（fill / read / link / put / set / mark / "
+        "unmark / to_str / compare / swap / halt）→ s.build() で動画 Object。"
+        "表示は s.build().time()（引数なしは図の尺ぶん）",
+        "elide なしで描けるのは 64 箱まで（n は 100,000 まで）。elide=(先頭, 末尾) で畳み、"
+        "capacity・ghost・出来事が触る番号の前後は自動で見せる。全行で番号の列は揃う",
+        "fill: 上限（capacity。無ければ n）を超えた分は線に当たって accent になり外へ落ちる。"
+        "描く塊どうしは 0.12 秒以上空け（あふれの時間を fill の 65% まで延ばす）、"
+        "spill_visible 個まで描く。あふれの動きは seed で決まる",
+        "あふれの札は row(overflow_label=)。'total'（既定。入った数の合計「400件」）/ "
+        "'over'（上限を超えた数「+200」）/ 'undrawn'（描かなかった塊の数）/ None / 書式の文字列"
+        "（名前 total・over・undrawn・limit。例 '{total:,}件（上限{limit}）'）",
+        "read / link は範囲外の番号を受ける（行の外の斜線の区画「?」へ。区画は一番外の ghost "
+        "のさらに外。ghost の番号はその点線の箱）。着いた瞬間に accent。範囲外の put / set / "
+        "mark 等と、build(duration=) より後に終わる出来事は ValueError",
+        "compare の直後に swap / set / put を続けてよい（持ち上げた箱を下ろしながら動かす）",
+        "halt(style='dim') は全体の不透明度を 0.45 に（何度呼んでもそれより薄くしない）、"
+        "'freeze' は以後のコマを止める（freeze の後の出来事は ValueError）。点滅・ノイズはしない",
+        "文字は p.audit() へ申告する（size で縮めた倍率込み）。既定（番号 32px）で warning は"
+        "出ない。1 つの長い字のために行の字を 32px 未満へは揃えて縮めない（その字だけ縮む）。"
+        "左右に並べるときは size を縮めず cell=48, gap=12, value_size=32 にする",
+        "生成物は framekit.build → __cache__/artifacts/frames/<鍵>.mov。鍵は行の定義・"
+        "出来事の列・寸法・色・size・フォントの内容指紋・_SLOTS_VER（dry_run は描かない）",
+    ],
     "frames": [
         "draw のコードは鍵に入らない。同じ key なら draw を呼ばずに前回の動画を使うので、"
         "描き方や元データを変えたら key を変える（版番号や元データを key に入れる）",
@@ -688,6 +1049,26 @@ _MANIFEST_NOTES = {
         "time() で尺より長く表示すると最後のコマが残る。alpha を保つ",
         "生成物は __cache__/artifacts/frames/<鍵>.mov（可逆の qtrle。前のコマと同じ画素は"
         "書かないので、動かない部分の多い絵ほど小さい）",
+    ],
+    "globe": [
+        "戻り値は組み立て役。turn / spin / points / arc / ripple / night / label を積んで "
+        "build() で透過動画 Object にする（obj.figure.xy(coord, t)・obj.figure.subsolar が付く）",
+        "座標は (緯度, 経度) の度。land の多角形だけ (経度, 緯度)。|緯度| が 90 を超えると ValueError",
+        "陸地の既定は同梱の地球（Natural Earth 1:110m の陸。パブリックドメイン。同梱の素材・データ"
+        "（assets/ と data/）の「全部自作」の唯一の例外で、出典は data/NOTICE.md）。land=False で陸なし。"
+        "鍵は陸地の内容指紋",
+        "地図を出すときは「地図: Natural Earth」と添えることを勧める（義務ではない）",
+        "拠点の点（points）はまわりの陸の点を抜いて（堀）淡い光の輪を敷く（既定の色でも陸に埋もれない）。"
+        "点が密で堀が陸をほとんど消すとき（plate 1400×700 に数千点など）は points(halo=False) で"
+        "芯だけにする",
+        "plate の view は既定で 'auto'（太平洋を渡る弧も地図の端で切れず1本につながる中心の経度）",
+        "推奨: 1回 10 秒以内・1本の動画に 2 回まで。都市の点は出典を書くか「模式図」と明記する",
+        "spin は既定で回さない（qtrle が効かず 900×900・5 秒で約 80MB）。3 度/秒を超えると警告",
+        "night(when) の when は UTC の datetime（naive は ValueError）。太陽の真下は NOAA の簡略式",
+        "札（label）は裏へ回ると消え、重なり・はみ出しは build のときに警告する",
+        "plate の弧は弦に垂直に上へ反る（弦が縦に近いと地図の内側へ）。反りで日付変更線を"
+        "またいで反対の端に描かれるときは反りを縮める",
+        "numpy・opencv-python・Pillow が要る（framekit と同じ。描画のときに遅延 import）",
     ],
     "text_image": [
         "Pillow 9.1 以上が必要（pip install \"Pillow>=9.1\"）。戻り値は画像 Object（配置は move(x=, y=, anchor=)）",
@@ -699,6 +1080,31 @@ _MANIFEST_NOTES = {
         "（resize / scale の倍率込み）で検査する",
         "生成物は __cache__/artifacts/textimage/<鍵>.png（鍵は文字列・書式・"
         "フォントの内容指紋・Pillow の版）",
+    ],
+    "text_transition": [
+        "numpy・opencv-python・Pillow が要る（dry_run は Pillow とフォントだけ）。"
+        "戻り値は透過の動画 Object（配置は move(x=, y=, anchor=)）",
+        "各状態のコマは text_image(状態, **fmt, **obj.figure.text_image_kwargs) と画素が一致する"
+        "（text_image_kwargs は canvas と、fmt に無ければ align=anchor・padding）",
+        "大きさの変わる字は大きい方の字形を縮めて置き、縁取りは途中でも border px のまま。"
+        "入れ替わる組は上下に離れて運ばれ、ほかの字に重ならない高さを構築時に選ぶ"
+        "（離れる量は swing × 行の字の高さまで。既定 1 倍で、キャンバスもその分だけ高くなる）",
+        "鍵にはフォントの内容指紋と Pillow の版が入る（Pillow を更新すると作り直す）",
+        "obj.figure.starts（各状態に着いた秒）/ pairs（遷移ごとの keep・move・replace・"
+        "leave・enter とトークンの番号）/ tokens / schedule / state_frames",
+        "赤くしたい字は後の状態の区間で赤にする（残る字の色は oklab で補間）",
+        "max_width（折り返し）は受けない。1状態 400 トークン・3行まで、キャンバスは 8192px まで",
+        "使いすぎると忙しくなる。「答えが変わる」瞬間だけに置く",
+        "生成物は __cache__/artifacts/frames/<鍵>.mov（鍵は区間・時間・easing の式・"
+        "動かし方・書式・フォントの内容指紋・描画の版）。time() で尺より長く出すと最後の状態が残る",
+    ],
+    "odometer": [
+        "text_transition の糖衣（位置で対応・変わる桁は字のマスの中で roll）",
+        "2進の数え盤: base=2, digits=32, signed='twos', group=8, sep=' '",
+        "carry='ripple' は変わる桁を右から ripple 秒ずつ遅らせる。1桁は 0.25 秒以上回す"
+        "（足りなければ ValueError）",
+        "odometer.text(from_text, to_text, **kw): 書式つきの文字列（日時など）の数字の"
+        "位置だけを回す。roll_dir='auto' は数字の並びで比べる（巻き戻すと下）",
     ],
     "counter": ["size は定数のみ（text と同じ制約）",
                 "最初のコマは from_、最後のコマは必ず to を表示する"
@@ -744,6 +1150,27 @@ _MANIFEST_NOTES = {
                       "余白（expand）は対称に付き、move の anchor は余白を除いた source の絵の箱が基準",
                       "assemble_from(src, duration=1.6) で 1.6 秒で集まり、"
                       "残りは集まった絵を保持する"],
+    "fly_to": ["bakeable ops の末尾に1つだけ置ける（終端フレーム生成Effect）。"
+               "後ろに置けるのは live（move 等）だけ",
+               "target は加工していない画像 Object のみ（Transform/Effect 付き・text() 系・"
+               "動画は ValueError、パス文字列は TypeError）。text_image は使える",
+               "重なる形どうしは morph_to（sdf）、離れた形どうしは fly_to"
+               "（sdf は離れた形だとクロスフェードになる）",
+               "最初のコマは A、最後のコマは offset の位置の B と画素一致する。"
+               "delay / duration の前後は最初・最後のコマを保持（前後に同じ絵の静止画を置かなくてよい）",
+               "B を出し続けるなら別の Object へ引き継がず、fly_to の Object の time() を延ばす"
+               "（duration の後は B を保持する）。別の静止画の B（anchor='center'、中心 = A の中心 + "
+               "offset）へ引き継ぐときは、A の中心を整数の画素に置き、⌈Wa/2⌉ + ⌊dx − Wb/2⌋ と "
+               "⌈Ha/2⌉ + ⌊dy − Hb/2⌋ が偶数になる offset にすると画素一致する（overlay は左上を "
+               "4:2:0 の 2px 格子へ切り捨てるので、奇数だと 1px ずれる）",
+               "キャンバスは A の箱・B の箱・粒の道すじを覆い、A の中心に対して左右・上下"
+               "それぞれ対称に広がる（余白は偶数）。move の anchor は余白を除いた A の箱が基準"
+               "なので topleft 等でも A は静止画と同じ位置に映る。4096px を超えると ValueError",
+               "A と B に不透明な画素（α>0.1）が無いと ValueError",
+               "重さは「余白込みのキャンバス面積 × 動くコマ数」と粒の数。目安は 1.2万粒・"
+               "1080p の文字どうしで前処理 1〜2 秒 + 1コマ 35〜95ms（2回目からはキャッシュ）",
+               "粒子は最も目を引く道具。explode_to / assemble_from と合わせて1本に2〜3回まで。"
+               "道すじが字幕を横切らないよう、arc の向きと重ね順（priority）は呼び出し側で決める"],
     "rotate": ["時間依存の式（u を含む式）は不可。時間変化する回転は rotate_to() を使う"],
     "flip": ["flip() は左右反転、flip(vertical=True) は上下反転だけ。"
              "両方（180度回転と同じ絵）は flip(horizontal=True, vertical=True) と明示する",
@@ -851,6 +1278,43 @@ _MANIFEST_NOTES = {
     "lut": [".cube 形式のみ"],
     "subtitles": ["SRT の文字コードは UTF-8",
                   "フォントは名前で探す。システムに無いフォントは fontsdir で渡す"],
+    "flow_graph": [
+        "戻り値は FlowGraph（Object ではない）。g.send / g.broadcast / g.state / g.cut で"
+        "出来事を足し、g.build(duration=None) で動画 Object にする（None は最後の出来事 + 1 秒）",
+        "時刻 t はすべて build() の動画の先頭を 0 とした秒。send は各パケットが止まる秒"
+        "（pass は着く秒）のリスト、broadcast は {名前: 届く秒} を返す",
+        "send(t, path, n=1, every=0.12, speed=700, color='fg', size=7（直径 px）, trail=0.25, "
+        "fate='pass' | ('stop', 名前) | ('drop', 0.6), label=None)。パケットは辺の上を弧長で"
+        "等速に進み、曲がった辺でも辺から外れない。止まったパケットは前のパケットとの中心の"
+        "間隔 1.6 ×（2つの直径の平均）で手前へ並ぶ（重ならない）",
+        "send の label はノードの枠・点・ノードの文字・先に出た札に重ねない（重なるコマでは"
+        "隠れ、0.15 秒手前から薄れて、離れてから現れる）。置き場所は画面の上・進行方向の左右・"
+        "下から、隠れる間・辺が下を通る間・はみ出しの最も少ないものを選んで保つ（途中のノードの"
+        "先で1回・止まる所で1回だけ、一度隠れてから変わりうる。止まった札はパケットより後ろの"
+        "左右に残る）",
+        "broadcast(t, root, hop=0.35, color='accent', packets=True, ripple=True): 辺の delay"
+        "（無ければ hop）で Dijkstra。届いた順に色が変わり波紋が出る。cut は経路を変えない",
+        "state(t, node, color=, dim=0〜1, mark='x'|'check'|'none', dur=0.25) / "
+        "cut(t, (a, b), dur=0.3)（dim の破線にして薄れさせる）",
+        "obj.figure.pos（{名前: (x, y)} キャンバスの px）と obj.figure.arrival（broadcast で"
+        "最初に届く秒）を他の Object の配置・時刻合わせに使える",
+        "上限: ノード 5,000・辺 10,000・同時に見えるパケット 2,000。layered / radial で根から"
+        "辿れないノードがあれば ValueError。文字の重なり・はみ出しは警告する",
+        "label_pos='auto' の点の文字は辺・ほかのノードと重ならない側へ置く（layered は葉だけ"
+        "流れの向き）。どの側も辺が通るときは文字の下に panel 色の板を敷いて警告する",
+        "途中の box を通るパケットは box の中では描かない。止まる列は手前のノードを跨いで並ぶ",
+        "模式図であって実際の経路ではない（「模式図」の注記は呼び出し側が付ける）。"
+        "構築（flow_graph() の呼び出し）にも numpy・opencv-python・Pillow が要る"
+        "（pip install \"scriptvedit[figures]\"）",
+    ],
+    "flow_tree": [
+        "葉が 500 を超える段は点の塊（直径 5px・seed で散らす）にし、そこへの broadcast の"
+        "パケットは親1つあたり 4 個に束ねる（量は束ねた分の合計）。点の塊には波紋を出さない",
+        "amount を渡すとパケットの直径が √(量) に比例する（面積が量に比例し、合計は保たれる）。"
+        "g.amount に {名前: 量}、g.levels に段ごとの名前",
+        "radial の根は1つ（levels[0] は 1）。t=None なら配らない（g.broadcast を自分で呼ぶ）",
+        "curve= は子の多い親からの辺で自動で弱まる（子 40 で約 0.04。渦に見えない）",
+    ],
 }
 
 # エントリごとの最小例
@@ -877,6 +1341,16 @@ _MANIFEST_EXAMPLES = {
                    "t.time(3) <= move(x=0.5, y=0.5, anchor='center')\n"
                    "boom = text_image('崩壊', size=160, border=6, padding=60)\n"
                    "boom.time(2) <= explode_to(max_pixels=8000, expand=300)"),
+    "text_transition": (
+        "t = text_transition(['Fundation', 'Foundation'], enter='drop', size=120)\n"
+        "t.time(3) <= move(x=0.5, y=0.5, anchor='center')\n"
+        "text_transition([r'\\s+$', [r'\\s+', ('+', {'color': '#e0241b'}), '$']], duration=0.8)\n"
+        "text_transition([official, [(r'\\s+$', {'size': 150})]], unit=r'\\\\.|.',\n"
+        "                leave='fall', anchor='center', font=mono)"),
+    "odometer": (
+        "odometer(2**31 - 1, 2**31, base=2, digits=32, signed='twos', group=8, sep=' ')\n"
+        "odometer(2147483647, -2147483648, group=3)\n"
+        "odometer.text('2038-01-19 03:14:07', '1901-12-13 20:45:52', roll_dir='down')"),
     "counter": ("counter(0, 100, format='%d%%').time(3)\n"
                 "counter(0, 1234567, format='¥%,d', easing='ease_out_cubic', border=3).time(3)"),
     "subtitles": "subtitles('subs.srt', style='FontName=Meiryo,FontSize=36', fontsdir=here('fonts'))",
@@ -892,6 +1366,12 @@ _MANIFEST_EXAMPLES = {
     "speed": "clip_.time(4) <= speed(2.0)   # 2倍速",
     "reverse": "clip_ <= reverse()",
     "morph_to": "img <= morph_to(Object(asset('images/target.png')))",
+    "fly_to": ("red = text_image('今も、書く人しだい', size=44, color='#e0241b')\n"
+               "close = text_image('事件は、まだ、終わっていない。', size=96, color='#e0241b')\n"
+               "# red の中心から左へ 560px・上へ 300px の所で close になる（2 秒。後は close を保持）\n"
+               "red.time(3) <= fly_to(close, offset=(-560, -300), arc=0.2, stagger=0.35,\n"
+               "                      duration=2.0)\n"
+               "red <= move(x=1520 / 1920, y=800 / 1080, anchor='center')"),
     "slideshow": "slideshow(['a.png', 'b.png', 'c.png'], each=3.0, transition='fade')",
     "transition": "transition(obj_a, obj_b, kind='wipeleft', duration=1.0)",
     "stills": ("pages = stills([('p1.png', 6.4), ('p2.png', 7.1), ('p3.png', 5.0)])\n"
@@ -904,6 +1384,20 @@ _MANIFEST_EXAMPLES = {
                "    return im\n"
                "bar = frames(draw, duration=2.0, key=['bar', 1])   # 描き方を変えたら key を変える\n"
                "bar.time(5)                        # 2 秒より後は最後のコマが残る"),
+    "slots": ("s = slots()\n"
+              "s.row('shelf', 200, label='項目の上限', capacity=200, elide=(6, 3))\n"
+              "s.fill(1.0, 'shelf', 400, dur=2.5)    # 倍の 400 個 → 200 を超えた分があふれる\n"
+              "s.halt(3.8)\n"
+              "s.build().time() <= move(x=0.5, y=0.5, anchor='center')\n"
+              "t = slots()\n"
+              "t.row('rule', 21, label='受け取る項目')\n"
+              "t.row('input', 20, label='渡す項目', ghost=[21])\n"
+              "t.link(1.2, ('rule', 21), ('input', 21))  # 先が ghost なので赤くなる"),
+    "globe": ("g = globe(projection='plate', size=(1400, 700))   # 陸は同梱の地球・中心は自動\n"
+              "g.points(sites)                                # 出典を書くか「模式図」と明記する\n"
+              "g.arc((37.8, -122.4), (35.7, 139.7), t=1.0)    # 太平洋を渡る弧も1本につながる\n"
+              "g.ripple((35.7, 139.7), t=1.8)\n"
+              "g.build().time(4) <= move(x=0.5, y=0.5, anchor='center')"),
     "keyframes": "img <= scale(keyframes((0, 1.0), (0.5, 1.5), (1, 1.0), easing=ease_in_out_sine))",
     "avolume": "bgm <= avolume(0.3)",
     "loop": ("bgm <= loop() & duck_under(narration_audio)   # time() は呼ばない（総尺までループ）\n"
@@ -919,6 +1413,15 @@ _MANIFEST_EXAMPLES = {
     "pip": "video <= pip(x=0.75, y=0.75, scale=0.3, radius=12)",
     "anchor": "obj.time(3, name='intro')\npause.until('intro.end')",
     "scene": "with scene('導入', 5.0):\n    ...",
+    "flow_graph": ("g = flow_graph({'lb': {'label': 'ロードバランサー', 'shape': 'box'},\n"
+                   "                's1': {'label': 'サーバー1'}, 's2': {'label': 'サーバー2'}},\n"
+                   "               [('lb', 's1'), ('lb', 's2')], layout='layered')\n"
+                   "g.send(0.5, ['lb', 's1']); g.send(0.9, ['s2', 'lb'], fate=('drop', 0.5))\n"
+                   "g.state(2.0, 's2', dim=0.6, mark='x'); g.cut(2.0, ('lb', 's2'))\n"
+                   "obj = g.build()          # obj.figure.pos['s1'] でノードの位置"),
+    "flow_tree": ("g = flow_tree([1, 50, 3000], t=0.5, amount=400000)   # 根から一斉に配る\n"
+                  "obj = g.build()\n"
+                  "obj.figure.arrival['L2_0']      # 葉に届く秒"),
 }
 
 # 既知の制約・落とし穴（トップレベル constraints）
@@ -990,12 +1493,12 @@ _MANIFEST_CONSTRAINTS = [
         "topic": "テキスト",
         "severity": "error",
         "applies_to": ["text", "typewriter", "counter", "morph_to", "explode_to",
-                       "assemble_from", "text_image"],
+                       "assemble_from", "fly_to", "text_image"],
         "text": "text/typewriter/counter（drawtext 系。実体の画像を持たない）には "
-                "morph_to / explode_to / assemble_from を掛けられず、compute() もできない"
+                "morph_to / explode_to / assemble_from / fly_to を掛けられず、compute() もできない"
                 "（どちらも ValueError）。文字を粒子化・モーフするときは "
                 "text_image() で透過 PNG の画像 Object にしてから適用する。"
-                "morph_to の target / assemble_from の source も同じ。",
+                "morph_to / fly_to の target / assemble_from の source も同じ。",
     },
     {
         "id": "reverse_max_30s",
@@ -1066,8 +1569,8 @@ _MANIFEST_CONSTRAINTS = [
         "id": "terminal_frame_effect_last",
         "topic": "生成効果",
         "severity": "error",
-        "applies_to": ["morph_to", "explode_to", "assemble_from"],
-        "text": "morph_to / explode_to / assemble_from は終端フレーム生成Effect。"
+        "applies_to": ["morph_to", "explode_to", "assemble_from", "fly_to"],
+        "text": "morph_to / explode_to / assemble_from / fly_to は終端フレーム生成Effect。"
                 "bakeable な ops の末尾に1つだけ置ける（後ろに別の bakeable Effect を続けられない）。",
     },
     {

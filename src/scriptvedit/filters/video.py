@@ -11,7 +11,9 @@ from fractions import Fraction
 from scriptvedit.context import current_project
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.expr import Const, Expr, _UStr, _UValue
+from scriptvedit.expr import Const, Expr, Var, _BinOp, _FuncCall, _TimeVar, _UnOp, _UStr, _UValue
+from scriptvedit.expr_scan import (_compile_u_eval, _pl_clip01, _pl_ends, _pl_max_abs,
+                                   _pl_pieces, _pl_sub)
 from scriptvedit.state import _REVERSE_MAX_SEC
 from scriptvedit.validate import _parse_color_rgb
 
@@ -636,6 +638,100 @@ class _FxCtx:
         self.label_prefix = label_prefix
 
 
+def _frame_us(start, dur):
+    """表示区間 [start, start+dur] に入るコマ（タイムラインの 1/fps 刻み）の u を返す。
+
+    フィルタの式はコマの時刻 T で評価されるので、式の最大・最小を見積もるときは
+    この u で評価すれば「実際に描かれる値」を漏れなく拾える（チェックポイントは
+    start=0 で 0/fps から、本レンダは tpad でタイムラインの格子へ揃えたコマ）。
+    前後に1コマずつ余分に取り、u は 0..1 へ clip する（区間の外は端の値で止まる）。
+    """
+    if not dur or dur <= 0:
+        return []
+    proj = current_project()
+    fps = float(proj.fps if proj else 30)
+    k0 = _math.floor(start * fps) - 1
+    k1 = _math.ceil((start + dur) * fps) + 1
+    return [_builtins.min(1.0, _builtins.max(0.0, (k / fps - start) / dur))
+            for k in range(k0, k1 + 1)]
+
+
+def _expr_breakpoint_us(expr, dur):
+    """式の中の「u（または経過秒）< 定数」の境目を u で返す（keyframes の頂点など）。
+
+    区分線形の keyframes / keyframes_sec / sequence_param は lt(u, 境目) の木で書かれ、
+    最大・最小は頂点（境目）で取る。コマの時刻だけで評価すると、時刻が ms に丸まる
+    素材（mkv の 1/1000）では細い山の頂上付近でコマごとの値が見積もりを少し超えうるので、
+    頂点そのものも評価に加える。
+    """
+    out = []
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        cls = type(node)
+        if cls is _BinOp:
+            stack.extend((node.left, node.right))
+        elif cls is _UnOp:
+            stack.append(node.operand)
+        elif cls is _FuncCall:
+            if node.name == "lt" and len(node.args) == 2 and type(node.args[1]) is Const:
+                x, c = node.args[0], float(node.args[1].value)
+                if type(x) is Var and x.name == "u":
+                    out.append(c)
+                elif type(x) is _TimeVar and x.kind == "sec" and dur:
+                    out.append(c / dur)
+            stack.extend(node.args)
+    return [_builtins.min(1.0, _builtins.max(0.0, u)) for u in out]
+
+
+def _frame_us_near(start, dur, xs):
+    """u の点 xs のそれぞれの前後のコマの u を返す（_frame_us の部分集合。同じ式で計算する）。
+
+    1次式の区分の内側では、コマの値の最大・最小は区分に入る最初か最後のコマで取るので、
+    区分の端の前後のコマだけを見れば全コマを見たのと同じになる（端の位置からコマ番号を
+    求める丸めの分だけ、前後に1コマずつ余分に取る）。
+    """
+    if not dur or dur <= 0:
+        return []
+    proj = current_project()
+    fps = float(proj.fps if proj else 30)
+    k0 = _math.floor(start * fps) - 1
+    k1 = _math.ceil((start + dur) * fps) + 1
+    ks = set()
+    for x in xs:
+        base = _math.floor((start + x * dur) * fps)
+        for k in range(base - 1, base + 3):
+            if k0 <= k <= k1:
+                ks.add(k)
+    return [_builtins.min(1.0, _builtins.max(0.0, (k / fps - start) / dur))
+            for k in sorted(ks)]
+
+
+def _expr_frame_max(expr, start, dur):
+    """描くコマ（_frame_us）と式の頂点で、式が取る値の最大を返す（評価する点が無ければ None）。
+
+    区分線形の式（keyframes / keyframes_sec / ramp 等。expr_scan._pl_pieces）は、区分の
+    端（頂点）の値と、端の前後のコマだけを評価する（区分の内側は1次式なので、コマの最大は
+    区分の最初か最後のコマで取る。全コマを評価したのと同じ値になり、手間は点の数に比例して
+    コマ数に依らない）。区分線形でない式（イージング・振動系・中身を辿れない派生）だけ、
+    描くコマと keyframes の頂点をすべて評価する（_compile_u_eval は if の選んだ枝だけを
+    辿るので、1回の評価は点の数の対数）。以前は全コマで eval_at（if の両方の枝を評価する）を
+    呼んでいて、60fps・128 点の scale で 600 秒の Object はフィルタを組むたびに 17 秒、
+    3600 秒は 107 秒かかった。
+    不連続点の手前の片側極限（どのコマも取らない値）は使わない（全コマを評価していた頃と
+    同じ。pad の大きさは topleft 等の配置にも効くので、描かない大きさで pad を広げない）。
+    """
+    ev = _compile_u_eval(expr, dur)
+    pieces = _pl_pieces(expr, dur)
+    us = _expr_breakpoint_us(expr, dur)
+    if pieces is None:
+        us += _frame_us(start, dur)
+    else:
+        ends = _pl_ends(pieces)
+        us += ends + _frame_us_near(start, dur, ends)
+    return _builtins.max(ev(u) for u in us) if us else None
+
+
 def _fx_scale(e, eff_idx, ctx):
     """動的スケール（+ base_dims 既知時は固定サイズpad + SEGVバリア）"""
     scale_expr = e.params.get("value", Const(1))
@@ -657,10 +753,19 @@ def _fx_scale(e, eff_idx, ctx):
             # 実際は1.5 → pad不足でEINVAL）ため、密な素数格子で評価する
             # （issue #13 P2-13）
             n_grid = 4999 if _expr_has_oscillatory(scale_expr) else 100
+            us = [i / n_grid for i in range(n_grid + 1)]
+            # 多点の keyframes は格子の間の細い山も取りこぼす（実測: 10 秒の 4.02〜4.08 秒
+            # だけ 2 倍の山は 100 等分の格子では 1.0 しか拾えず、pad が足りず EINVAL）。
+            # 式の頂点と描くコマでの最大（_expr_frame_max。区分線形なら頂点と頂点の前後の
+            # コマだけ、そうでなければ全コマを評価する）も拾う
             try:
-                max_s = _builtins.max(
-                    scale_expr.eval_at(_UValue(i / n_grid, ctx.dur))
-                    for i in range(n_grid + 1))
+                # eval_at と同じ値（_compile_u_eval は if の選んだ枝だけを辿るので、
+                # 多点の keyframes でも1回の評価が点の数の対数で済む）
+                ev = _compile_u_eval(scale_expr, ctx.dur)
+                max_s = _builtins.max(ev(u) for u in us)
+                peak = _expr_frame_max(scale_expr, ctx.start, ctx.dur)
+                if peak is not None:
+                    max_s = _builtins.max(max_s, peak)
             except Exception as exc:
                 raise ValueError(
                     f"scale式を数値評価できないため、padサイズを決定できません: {exc}\n"
@@ -679,21 +784,176 @@ def _fx_scale(e, eff_idx, ctx):
         ctx.pad_size = (max_w, max_h)
 
 
+# --- 時間だけで決まる不透明度を、コマごとに1回だけ評価して掛ける経路 ---
+#
+# geq は式を画素ごとに評価する（1920x1080 なら1コマで約207万画素 × r/g/b/a の4式）。
+# fade / opacity の不透明度のように画素の位置に依らない（時間だけで決まる）式まで geq に
+# 落とすと、式が単純でも 1080p で毎秒6コマ前後しか出ず、式が長いほど更に遅くなる
+# （実測: 1080p・10 秒の静止画に fade(keyframes_sec(56 点)) で 85 秒。113 秒の見本では
+#  本レンダが 771 秒）。sendcmd の [expr] フラグは、引数の式をコマごとに1回だけ評価して
+# 結果の数値を実行時コマンドで送る（変数 T はそのコマの時刻で、geq の T と同じ値）。
+# これで colorchannelmixer の aa（アルファの倍率）をコマごとに変える（同じ素材の書き出し
+# 全体が 8 / 56 / 128 点で 4.1 / 4.3 / 4.3 秒）。ただし点の数に全く依らないわけではない:
+# [expr] はコマごとに式の文字列を構文解析し直すので、式の長さに比例した手間が残る
+# （16x16・18000 コマで 8 点 2.9 秒、128 点 12.7 秒。経過秒を st/ld で1回だけ計算する形で
+# 短くしている。_per_frame_alpha_cmd）。
+# 入りと出が表示秒の 2% 以下（0.25 秒なら表示 12.5 秒以上）だと 100 等分の格子に中間点が
+# 2つ取れず native fade にならないので、以前はこれも geq だった（入りと出だけの普通の
+# フェードでも、長い Object では遅かった）。
+#
+# - 画素は geq と最大1階調違う: geq は「アルファ×値」を切り捨て、colorchannelmixer は
+#   lrint（四捨五入。ちょうど .5 は偶数へ）で書く。sendcmd が送る値は小数6桁（%f）。
+#   色（r/g/b）は変えない。チェックポイント・compute の鍵には cache.py の
+#   _alpha_cmd_sigs が版を混ぜ、旧 geq 経路で焼いた中間物を命中させない（レイヤーキャッシュ・
+#   from_project の鍵には意図して混ぜない。理由は cache.py の _ALPHA_CMD_VER）。
+# - colorchannelmixer は planar の gbrap で掛ける（format=rgba の後ろに format=gbrap）。
+#   packed の rgba のまま下流へ渡すと、overlay の手前の自動変換（rgba → yuva420p）が
+#   アルファ 128〜254 を 1 階調上げる（FFmpeg 8.0 実測: 171 → 172。gbrap → yuva420p は
+#   全 256 値で正確）。geq は packed を扱えず入口で gbrap へ自動変換されていたので、
+#   gbrap で掛ければ下流は旧 geq 経路と同じ形になる（違いは上の丸めだけ）。
+# - sendcmd の宛先はフィルタのインスタンス名（colorchannelmixer@<接頭辞>e<番号>）で、
+#   1つのフィルタグラフの中で一意でなければならない（型名 colorchannelmixer で送ると、
+#   グラフ中のすべての colorchannelmixer に届く）。接頭辞は複合フィルタの中間ラベルと
+#   同じ label_prefix（本レンダ・レイヤーキャッシュ・並列レンダは入力ごとに fx<N>）。
+# - 引数のエスケープは3段: フィルタグラフ（c='...' の引用で中身はそのまま）→
+#   オプション値（\\, → \,）→ sendcmd のコマンド解析（\, → ,）。式の区切りの「\,」を
+#   「\\,」へ書き換える。想定外の記号を含む式は geq に残す（_SENDCMD_EXPR_CHARS）。
+# - X / Y 等の画素ごとの変数・random（geq では画素ごとに別の乱数）・中身を辿れない Expr の
+#   派生は時間だけの式と証明できないので geq に残す（_expr_is_time_only）。
+
+# 時間だけの式に使ってよい関数（ffmpeg の式評価器にあり、画素に依らないもの）
+_TIME_ONLY_FUNCS = frozenset(_FuncCall._get_eval_funcs()) - {"random"}
+
+# sendcmd の引数へそのまま入れてよい文字（式の区切りの「,」を除くと英数字と算術記号だけ）
+_SENDCMD_EXPR_CHARS = frozenset(
+    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_.+-*/(),")
+
+
+def _expr_is_time_only(expr):
+    """式が時間（u・経過秒・表示秒）と定数だけで決まるかを返す（画素の位置に依らないか）。
+
+    型は完全一致で見る（_LookAtExpr のような派生は中身を辿れないので False）。
+    """
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        cls = type(node)
+        if cls is Const or cls is _TimeVar:
+            continue
+        if cls is Var:
+            if node.name != "u":
+                return False
+        elif cls is _BinOp:
+            stack.extend((node.left, node.right))
+        elif cls is _UnOp:
+            stack.append(node.operand)
+        elif cls is _FuncCall and node.name in _TIME_ONLY_FUNCS:
+            stack.extend(node.args)
+        else:
+            return False
+    return True
+
+
+def _per_frame_alpha_cmd(value_expr, start, dur):
+    """時間だけで決まる不透明度の (初期値, sendcmd の引数) を返す。使えないときは None。
+
+    引数は clip(式,0,1) をフィルタグラフへ書く形にエスケープしたもの。初期値は u=0 の値
+    （sendcmd の区間 0 秒より前のコマが来たときに使われる。geq も開始前は u=0 の値）。
+
+    sendcmd の [expr] はコマごとに式の文字列を構文解析し直す（av_expr_parse_and_eval）ので、
+    手間は式の長さに比例する。keyframes_sec は区間ごとに経過秒 clip(T-開始,0,表示秒) を
+    何度も書く（128 点で約250回）ので、経過秒は先頭で1回だけ st(0,…) に置き、式の中では
+    ld(0) で読む（u は ld(0)/表示秒。clip((T-開始)/表示秒,0,1) とビット単位で同じ値）。
+    st を必ず先に評価させるため if の条件に置く（経過秒は 0 以上なので条件は常に真）。
+    各コマの値はどちらの形でもビット単位で同じ（実測: 16x16・18000 コマの出力が一致）なので、
+    短い方を使う（u を1回しか使わない式は、st/ld で包むと逆に長くなる）。
+    """
+    if not _expr_is_time_only(value_expr):
+        return None
+    try:
+        init = float(value_expr.eval_at(_UValue(0.0, dur)))
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
+    if not _math.isfinite(init):
+        return None
+    init = round(_builtins.min(1.0, _builtins.max(0.0, init)), 6)
+    inline = value_expr.to_ffmpeg(_u_expr(start, dur, "T"))
+    stored = value_expr.to_ffmpeg(_UStr(f"(ld(0)/{dur})", dur, sec="ld(0)"))
+    raw = _builtins.min(
+        (f"clip({inline},0,1)".replace("\\,", ","),
+         f"if(gte(st(0,clip(T-{start},0,{dur})),0),clip({stored},0,1),0)".replace("\\,", ",")),
+        key=len)
+    if not set(raw) <= _SENDCMD_EXPR_CHARS:
+        return None
+    return init, raw.replace(",", "\\\\,")
+
+
+def _alpha_path(value_expr, start, dur, *, native):
+    """不透明度 value_expr をアルファへ掛ける経路を選ぶ。
+
+    "const"（定数。colorchannelmixer）/ "native"（native fade。native=True のときだけ試す）/
+    "frame"（コマごとに1回の評価。sendcmd + colorchannelmixer）/ "geq"（画素ごとの式）。
+    native fade（アルファの面だけを触る）> コマごとの評価 > geq の順に速い。
+    """
+    if isinstance(value_expr, Const):
+        return "const", None
+    if native:
+        filters = _try_native_fade(value_expr, start, dur)
+        if filters:
+            return "native", filters
+    cmd = _per_frame_alpha_cmd(value_expr, start, dur)
+    if cmd is not None:
+        return "frame", cmd
+    return "geq", None
+
+
+def _alpha_mul_filters(value_expr, eff_idx, ctx, *, native):
+    """不透明度 value_expr（0..1 へ clip）をアルファへ掛けるフィルタ列（format=rgba の後ろに付ける）"""
+    path, data = _alpha_path(value_expr, ctx.start, ctx.dur, native=native)
+    if path == "const":
+        # ここへ来る定数は fade だけ（opacity の定数は _fx_opacity が従来どおり rgba で掛ける）
+        v = _builtins.min(1.0, _builtins.max(0.0, float(value_expr.value)))
+        return ["format=gbrap", f"colorchannelmixer=aa={v}"]
+    if path == "native":
+        return data
+    if path == "frame":
+        init, arg = data
+        target = f"colorchannelmixer@{ctx.label_prefix}e{eff_idx}"
+        return ["format=gbrap", f"sendcmd=c='0 [expr] {target} aa {arg}'",
+                f"{target}=aa={init}"]
+    ffmpeg_str = value_expr.to_ffmpeg(_u_expr(ctx.start, ctx.dur, "T"))
+    return [f"{_GEQ_RGB}:a='alpha(X\\,Y)*clip({ffmpeg_str}\\,0\\,1)'"]
+
+
+def _ops_alpha_by_cmd(ops, dur):
+    """ops（[(種別, op), ...]）に、旧 geq 経路から colorchannelmixer 経路へ移った
+    fade / opacity があるか（画素が最大1階調変わるので中間物の鍵に版を混ぜる。
+    cache.py の _alpha_cmd_sigs）。
+
+    移ったのは fade の定数とコマごとの評価、opacity のコマごとの評価だけ（opacity の
+    定数は元から colorchannelmixer、native fade と geq のままの式は出力が変わらない）。
+    中間物（チェックポイント・compute）は start=0 で焼くので、フィルタを組む側と同じく
+    start=0 で判定する（native fade の判定はコマの時刻 = start に依る）。
+    """
+    for typ, op in ops:
+        if typ != "effect":
+            continue
+        if op.name == "fade":
+            path, _ = _alpha_path(op.params.get("alpha", Const(1.0)), 0, dur, native=True)
+            if path in ("const", "frame"):
+                return True
+        elif op.name == "opacity":
+            path, _ = _alpha_path(op.params.get("value", Const(1.0)), 0, dur, native=False)
+            if path == "frame":
+                return True
+    return False
+
+
 def _fx_fade(e, eff_idx, ctx):
-    """フェード（native fade化を試行し、不可ならgeqへフォールバック）"""
+    """フェード（native fade → コマごとの評価 → geq の順に、使える最速の経路を選ぶ）"""
     alpha_expr = e.params.get("alpha", Const(1.0))
     ctx.filters.append("format=rgba")
-    # ネイティブfadeを試行（geq比で10倍高速）
-    native = _try_native_fade(alpha_expr, ctx.start, ctx.dur)
-    if native:
-        ctx.filters.extend(native)
-    else:
-        # 複雑なパターンはgeqにフォールバック
-        u_expr = _u_expr(ctx.start, ctx.dur, "T")
-        ffmpeg_str = alpha_expr.to_ffmpeg(u_expr)
-        ctx.filters.append(
-            f"{_GEQ_RGB}:a='alpha(X\\,Y)*clip({ffmpeg_str}\\,0\\,1)'"
-        )
+    ctx.filters.extend(_alpha_mul_filters(alpha_expr, eff_idx, ctx, native=True))
 
 
 def _fx_rotate_to(e, eff_idx, ctx):
@@ -1017,17 +1277,14 @@ def _fx_mask_wipe(e, eff_idx, ctx):
 
 
 def _fx_opacity(e, eff_idx, ctx):
-    """不透明度（定数は colorchannelmixer（高速）、Expr は geq で live 変化）"""
+    """不透明度（定数は colorchannelmixer、時間だけの式はコマごとの評価、それ以外は geq）"""
     val = e.params.get("value", Const(1.0))
     ctx.filters.append("format=rgba")
     if isinstance(val, Const):
+        # 定数は従来どおり値をそのまま書く（opacity の値は構築時に 0〜1 へ検証済み）
         ctx.filters.append(f"colorchannelmixer=aa={val.value}")
-    else:
-        u_expr = _u_expr(ctx.start, ctx.dur, "T")
-        ffmpeg_str = val.to_ffmpeg(u_expr)
-        ctx.filters.append(
-            f"{_GEQ_RGB}:a='alpha(X\\,Y)*clip({ffmpeg_str}\\,0\\,1)'"
-        )
+        return
+    ctx.filters.extend(_alpha_mul_filters(val, eff_idx, ctx, native=False))
 
 
 def _fx_rounded(e, eff_idx, ctx):
@@ -1082,12 +1339,12 @@ def _fx_plugin(e, eff_idx, ctx):
 #   trim / speed / reverse / freeze_frame / repeat … 前処理（_build_video_pre_filters）
 #   delete              … 入力段で映像ごと捨てる
 #   blend_mode          … overlay 合成段（_build_video_overlay_parts）
-#   morph_to / explode_to / assemble_from … 終端フレーム生成（effects/terminal.py、
+#   morph_to / explode_to / assemble_from / fly_to … 終端フレーム生成（effects/terminal.py、
 #                          project.py の checkpoint 段で素材そのものを差し替える）
 _FX_HANDLED_ELSEWHERE = frozenset({
     "move", "trim", "delete", "shake",
     "blend_mode", "speed", "reverse", "freeze_frame", "repeat",
-    "morph_to", "explode_to", "assemble_from",
+    "morph_to", "explode_to", "assemble_from", "fly_to",
 })
 
 # effect名 → ビルダー関数のディスパッチテーブル（プラグインは _EFFECT_PLUGINS 参照）
@@ -1173,7 +1430,8 @@ def _terminal_inner_dims(obj):
     余白は `(w-元の幅)/2` として ffmpeg に求めさせる（余白 0 なら従来と同じ位置）。
 
     元の箱: explode_to / assemble_from は粒子にする画像、morph_to は2枚を中央で
-    重ねた共通キャンバス（幅・高さそれぞれ大きい方。morph.load_images と同じ）。
+    重ねた共通キャンバス（幅・高さそれぞれ大きい方。morph.load_images と同じ）、
+    fly_to は粒になる絵 A（キャンバスは A の中心に対して対称に広がる。morph_flight.py）。
     対象外・寸法が取れないとき（dry_run 中のキャッシュ生成物は常に不明扱い。
     _get_media_dimensions 参照）は (None, None) を返し、呼び出し側は従来の式にする。
     """
@@ -1191,6 +1449,12 @@ def _terminal_inner_dims(obj):
             return None, None
         w, h = _builtins.max(w, tw), _builtins.max(h, th)
     return w, h
+
+
+def _terminal_is_flight(obj):
+    """焼いた終端フレーム生成Effect が fly_to か（_build_move_exprs の配置の式を分ける）"""
+    bake = getattr(obj, "_terminal_bake", None)
+    return bake is not None and getattr(bake[0], "name", None) == "fly_to"
 
 
 def _build_move_exprs(obj, start, dur, pad_size=None):
@@ -1239,16 +1503,29 @@ def _build_move_exprs(obj, start, dur, pad_size=None):
         # 対称なので、中心基準（half）は余白があっても絵の位置が変わらない。
         # 辺・角の基準は「余白を除いた元の絵の箱」に合わせる（_terminal_inner_dims）。
         inner_w, inner_h = (None, None) if pad_size else _terminal_inner_dims(obj)
-        if inner_w is not None:
-            sizes_x = {"half": half_w, "full": f"(w+{inner_w})/2"}
-            sizes_y = {"half": half_h, "full": f"(h+{inner_h})/2"}
-            edge_x, edge_y = f"-(w-{inner_w})/2", f"-(h-{inner_h})/2"
+        if inner_w is not None and _terminal_is_flight(obj):
+            # fly_to: 元の絵の箱（A）の基準点を静止画と同じ式で丸めてから、対称な余白
+            # （偶数の余白の半分＝整数）を引く。中心基準も同じ形にする。余白を trunc の
+            # 中で引くと、キャンバスの左端・上端が画面の外（負の座標）に出たとき trunc が
+            # 0 の向きへ丸め、静止画の A より 1px 右・下に映る（fly_to のキャンバスは
+            # B と道すじを覆うので画面の外へ出やすい。静止画から切り替える瞬間にずれが見える）
+            inner_x = {"half": f"{inner_w}/2", "full": f"{inner_w}"}
+            inner_y = {"half": f"{inner_h}/2", "full": f"{inner_h}"}
+            x_head = f"trunc({base_x}-{inner_x[off_x]})" if off_x else f"trunc({base_x})"
+            y_head = f"trunc({base_y}-{inner_y[off_y]})" if off_y else f"trunc({base_y})"
+            x_result = f"{x_head}-(w-{inner_w})/2"
+            y_result = f"{y_head}-(h-{inner_h})/2"
         else:
-            edge_x = edge_y = ""
-        x_result = f"trunc({base_x}-{sizes_x[off_x]})" if off_x \
-            else f"trunc({base_x}{edge_x})"
-        y_result = f"trunc({base_y}-{sizes_y[off_y]})" if off_y \
-            else f"trunc({base_y}{edge_y})"
+            if inner_w is not None:
+                sizes_x = {"half": half_w, "full": f"(w+{inner_w})/2"}
+                sizes_y = {"half": half_h, "full": f"(h+{inner_h})/2"}
+                edge_x, edge_y = f"-(w-{inner_w})/2", f"-(h-{inner_h})/2"
+            else:
+                edge_x = edge_y = ""
+            x_result = f"trunc({base_x}-{sizes_x[off_x]})" if off_x \
+                else f"trunc({base_x}{edge_x})"
+            y_result = f"trunc({base_y}-{sizes_y[off_y]})" if off_y \
+                else f"trunc({base_y}{edge_y})"
 
     # shake Effect: overlay座標にsin/cosオフセットを加算
     shake_effect = None
@@ -1306,25 +1583,28 @@ def _expr_has_oscillatory(expr):
 def _try_native_fade(alpha_expr, start, dur):
     """alpha式が区分線形ランプと一致するときだけnative fadeへ変換する。
 
-    native fadeはgeq比で10倍以上高速だが、矩形窓のような不連続な式を
+    native fadeはアルファの面だけを触るので最も速いが、矩形窓のような不連続な式を
     ランプへ近似すると透明度の漏れが生じる。全サンプルと隣接差分を候補曲線
-    へ照合し、一致を証明できない式は正確なgeq経路へフォールバックする。
+    へ照合し、一致を証明できない式は式そのものを評価する正確な経路
+    （時間だけの式はコマごとの評価、画素ごとの式は geq。_alpha_path）へ回す。
     """
     # 振動系関数を含む式は標本周期とエイリアスして「全標本が線形ランプに一致」
     # しうる（例: ランプ + sin(200*PI*u) の微小振動）。native化は諦めて
-    # 正確なgeq経路へ（issue #13 P2-13）
+    # 正確な経路へ（issue #13 P2-13）
     if _expr_has_oscillatory(alpha_expr):
         return None
     N = 100
     value_tol = 1e-3
     jump_tol = value_tol * 2.1
     samples = []
+    # eval_at と同じ値（if の選んだ枝だけを辿る。expr_scan._compile_u_eval）
+    ev = _compile_u_eval(alpha_expr, dur)
     try:
         for i in range(N + 1):
-            value = float(alpha_expr.eval_at(_UValue(i / N, dur)))
+            value = float(ev(i / N))
             if not _math.isfinite(value):
                 return None
-            # geq経路と同じclip後の値を比較する。
+            # 他の経路と同じ clip 後の値を比較する。
             samples.append(_builtins.min(1.0, _builtins.max(0.0, value)))
     except (TypeError, ValueError, OverflowError):
         return None
@@ -1403,6 +1683,60 @@ def _try_native_fade(alpha_expr, start, dur):
         expected_jump = expected[i] - expected[i - 1]
         if abs(actual_jump - expected_jump) > jump_tol:
             return None
+
+    # 格子（100 等分）の間に収まる細い山・谷（多点の keyframes の一瞬の明滅など）は
+    # 上の照合をすり抜けてランプへ近似され、消えてしまう（実測: 6 秒の 4.02〜4.08 秒の谷が
+    # native fade になって消えた）。格子の間でも候補ランプと一致するかを確かめる。
+    # 区分線形の式（expr_scan._pl_pieces）は、候補ランプとの差を区分ごとの1次式にして
+    # 全区間で確かめる（区分の端の片側極限だけで決まる。手間は点の数に比例し、コマ数に
+    # 依らない）。区分線形でない式だけ、実際に描くコマの時刻と keyframes の頂点をすべて
+    # 評価する（_frame_us / _expr_breakpoint_us。_compile_u_eval は選んだ枝だけを辿る）
+    def _ideal(u):
+        fin = _builtins.min(1.0, u / fade_in_end_u) if has_fade_in else 1.0
+        fout = (_builtins.min(1.0, (1.0 - u) / (1.0 - fade_out_start_u))
+                if has_fade_out else 1.0)
+        return fin * fout
+
+    def _ideal_pieces():
+        # _ideal と同じ折れ線（入りの終わり ≦ 出の始まりなので、積は区分ごとに片方だけ）
+        pieces = []
+        x = 0.0
+        if has_fade_in:
+            pieces.append((0.0, fade_in_end_u, 1.0 / fade_in_end_u, 0.0))
+            x = fade_in_end_u
+        hold_end = fade_out_start_u if has_fade_out else 1.0
+        if hold_end > x:
+            pieces.append((x, hold_end, 0.0, 1.0))
+            x = hold_end
+        if has_fade_out:
+            width = 1.0 - fade_out_start_u
+            pieces.append((x, 1.0, -1.0 / width, 1.0 / width))
+        return pieces
+
+    us = None
+    pieces = _pl_pieces(alpha_expr, dur)
+    if pieces is not None:
+        clipped = _pl_clip01(pieces)
+        diff = _pl_sub(clipped, _ideal_pieces()) if clipped is not None else None
+        if diff is not None:
+            if _pl_max_abs(diff) > value_tol:
+                return None
+            # 区分の端ちょうどの値（比較の向きで左右どちらに一致するかが変わる）と、
+            # 端の前後のコマの値も確かめる
+            ends = _pl_ends(diff)
+            us = ends + _frame_us_near(start, dur, ends)
+    if us is None:
+        us = _frame_us(start, dur) + _expr_breakpoint_us(alpha_expr, dur)
+    try:
+        for u in us:
+            value = float(ev(u))
+            if not _math.isfinite(value):
+                return None
+            value = _builtins.min(1.0, _builtins.max(0.0, value))
+            if abs(value - _ideal(u)) > value_tol:
+                return None
+    except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+        return None
 
     result = []
     if has_fade_in:

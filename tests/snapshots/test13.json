@@ -12,7 +12,7 @@
     "-i",
     "color=c=black:s=1280x720:d=3:r=30",
     "-i",
-    "__cache__/artifacts/checkpoint/ac9b64e5/611242b765b0546d.mkv",
+    "__cache__/artifacts/checkpoint/ac9b64e5/92005cb7d1f14793.mkv",
     "-filter_complex",
     "[1:v]trim=end=3.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,3)'[v1]",
     "-map",
@@ -27,7 +27,7 @@
     "test13.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/checkpoint/ac9b64e5/611242b765b0546d.mkv": [
+    "__cache__/artifacts/checkpoint/ac9b64e5/92005cb7d1f14793.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -42,7 +42,7 @@
       "-i",
       "assets/images/shape_badge.png",
       "-vf",
-      "scale=iw*0.5:ih*0.5,format=rgba,geq=r='r(X/,Y)':g='g(X/,Y)':b='b(X/,Y)':a='alpha(X/,Y)*clip(clip((T-0)/3/,0/,1)/,0/,1)',scale=w='trunc(iw*((0.5+(0.5*clip((t-0)/3/,0/,1))))/2)*2':h='trunc(ih*((0.5+(0.5*clip((t-0)/3/,0/,1))))/2)*2':eval=frame,format=rgba,pad=322:400:(ow-iw)/2:(oh-ih)/2:color=0x00000000:eval=frame,copy",
+      "scale=iw*0.5:ih*0.5,format=rgba,format=gbrap,sendcmd=c='0 [expr] colorchannelmixer@fxe0 aa clip(clip((T-0)/3//,0//,1)//,0//,1)',colorchannelmixer@fxe0=aa=0.0,scale=w='trunc(iw*((0.5+(0.5*clip((t-0)/3/,0/,1))))/2)*2':h='trunc(ih*((0.5+(0.5*clip((t-0)/3/,0/,1))))/2)*2':eval=frame,format=rgba,pad=322:400:(ow-iw)/2:(oh-ih)/2:color=0x00000000:eval=frame,copy",
       "-c:v",
       "ffv1",
       "-level",
@@ -52,7 +52,7 @@
       "-an",
       "-t",
       "3.033333",
-      "__cache__/artifacts/checkpoint/ac9b64e5/611242b765b0546d.mkv"
+      "__cache__/artifacts/checkpoint/ac9b64e5/92005cb7d1f14793.mkv"
     ]
   }
 }

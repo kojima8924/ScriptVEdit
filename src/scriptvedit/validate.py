@@ -116,6 +116,24 @@ def _require_number(func_name, param_name, value, lo=None, hi=None):
     return value
 
 
+def _require_choice(func_name, param_name, value, choices):
+    """選択肢の検証。choices（並びのある tuple / list）に無い値は ValueError。
+
+    誤記には近い候補を案内する（_suggest_hint）。ハッシュできない値（list など）も
+    TypeError ではなく ValueError にする。値はそのまま返す。
+    図解アニメ（fx_flow / fx_regex / fx_slots / fx_textmove）の選択肢の検証を1つにまとめたもの。
+    """
+    try:
+        ok = value in choices
+    except TypeError:
+        ok = False
+    if not ok:
+        raise ValueError(
+            f"{func_name}: {param_name} は {', '.join(repr(c) for c in choices)} の"
+            f"いずれかで指定してください: {value!r}{_suggest_hint(value, choices)}")
+    return value
+
+
 def _reject_unknown_keys(func_name, params, valid_keys):
     """**params の未知キー（タイポの可能性大）を構築時に明示エラーにする。
 

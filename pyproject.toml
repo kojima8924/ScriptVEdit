@@ -15,8 +15,11 @@ authors = [{ name = "kojima8924" }]
 dependencies = []
 
 [project.optional-dependencies]
-# morph_to / explode_to / assemble_from（モーフィング・パーティクル）
+# morph_to / explode_to / assemble_from / fly_to（モーフィング・パーティクル）
 morph = ["numpy", "scipy", "opencv-python", "Pillow>=9.1", "tqdm"]
+# 図解アニメ（framekit とその上の regex_view / slots / text_transition / odometer /
+# flow_graph / flow_tree / globe）。framekit.need() の案内と揃える
+figures = ["numpy", "opencv-python", "Pillow>=9.1"]
 # web Object / slide / テンプレート / formula（HTML レンダリング。KaTeX は同梱）
 web = ["playwright"]
 # ビート検出（beat_sync）
@@ -30,8 +33,9 @@ tts = ["edge-tts"]
 # _PIL_MIN_VERSION と揃える。
 tools = ["tqdm", "numpy", "opencv-python", "Pillow>=9.1"]
 all = ["numpy", "scipy", "opencv-python", "Pillow>=9.1", "playwright", "tqdm", "edge-tts"]
-# 開発用（テスト・カバレッジ・ビルド）
-dev = ["pytest", "pytest-cov", "build", "pyflakes"]
+# 開発用（テスト・カバレッジ・ビルド）。fonttools はテスト用の自作フォント
+# tests/golden/textmove/svtm_block.ttf を作り直すとき（make_font.py）だけ使う
+dev = ["pytest", "pytest-cov", "build", "pyflakes", "fonttools"]
 
 [project.scripts]
 scriptvedit = "scriptvedit.cli:_main"
@@ -50,4 +54,8 @@ scriptvedit = [
     "templates/vendor/katex/*.js",
     "templates/vendor/katex/*.md",
     "templates/vendor/katex/fonts/*.woff2",
+    # globe() の陸地の既定（Natural Earth 1:110m の陸のマスク。パブリックドメイン）と、
+    # その出典・利用条件（同梱の素材・データの「全部自作」の唯一の例外。data/NOTICE.md）
+    "data/*.png",
+    "data/NOTICE.md",
 ]

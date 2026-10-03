@@ -1027,6 +1027,8 @@ class Object:
             sigs.append(f"fps={fps}")
             # 中間ベイクのpix_fmt世代（.mkvを焼く動画computeのみ。静止画PNGは無関係）
             sigs.append(f"bpf={_BAKE_PIXFMT_VER}")
+            # fade / opacity の不透明度の経路の版（チェックポイントと同じ判定。cache.py）
+            sigs.extend(_alpha_cmd_sigs(ops, duration))
         key = _sig_key(sigs)
         # バケットも _src_bucket に統一（生パス由来だとリポジトリを移動しただけで
         # compute キャッシュが全ミスする＝移植性が壊れる）
@@ -1481,7 +1483,7 @@ def group(*objects):
 
 
 # --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛。scripts/check_import_cycles.py で計測）---
-from scriptvedit.cache import _build_unified_ops, _fold_time_effects, _op_prefix_fingerprint, _ops_effective_quality, _sig_key, _src_bucket, _src_signature, _web_cache_path
+from scriptvedit.cache import _alpha_cmd_sigs, _build_unified_ops, _fold_time_effects, _op_prefix_fingerprint, _ops_effective_quality, _sig_key, _src_bucket, _src_signature, _web_cache_path
 from scriptvedit.ffmpeg import _decoder_input_args, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions, _hold_source_filters
 from scriptvedit.plugins import _EFFECT_PLUGINS

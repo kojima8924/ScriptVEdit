@@ -171,6 +171,11 @@ def _op_fingerprint_str(op):
             parts.append(f"asm_ffp={_file_fingerprint(op._assemble_source.source)}")
         except OSError:
             parts.append(f"asm_src={_norm_src_path(str(op._assemble_source.source))}")
+    # fly_to: 行き先の絵（target）の署名。素材は内容指紋（tgt_ffp=…）、キャッシュ
+    # 生成物（text_image の PNG 等）はパス署名（tgt_src=…）。_src_signature に一本化して
+    # おくと、dry_run の時点で未生成の生成物でも実レンダと同じ鍵になる
+    if op.name == "fly_to" and hasattr(op, '_fly_target'):
+        parts.append(f"tgt_{_src_signature(op._fly_target.source)}")
     # lut: LUTファイルのFFPをsignatureに含める（内容変更でキャッシュ無効化）
     if op.name == "lut":
         lut_file = op.params.get("file")
@@ -295,6 +300,27 @@ def _norm_src_path(path):
 # 閉区間の enable 窓の最後の1枚（開始 + 尺ちょうど）まで焼く
 _CHECKPOINT_TAIL_VER = "1"
 
+# fade / opacity の不透明度を geq（画素ごとの式。切り捨て）から colorchannelmixer
+# （コマごとに1回の評価。四捨五入）へ移した世代（filters/video.py の _alpha_mul_filters）。
+# 画素が最大1階調変わるので、旧 geq 経路で焼いた中間物を命中させない。経路が変わらない
+# op（native fade・定数の opacity・画素ごとの式のまま geq に残る op）には付けない
+# （同一出力なら同一鍵）。判定は filters/video.py の _ops_alpha_by_cmd（フィルタを組む側と
+# 同じ関数）で、尺に依る（秒で書いた式が native fade になるかは尺で変わる）ので
+# 尺のある中間物（動画チェックポイント・動画 compute）だけが対象。
+# レイヤーキャッシュ（_layer_cache_paths）と from_project の webm の鍵には意図して混ぜない:
+# 差は不透明度で 1/255（fade と opacity の連鎖で 2/255）以内で既定品質の VP9 の量子化より
+# 小さく、どちらの鍵もレイヤーの中身（ops）を見ずに決まるので op ごとの条件付きの版を
+# 入れられない（無条件に上げると、関係の無いレイヤー・サブプロジェクトまで作り直しになる）。
+# 旧 geq 経路で焼いたそれらの生成物は、レイヤー .py を変えるまで命中し続ける（CLAUDE.md §4.13）
+_ALPHA_CMD_VER = "1"
+
+
+def _alpha_cmd_sigs(ops, duration):
+    """中間物の鍵へ足す fade / opacity の経路の版（該当しなければ空リスト）"""
+    if duration is not None and _ops_alpha_by_cmd(ops, duration):
+        return [f"acmd={_ALPHA_CMD_VER}"]
+    return []
+
 
 def _checkpoint_cache_path(original_source, ops, duration=None, fps=None):
     """チェックポイントのキャッシュファイルパスを計算（signature方式）"""
@@ -318,6 +344,7 @@ def _checkpoint_cache_path(original_source, ops, duration=None, fps=None):
         # 焼く枚数の決め方の世代（checkpoint.py の _bake_t_arg）。旧形式
         # （窓より1フレーム短い）の中間物を命中させない
         sigs.append(f"tail={_CHECKPOINT_TAIL_VER}")
+        sigs.extend(_alpha_cmd_sigs(ops, duration))
     if fps is not None:
         sigs.append(f"fps={fps}")
     # Project解像度も鍵に含める。blur_background_fill 等、Project寸法に依存する
@@ -397,6 +424,35 @@ def _particle_cache_path(img_path, particle_op, duration, fps):
     return os.path.join(cache_dir, f"{key}.mkv")
 
 
+# 粒子の輸送モーフ（fly_to）の描画の版。morph_flight.py の描画結果
+# （標本・対応・道すじ・粒の描き方・キャンバスの決め方）が変わったら上げる。
+# morph.py 全体の版（_MORPH_RENDER_VER）も鍵に入るので、色の道具（mix_oklab 等）の
+# 変更はそちらで無効化される
+# 2: 粒の色に α が2回掛かって暗くなっていたのを直した・B の左上を静止画と同じ丸めにした
+_FLIGHT_VER = "2"
+
+
+def _flight_cache_path(src_path, flight_op, duration, fps):
+    """fly_to の粒子アニメ mkv のキャッシュパスを計算
+
+    src_path: 粒になる絵 A（直前のソース。前処理のベイクやフレーム抽出の後の画像）。
+    行き先の絵 B（target）の署名は _op_fingerprint_str が op に混ぜる（tgt_ffp）。
+    キャンバスは A・B・道すじだけで決まり、Project の画面寸法には依存しない（鍵に入れない）。
+    """
+    sigs = [_src_signature(src_path)]
+    sigs.append(f"op={_op_fingerprint_str(flight_op)}")
+    sigs.append(f"dur={duration}")
+    sigs.append(f"fps={fps}")
+    # 品質は op から導出する（_morph_cache_path と同じ方針）
+    sigs.append(f"q={_effective_quality(flight_op)}")
+    sigs.append(f"ev={_ENGINE_VER}")
+    sigs.append(f"mv={_MORPH_RENDER_VER}")
+    sigs.append(f"fv={_FLIGHT_VER}")
+    key = _sig_key(sigs)
+    cache_dir = os.path.join(_ARTIFACT_DIR, "flight", _src_bucket(src_path))
+    return os.path.join(cache_dir, f"{key}.mkv")
+
+
 def _morph_input_frame_path(src_path):
     """morph入力用の最終フレームPNGの置き場所を導出
 
@@ -425,7 +481,7 @@ def _build_morph_frame_extract_cmd(src_path, frame_path):
 
 
 def _validate_morph_position(bakeable_ops):
-    """終端フレーム生成Effect(morph_to/explode_to/assemble_from)が
+    """終端フレーム生成Effect(morph_to/explode_to/assemble_from/fly_to)が
     bakeable opsの末尾に1つだけあることを検証"""
     term_indices = [i for i, (typ, op) in enumerate(bakeable_ops)
                     if typ == "effect" and op.name in _TERMINAL_FRAME_EFFECTS]
@@ -434,7 +490,7 @@ def _validate_morph_position(bakeable_ops):
     if len(term_indices) > 1:
         names = [bakeable_ops[i][1].name for i in term_indices]
         raise ValueError(
-            f"morph_to/explode_to/assemble_from は1つのObjectに1回しか適用できません"
+            f"morph_to/explode_to/assemble_from/fly_to は1つのObjectに1回しか適用できません"
             f"（{len(term_indices)}個指定: {names}, idx={term_indices}）。\n"
             f"複数段には compute() 等で中間素材を生成して分割してください。")
     term_idx = term_indices[0]
@@ -818,4 +874,5 @@ def cache_clear(cache_dir=_CACHE_DIR, *, force=False):
 
 # --- 循環 import の回避（同一 SCC のモジュールのみ末尾で束縛。scripts/check_import_cycles.py で計測）---
 from scriptvedit.ffmpeg import _decoder_input_args
+from scriptvedit.filters.video import _ops_alpha_by_cmd
 from scriptvedit.plugins import _EFFECT_PLUGINS

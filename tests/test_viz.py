@@ -327,6 +327,33 @@ def test_morph_prediction_uses_morph_artifact_dir(tmp_path):
     assert viz._STEP_KIND_SUFFIX["morph"] in label
 
 
+_FLY_LAYER = """from scriptvedit import *
+src = Object(asset('images/shape_badge.png'))
+tgt = Object(asset('images/shape_dots.png'))
+src.time(2) <= fly_to(tgt)
+"""
+
+
+def test_fly_to_prediction_uses_flight_artifact_dir(tmp_path):
+    """fly_to の保存点は flight/ を予告し、ラベルに種別の補足が付く
+
+    計画のステップ種別（checkpoint.py の steps の kind）を足したら
+    _STEP_KIND_SUFFIX にも足す（無いと素のチェックポイントと見分けが付かない）。
+    """
+    p = _project(_write_layer(tmp_path, "fly.py", _FLY_LAYER))
+    with pytest.warns(UserWarning, match="fly_to"):
+        _exec_only(p)
+
+    src = next(o for o in p.objects
+               if str(getattr(o, "source", "")).endswith("shape_badge.png"))
+    save_ops, predictions = viz._save_point_info(p, src)
+    assert [name for _i, name in save_ops] == ["fly_to"]
+    assert len(predictions) == 1
+    label, path, _exists = predictions[0]
+    assert "/artifacts/flight/" in _norm(path)
+    assert label == "fly_to" + viz._STEP_KIND_SUFFIX["flight"]
+
+
 # --- キャッシュ由来判定 -------------------------------------------------------
 
 def test_from_cache_only_for_real_cache_dir(tmp_path):

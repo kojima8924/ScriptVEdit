@@ -14,7 +14,7 @@
     "-i",
     "__cache__/artifacts/checkpoint/a04e6a90/8712fd71247f1124.mkv",
     "-i",
-    "__cache__/artifacts/checkpoint/442998c8/57f472d5c85acde6.mkv",
+    "__cache__/artifacts/checkpoint/442998c8/a9ed1cf9b2996279.mkv",
     "-c:v",
     "libvpx-vp9",
     "-i",
@@ -170,7 +170,7 @@
       "8.033333",
       "__cache__/artifacts/checkpoint/a04e6a90/8712fd71247f1124.mkv"
     ],
-    "__cache__/artifacts/checkpoint/442998c8/57f472d5c85acde6.mkv": [
+    "__cache__/artifacts/checkpoint/442998c8/a9ed1cf9b2996279.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -183,7 +183,7 @@
       "-i",
       "__cache__/artifacts/web/subtitle_b10b1471/8a02b6e7e09b90dd.webm",
       "-vf",
-      "format=rgba,geq=r='r(X/,Y)':g='g(X/,Y)':b='b(X/,Y)':a='alpha(X/,Y)*clip(clip((T-0)/2.5/,0/,1)/,0/,1)'",
+      "format=rgba,format=gbrap,sendcmd=c='0 [expr] colorchannelmixer@fxe0 aa clip(clip((T-0)/2.5//,0//,1)//,0//,1)',colorchannelmixer@fxe0=aa=0.0",
       "-c:v",
       "ffv1",
       "-level",
@@ -193,7 +193,7 @@
       "-an",
       "-t",
       "2.533333",
-      "__cache__/artifacts/checkpoint/442998c8/57f472d5c85acde6.mkv"
+      "__cache__/artifacts/checkpoint/442998c8/a9ed1cf9b2996279.mkv"
     ],
     "__cache__/artifacts/checkpoint/ac32771b/3a819919e196e2fa.mkv": [
       "ffmpeg",

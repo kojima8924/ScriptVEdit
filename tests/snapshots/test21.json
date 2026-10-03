@@ -16,7 +16,7 @@
     "-i",
     "__cache__/artifacts/web/diagram_40cf3695/e7a9e0539b48926b.webm",
     "-i",
-    "__cache__/artifacts/checkpoint/ac9b64e5/d5b7d6f0c0c5f8b6.mkv",
+    "__cache__/artifacts/checkpoint/ac9b64e5/8c282a3e3a6410ad.mkv",
     "-filter_complex",
     "[1:v]trim=end=3.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,3.0)'[v1];[2:v]trim=end=3.066666666666667[obj2];[v1][obj2]overlay=trunc(0.85*W-w/2):trunc(0.8*H-h/2):eof_action=pass:enable='between(t/,0/,3)'[v2]",
     "-map",
@@ -57,7 +57,7 @@
       "3.0",
       "__cache__/artifacts/web/diagram_40cf3695/e7a9e0539b48926b.webm"
     ],
-    "__cache__/artifacts/checkpoint/ac9b64e5/d5b7d6f0c0c5f8b6.mkv": [
+    "__cache__/artifacts/checkpoint/ac9b64e5/8c282a3e3a6410ad.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -72,7 +72,7 @@
       "-i",
       "assets/images/shape_badge.png",
       "-vf",
-      "scale=iw*0.25:ih*0.25,format=rgba,geq=r='r(X/,Y)':g='g(X/,Y)':b='b(X/,Y)':a='alpha(X/,Y)*clip((0.3+(0.7*clip((T-0)/3/,0/,1)))/,0/,1)'",
+      "scale=iw*0.25:ih*0.25,format=rgba,format=gbrap,sendcmd=c='0 [expr] colorchannelmixer@fxe0 aa clip((0.3+(0.7*clip((T-0)/3//,0//,1)))//,0//,1)',colorchannelmixer@fxe0=aa=0.3",
       "-c:v",
       "ffv1",
       "-level",
@@ -82,7 +82,7 @@
       "-an",
       "-t",
       "3.033333",
-      "__cache__/artifacts/checkpoint/ac9b64e5/d5b7d6f0c0c5f8b6.mkv"
+      "__cache__/artifacts/checkpoint/ac9b64e5/8c282a3e3a6410ad.mkv"
     ]
   }
 }

@@ -95,6 +95,7 @@ _STEP_KIND_SUFFIX = {
     "frame_extract": "（入力フレーム抽出）",
     "morph": "（morphキャッシュ）",
     "particle": "（粒子キャッシュ）",
+    "flight": "（fly_to キャッシュ）",
 }
 
 

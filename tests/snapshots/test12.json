@@ -12,7 +12,7 @@
     "-i",
     "color=c=darkslategray:s=1280x720:d=4:r=30",
     "-i",
-    "__cache__/artifacts/checkpoint/ac9b64e5/9caab9622b137e75.mkv",
+    "__cache__/artifacts/checkpoint/ac9b64e5/e3c7c9b2bfb6271b.mkv",
     "-i",
     "__cache__/artifacts/checkpoint/b00c4c21/0702a9a7edaa118c.mkv",
     "-loop",
@@ -35,7 +35,7 @@
     "test12.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/checkpoint/ac9b64e5/9caab9622b137e75.mkv": [
+    "__cache__/artifacts/checkpoint/ac9b64e5/e3c7c9b2bfb6271b.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -50,7 +50,7 @@
       "-i",
       "assets/images/shape_badge.png",
       "-vf",
-      "scale=iw*0.3:ih*0.3,format=rgba,geq=r='r(X/,Y)':g='g(X/,Y)':b='b(X/,Y)':a='alpha(X/,Y)*clip(sin((clip((T-0)/4/,0/,1)*3.141592653589793))/,0/,1)'",
+      "scale=iw*0.3:ih*0.3,format=rgba,format=gbrap,sendcmd=c='0 [expr] colorchannelmixer@fxe0 aa clip(sin((clip((T-0)/4//,0//,1)*3.141592653589793))//,0//,1)',colorchannelmixer@fxe0=aa=0.0",
       "-c:v",
       "ffv1",
       "-level",
@@ -60,7 +60,7 @@
       "-an",
       "-t",
       "4.033333",
-      "__cache__/artifacts/checkpoint/ac9b64e5/9caab9622b137e75.mkv"
+      "__cache__/artifacts/checkpoint/ac9b64e5/e3c7c9b2bfb6271b.mkv"
     ],
     "__cache__/artifacts/checkpoint/b00c4c21/0702a9a7edaa118c.mkv": [
       "ffmpeg",

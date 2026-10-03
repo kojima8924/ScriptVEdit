@@ -365,7 +365,11 @@ def _finalize_hold_object(cache_path, cmd, origin_sources, n_frames, fps_frac, g
     total = _grid_seconds(n_frames, fps_frac)
     obj = Object(cache_path)
     if origin_sources:
-        obj._origin_sources = list(origin_sources)
+        # 生成物自身のパスも残す。鍵（＝パス）は元素材の外から来る値（時刻表・params。
+        # 環境変数や import したデータでも決まる）も含むので、元素材だけを依存にすると
+        # その値が変わっても cache='auto' のレイヤーキャッシュが古い絵を再生し続ける。
+        # パスが変われば未生成の .mov の指紋は取れず、鮮度の検証は安全側（作り直し）に倒れる
+        obj._origin_sources = [cache_path] + [p for p in origin_sources if p != cache_path]
     obj._resolved_length = total
     # 素材の尺。length() と「最後のコマの保持」（_video_tail_hold）が、生成物を
     # probe せずにこの値を使う（未生成の dry_run でも同じ値になる）。
@@ -627,7 +631,21 @@ def frames(draw, n_frames=None, *, key, duration=None, size=None, fps=None):
         w, h = (proj.width, proj.height) if proj else (1280, 720)
     else:
         w, h = _resolve_size("frames", size)
+    return _frames_object(draw, n_frames, key_text, w, h, fps_frac)
 
+
+def _frames_object(draw, n_frames, key_text, w, h, fps_frac, origin_sources=()):
+    """frames() の後半（鍵 → 生成物のパス → 生成コマンド → Object 化）。
+
+    framekit.build（図解アニメの共通部品）もここを通るので、qtrle argb の .mov・
+    原子的な書き込み・dry_run の契約・最後のコマの保持（__cache__/artifacts/frames/）を
+    そのまま受け継ぐ。引数は検証済みであること（frames() / framekit.build が検証する）。
+
+    key_text: 鍵の本文（JSON の文字列）。draw のコードは鍵に入らない。
+    origin_sources: 生成物の元になったファイル（フォント・データ）。生成物の .mov 自身と
+      一緒にレイヤー依存に載せる（キャッシュ鮮度の検証用。_finalize_hold_object）。
+      鍵には入れない（鍵は key_text が内容指紋で持つ）。
+    """
     fps_text = _fps_text(fps_frac)
     sigs = ["frames", f"key={key_text}", f"n={n_frames}", f"fps={fps_text}",
             f"size={w}x{h}", f"sv={_STILLSEQ_VER}", f"ev={_ENGINE_VER}"]
@@ -642,4 +660,5 @@ def frames(draw, n_frames=None, *, key, duration=None, size=None, fps=None):
     def generate():
         _pipe_frames_to_cache(cmd, cache_path, draw, n_frames, w, h)
 
-    return _finalize_hold_object(cache_path, cmd, [], n_frames, fps_frac, generate)
+    return _finalize_hold_object(
+        cache_path, cmd, list(origin_sources), n_frames, fps_frac, generate)

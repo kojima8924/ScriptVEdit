@@ -168,7 +168,9 @@ def test_compute_video_bakes_fade_into_command():
         assert p._pending_compute_cmds, "dry_run で生成コマンドが記録されていない"
         cmd = next(iter(p._pending_compute_cmds.values()))
         vf = cmd[cmd.index("-vf") + 1]
-        assert "fade" in vf or "geq" in vf, (
+        # 定数の fade はアルファの倍率（colorchannelmixer の aa）で掛ける
+        # （filters/video.py の _alpha_mul_filters。以前は geq）
+        assert "colorchannelmixer=aa=0.5" in vf, (
             f"fade が生成コマンドに焼き込まれていない: {vf}")
     finally:
         p._dry_run = False

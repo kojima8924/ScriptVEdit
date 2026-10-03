@@ -22,7 +22,7 @@ import math as _math
 import builtins as _builtins
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _is_bakeable, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _split_ops, _validate_morph_position
+from scriptvedit.cache import _apply_time_effects_to_duration, _build_morph_frame_extract_cmd, _build_unified_ops, _checkpoint_cache_path, _compute_save_points, _flight_cache_path, _is_bakeable, _morph_cache_path, _morph_input_frame_path, _particle_cache_path, _split_ops, _validate_morph_position
 from scriptvedit.ffmpeg import _decoder_input_args
 from scriptvedit.filters.video import _build_effect_filters, _build_transform_filters, _build_video_pre_filters, _get_base_dimensions, _hold_source_filters, _optimize_filter_chain
 from scriptvedit.objects import Object, _text_terminal_effect_message
@@ -222,7 +222,7 @@ def _require_morph_duration(bakeable_ops, dur, source):
                    for t, op in bakeable_ops)
     if has_term and not dur:   # None も 0 も不可（0はフレーム0枚になる）
         raise ValueError(
-            f"morph_to/explode_to/assemble_from を含むObject ('{source}') には"
+            f"morph_to/explode_to/assemble_from/fly_to を含むObject ('{source}') には"
             f"表示時間の指定が必要です。obj.time(秒数) で duration を設定してください。")
 
 
@@ -276,18 +276,18 @@ def _plan_object_checkpoints(project, obj):
     戻り値: 対象外（text/bakeable無し/全off/保存点無し）なら None。
     それ以外は dict:
       steps: 実行順の計画ステップ列。各ステップは dict で
-        kind: "checkpoint"|"pre_bake"|"frame_extract"|"morph"|"particle"
+        kind: "checkpoint"|"pre_bake"|"frame_extract"|"morph"|"particle"|"flight"
         sp_idx: 属する保存点の bakeable_ops インデックス（resumeスキップ用）
         path: 生成先キャッシュパス
         build_cmd: () -> ffmpegコマンド列。実レンダは直前ステップの実体化後に
             呼ぶ（動画チェックポイントは入力の実寸を probe するため、
             生成順に遅延評価しないと中間物の寸法が反映されない）。
-            morph/particle はプレースホルダのフレームパターン版
+            morph/particle/flight はプレースホルダのフレームパターン版
             （実レンダは _execute_frames_step が一時dirで組み直す）。
         label: 進捗表示の見出し
         policy: 保存点opのpolicy（pre_bake/frame_extractは存在チェックのみ
             なので持たない＝従来挙動）
-        morph/particle 追加キー: op / src（フレーム生成の入力画像）/ dur / fps
+        morph/particle/flight 追加キー: op / src（フレーム生成の入力画像）/ dur / fps
       final: _apply_checkpoint_final_state でObjectへ適用する最終状態
       resume_args: _find_resume_point へそのまま渡す引数タプル
     """
@@ -433,6 +433,36 @@ def _plan_object_checkpoints(project, obj):
                                   pp, dur, fps, o)),
             })
             current_source = part_path
+            current_media_type = "video"
+        # 粒子の輸送モーフ（fly_to）分岐: 入力の扱いは morph_to と同じ
+        # （直前の未ベイク ops を先にベイクし、動画なら最後のコマを抜いて A にする）
+        elif sp_typ == "effect" and sp_op.name == "fly_to":
+            if not hasattr(sp_op, "_fly_target"):
+                raise ValueError(
+                    "fly_to: 行き先の絵（target）がありません。fly_to(target, ...) で"
+                    "作った Effect を使ってください")
+            pre_ops = bakeable_ops[seg_start:sp_idx]
+            if pre_ops:
+                _plan_pre_bake(pre_ops, bakeable_ops[:sp_idx], sp_idx,
+                               "チェックポイント保存 (fly_to前処理)")
+            if _detect_media_type(current_source) == "video":
+                current_source = _plan_frame_extract(
+                    current_source, sp_idx, "fly_to 入力フレーム抽出")
+                current_media_type = "image"
+            flight_path = _flight_cache_path(current_source, sp_op, dur, fps)
+            _terminal_frame_plan(sp_op, dur, fps)   # 尺に収まらない指定はここで止める
+            terminal_bake = (sp_op, current_source)
+            steps.append({
+                "kind": "flight", "sp_idx": sp_idx, "path": flight_path,
+                "label": "fly_to キャッシュ保存", "policy": policy,
+                "op": sp_op, "src": current_source, "dur": dur, "fps": fps,
+                "build_cmd": (lambda fp=flight_path, o=sp_op:
+                              _build_morph_webm_cmd(
+                                  os.path.join("__flight_frames__",
+                                               "frame_%05d.png"),
+                                  fp, dur, fps, o)),
+            })
+            current_source = flight_path
             current_media_type = "video"
         else:
             cache_path = _checkpoint_cache_path(

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import math
 import warnings
 
 # context は scriptvedit 内 import を持たない葉なので先頭で import できる。
@@ -8,7 +9,7 @@ from scriptvedit.context import current_project
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.expr import _resolve_param
 from scriptvedit.objects import Effect, Object
-from scriptvedit.state import _TERMINAL_TIMING_KEYS
+from scriptvedit.state import _FLY_COLOR_PATHS, _FLY_MATCH_MODES, _FLY_STAGGER_BY, _TERMINAL_TIMING_KEYS, _suggest_hint
 from scriptvedit.validate import _reject_unknown_keys, _require_number, _require_time
 
 
@@ -160,4 +161,133 @@ def assemble_from(source, blend=None, **particle_params):
         blend = _resolve_param(blend)
     eff = Effect("assemble_from", blend=blend, **particle_params)
     eff._assemble_source = source
+    return eff
+
+
+def _fly_pair(name, value, lo=None, hi=None):
+    """fly_to の (x, y) 型の引数を検証して float の組にする（Expr / lambda は不可）"""
+    try:
+        a, b = value
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"fly_to: {name} は数値2つの組 (x, y) で指定してください: {value!r}") from None
+    out = []
+    for v in (a, b):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"fly_to: {name} は数値2つの組で指定してください: {value!r}")
+        if not math.isfinite(v):
+            raise ValueError(f"fly_to: {name} に NaN / 無限大は使えません: {value!r}")
+        if (lo is not None and v < lo) or (hi is not None and v > hi):
+            raise ValueError(
+                f"fly_to: {name} の各値は {lo}〜{hi} の範囲で指定してください: {value!r}")
+        out.append(float(v))
+    return tuple(out)
+
+
+def _fly_choice(name, value, choices):
+    if value not in choices:
+        raise ValueError(
+            f"fly_to: {name} は {list(choices)} のいずれか: {value!r}"
+            f"{_suggest_hint(value, choices)}")
+    return value
+
+
+def _check_fly_target_opaque(target):
+    """target に不透明な画素（α>0.1）が1つも無ければ構築時に ValueError。
+
+    Pillow が無い・読めない素材は生成時（morph_flight.py）の同じ検査に任せる。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return
+    try:
+        with Image.open(target.source) as im:
+            top = im.convert("RGBA").getchannel("A").getextrema()[1]
+    except (OSError, ValueError):
+        return
+    if top <= 25:   # α>0.1 は 8bit で 26 以上
+        raise ValueError(
+            f"fly_to: target '{target.source}' に不透明な画素（α>0.1）がありません"
+            f"（全面が透明な画像は粒にできません）")
+
+
+def fly_to(target, blend=None, *, offset=(0, 0), max_pixels=12000, match="ot",
+           arc=0.25, swirl=0.0, stagger=0.3, stagger_by="x", particle_size=2,
+           color_path="oklab", dissolve=(0.15, 0.15), seed=0,
+           delay=None, duration=None):
+    """粒子の輸送モーフEffect: 絵 A の粒が飛んで、離れた所に置いた絵 B（target）になる
+
+    適用した Object の絵（A。fly_to の前の Transform / Effect を掛けた後）の不透明な画素が
+    粒になり、offset の位置に置いた target の画素へ飛んで B になる。最初のコマは A、
+    最後のコマは offset の位置の B と画素一致する（終わった後は B を保持）。
+    重なる形どうしの変形は morph_to（sdf）、離れた形どうしは fly_to。
+    morph_to と同じ機構でベイクされ、bakeable ops の末尾に1つだけ置ける。
+
+    target: 加工していない画像 Object（text_image も可）。消費されて Project から外れる
+    blend: 全体の進行カーブ（既定は直線）。粒ごとの動きは smoothstep で加減速する
+    offset: A の中心から B の中心までのずれ (dx, dy) px（A の絵の px。右と下が正）
+    max_pixels: 粒の数の上限（粒の数は min(max_pixels, 多い方の画素数)）
+    match: 粒の対応。ot=スライスした最適輸送 / angle=角度の順 / random=無作為
+    arc: 道すじのふくらみ（距離に対する比。正で進む向きの右手側）
+    swirl: 道すじを中点のまわりに回す角度 rad（道の半ばで最大。正で時計回り）
+    stagger: 出発の遅れの幅（全体の進行度に対する比。0〜0.95）
+    stagger_by: 出発の順番。x / y=横 / 縦の並びで進む向きの先頭から / distance=遠くへ行く粒から / random
+    particle_size: 粒（円）の半径 px
+    color_path: 粒の色の通り道。oklab=直線 / oklch=色相を回す
+    dissolve: (a, b)。最初の a の区間で A の絵から粒へ、最後の b の区間で粒から B の絵へ
+    seed: 乱数の種（同じ値なら同じ絵）
+    delay / duration: 動き出すまでの秒・動く秒数（morph_to と同じ。後は B を保持）
+
+    キャンバスは A の箱・B の箱・粒の道すじを覆い、A の中心に対して左右・上下それぞれ
+    対称に広がる（move の anchor は余白を除いた A の箱が基準）。4096px を超えると ValueError。
+    """
+    func = "fly_to"
+    if not isinstance(target, Object):
+        raise TypeError(f"fly_to の target は Object のみ: {type(target)}")
+    _validate_terminal_input_object(func, "target", target)
+    if (isinstance(max_pixels, bool) or not isinstance(max_pixels, int)
+            or not 1 <= max_pixels <= 100000):
+        raise ValueError(
+            f"fly_to: max_pixels は 1〜100000 の整数で指定してください: {max_pixels!r}")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError(f"fly_to: seed は整数で指定してください: {seed!r}")
+    d_in, d_out = _fly_pair("dissolve", dissolve, 0.0, 1.0)
+    if d_in + d_out > 1.0 + 1e-9:
+        raise ValueError(
+            f"fly_to: dissolve=(a, b) は a + b <= 1 にしてください: {dissolve!r}")
+    params = {
+        "offset": _fly_pair("offset", offset),
+        "max_pixels": max_pixels,
+        "match": _fly_choice("match", match, _FLY_MATCH_MODES),
+        "arc": float(_require_number(func, "arc", arc, -4.0, 4.0)),
+        "swirl": float(_require_number(func, "swirl", swirl, -50.0, 50.0)),
+        "stagger": float(_require_number(func, "stagger", stagger, 0.0, 0.95)),
+        "stagger_by": _fly_choice("stagger_by", stagger_by, _FLY_STAGGER_BY),
+        "particle_size": float(_require_number(
+            func, "particle_size", particle_size, 0.5, 32.0)),
+        "color_path": _fly_choice("color_path", color_path, _FLY_COLOR_PATHS),
+        "dissolve": (d_in, d_out),
+        "seed": seed,
+    }
+    # 時間指定は与えたものだけを持つ（morph_to / explode_to と同じ形。鍵も同じ形になる）
+    timing = {k: v for k, v in (("delay", delay), ("duration", duration))
+              if v is not None}
+    _check_timing_params(func, timing)
+    _check_fly_target_opaque(target)
+    # ターゲットObjectをProjectから除外（粒の行き先として消費される）
+    proj = current_project()
+    if proj is not None and target in proj.objects:
+        proj.objects.remove(target)
+        warnings.warn(
+            f"fly_to: ターゲット '{target.source}' は粒の行き先として消費されるため"
+            f"Projectから自動的に除外されました。")
+    # ターゲット素材をレイヤー依存として記録（morph_to と同じ理由）
+    if proj is not None and proj._current_layer_file:
+        tgt_deps = getattr(target, '_origin_sources', None) or [target.source]
+        proj._extra_layer_deps.setdefault(
+            proj._current_layer_file, []).extend(tgt_deps)
+    blend = _resolve_param(lambda u: u) if blend is None else _resolve_param(blend)
+    eff = Effect("fly_to", blend=blend, **params, **timing)
+    eff._fly_target = target
     return eff

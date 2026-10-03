@@ -1655,6 +1655,25 @@ PARTICLE_PARAM_DEFAULTS = {
     if k in _PARTICLE_CORE_KEYS}
 
 
+# ============================================================
+# 粒子の輸送モーフ（fly_to）の入口
+# ============================================================
+#
+# fly_to は「絵 A の粒が飛んで、離れた所の絵 B になる」終端フレーム Effect。
+# 重なる形どうしは sdf モーフ（morph_to）、離れた形どうしは fly_to、という分担。
+# 本体（標本・スライスした最適輸送・道すじ・描画）は morph_flight.py の
+# generate_flight_frames にある。morph_flight はこのモジュールの色の道具
+# （mix_oklab 等）を使うので、ここから morph_flight を import すると
+# morph ↔ morph_flight の循環 import になる（scripts/check_import_cycles.py が拾う）。
+# そのためキーの集合だけをここに置き、morph_flight が import 時に
+# generate_flight_frames のシグネチャと一致することを検査する（二重管理のずれを止める）。
+# delay / duration は終端フレーム Effect 共通の時間指定（state._TERMINAL_TIMING_KEYS）で、
+# フレーム生成には渡らないのでここには入れない。
+FLY_PARAM_KEYS = frozenset({
+    "offset", "max_pixels", "match", "arc", "swirl", "stagger", "stagger_by",
+    "particle_size", "color_path", "dissolve", "seed"})
+
+
 def _particle_call_params(params, valid_keys, point_key):
     """公開の **params を検証し、_generate_particle_frames の引数へ直す"""
     params = dict(params)

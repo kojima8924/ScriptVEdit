@@ -36,7 +36,7 @@ Python の DSL で動画を構成し、ffmpeg でレンダリングするライ�
   （または `narrate()`）。describe の constraints（`object_registered_at_creation`）にも載せてある。
 - **priority が同じ Object は登録順に重なる**（`sorted(key=priority)` が安定ソートなので、
   `p.layer()` を呼んだ順・レイヤー内は作った順で、後が上）。
-- パッケージ本体は `src/scriptvedit/`（50モジュール）。`pip install -e .` で
+- パッケージ本体は `src/scriptvedit/`（59モジュール）。`pip install -e .` で
   どのディレクトリからでも `from scriptvedit import *`。
 
 ## 2. 最初に読むもの（最重要）
@@ -58,7 +58,7 @@ plugin / project_method / transform。
 
 - `usage` … 概念・main スクリプト雛形・レイヤー雛形・DSL・Expr・**プラグイン雛形**・CLI
 - `constraints` … 守らないと壊れる制約（severity: error/warning/info）
-- `effects`(41) / `transforms`(8) / `audio_effects`(7) / `factories`(35) /
+- `effects`(42) / `transforms`(8) / `audio_effects`(7) / `factories`(44) /
   `objects`(19) / `object_methods`(9) / `project_methods`(14) / `expr`(102) / `plugins`(3)
   （件数は変動する。正は `describe` の実測で、整合は tests/test_issue17_docs.py が検証する）
 
@@ -82,9 +82,10 @@ describe の中身を足すときは、**手書きの補助テーブルは `mani
 ## 3. 開発ワークフロー
 
 ```bash
-pip install -e .[all]      # コアは標準ライブラリのみ。extras: morph/web/beat/tts/tools
-pytest tests/              # 全テスト（約1分）
+pip install -e .[all]      # コアは標準ライブラリのみ。extras: morph/figures/web/beat/tts/tools
+pytest tests/              # 全テスト（約3分）
 pytest tests/test_real_render.py --realrender  # 実レンダ回帰（選抜。CIと同じ）
+pytest tests/test_fx_slots.py -k golden --golden-update  # 図の金型の作り直し（§5「図解アニメ」）
 python tests/render_all.py # 実レンダリング全件（重い。出力は tests/output/）
 python scripts/check_unused_imports.py   # 未使用importの検出（CIでも実行）
 python scripts/check_import_cycles.py    # 循環import（SCC）の規模チェック
@@ -153,6 +154,11 @@ ffprobe・フォント・gitignore 対象の大容量素材・edge-tts または
 PASS として返してはいけない。`test91` の数式 PNG 内容差が下流の
 checkpoint 鍵に伝播する環境差は、比較時にその鍵だけを正規化する。
 数式パスやフィルタ文字列の実質差分、保存/update 時の具体ハッシュは残す。
+同じ理由で、鍵にフォントの内容指紋か Pillow の版が入る生成物（text_image の PNG・
+図解アニメの frames の .mov・それを入力にした fly_to の flight）も、比較時だけ鍵ハッシュを
+畳む（`_TEXT_IMAGE_DEPENDENT_TESTS` / `_FIGURE_FONT_DEPENDENT_TESTS`）。畳むと同じ種類の
+生成物どうしの dict のキーがぶつかるので、正規化は dict を「キーと値の組の並べ替えた列」に
+してから比べる（片方が黙って消えない）。
 
 **スナップショットの限界: dry_run は寸法を予測できない。** `formula()` の数式PNGは
 dry_run 時点で未生成のため `base_dims=None` になり、`scale` の
@@ -170,12 +176,12 @@ pad（SEGVバリア, §4.1）が付かないコマンドになる。**formula + 
 
 | 経路 | 場所 |
 |---|---|
-| チェックポイント | `checkpoint.py` の `_collect_checkpoint_cmds`（全 step の `build_cmd()` を必ず呼ぶ） |
+| チェックポイント | `checkpoint.py` の `_collect_checkpoint_cmds`（全 step の `build_cmd()` を必ず呼ぶ。終端フレーム Effect の morph / particle / flight（fly_to）も step） |
 | web Object | `project.py` の `_collect_web_cmds` |
 | レイヤーキャッシュ | `layercache.py` の `_collect_cache_cmds`（生成は `cache='make'` のときだけ。存在は見ない） |
 | compute / from_project / xfade 生成物 | `objects.py` の `compute` / `from_project`、`media.py` の `_finalize_generated_object` |
 | ラウドネス測定（`normalize_audio(mode="linear")`） | `loudness.py` の `_collect_loudness_cmds`（測定結果 JSON の有無は見ない） |
-| `stills()` / `frames()` の動画 | `stillseq.py` の `_finalize_hold_object`（dry_run 分岐が存在チェックより前。`frames()` の `draw` は dry_run では呼ばない） |
+| `stills()` / `frames()` の動画（図解アニメの `framekit.build` も） | `stillseq.py` の `_finalize_hold_object`（dry_run 分岐が存在チェックより前。`frames()` の `draw` は dry_run では呼ばない） |
 
 compute / from_project / xfade の経路だけが存在チェックを dry_run 分岐より**前**に置いており、それが
 「実レンダ後に test18 / test24 / test57 / test74 が落ちる」罠の正体だった
@@ -407,6 +413,61 @@ test16 / test17 の実レンダでもデコード後の音声 MD5 が一致）�
 scale2ref と一致する（`tests/test_mask_scale_ref.py`）。**`movie=` の画像を別の枝へ混ぜる
 Effect を足すときも同じ手当てを入れること。**
 
+### 4.13 geq は式を画素ごとに評価する（時間だけの不透明度で 1080p が毎秒6コマ前後）
+
+`geq` は 1 コマで全画素 × r/g/b/a の式を評価する。fade / opacity の不透明度のように
+**時間だけで決まる式**まで geq に落とすと、式が単純でも 1080p で毎秒6コマ前後、点の多い
+`keyframes_sec` では更に遅い（実測: 1080p・10 秒に 56 点で 85 秒。113 秒の見本で 771 秒）。
+回避策は **`sendcmd` の `[expr]` で式をコマごとに1回だけ評価し、`colorchannelmixer` の `aa` へ
+送る**こと（`filters/video.py` の `_alpha_mul_filters`。同じ素材の書き出し全体が 8 / 56 / 128 点で
+4.1 / 4.3 / 4.3 秒）。経路は native fade（入りと出の単純なランプ）> 定数 > コマごとの評価 > geq
+（X / Y・random・中身を辿れない Expr の派生だけ）の順に選ぶ（`_alpha_path`）。
+
+- **宛先はインスタンス名** `colorchannelmixer@<label_prefix>e<番号>`（グラフ中で一意。型名で
+  送ると全 colorchannelmixer に届く）。引数は3段のエスケープで、式の区切り `\,` を `\\,` にする。
+- **点の数に完全には依らない。** `[expr]` はコマごとに式の文字列を構文解析し直すので、手間は
+  式の長さに比例する（16x16・18000 コマで 8 点 2.9 秒、128 点 12.7 秒。1 コマ約 0.5ms 増える。
+  1080p では1コマの処理に埋もれて +5% 前後）。`keyframes_sec` は経過秒 `clip(T-開始,0,表示秒)` を
+  区間ごとに何度も書く（128 点で約250回）ので、短くなるときは経過秒を先頭で1回だけ
+  `if(gte(st(0,経過秒),0),clip(式,0,1),0)` に置き、式の中は `ld(0)`（u は `ld(0)/表示秒`）で読む
+  （`_per_frame_alpha_cmd`。毎回書く形とコマごとの値はビット単位で同じなので短い方を使う。
+  st を先に評価させるため if の条件に置く。u を1回しか使わない式は毎回書く形のまま）。
+- **掛けるのは gbrap**（`format=rgba` の後ろに `format=gbrap`）。packed の rgba / bgra のまま
+  overlay へ渡すと、手前の自動変換（→ yuva420p）が**アルファ 128〜254 を1階調上げる**
+  （FFmpeg 8.0 実測。gbrap → yuva420p は全 256 値で正確）。geq の出力も gbrap だった。
+  native fade・定数の opacity・チェックポイント（bgra の FFV1）を本レンダで重ねる経路には
+  この1階調が元からある。
+- 画素は geq と最大1階調違う（geq は切り捨て、colorchannelmixer は四捨五入。送る値は小数6桁）
+  ので、チェックポイント・compute の鍵に版（`cache.py` の `_ALPHA_CMD_VER`）を混ぜる。
+  経路が変わらない op（native fade・定数の opacity・geq のままの op）には付けない。
+  **レイヤーキャッシュ（`cache='auto'` / `'use'`）と `from_project` の webm の鍵には意図して入れない**
+  （旧 geq 経路で焼いた生成物は、レイヤー .py を変えるまで命中し続ける）。差は不透明度で 1/255
+  （fade と opacity の連鎖で 2/255）以内で、既定品質の VP9 の量子化より小さい。どちらの鍵も
+  レイヤーの中身（ops）を見ずに決まるので op ごとの条件付きの版を入れられず、無条件に上げると
+  関係の無いレイヤー・サブプロジェクト（Web や重い合成を含む）まで作り直しになる
+  （「同一出力なら同一鍵」に反する）。出力の差が見て分かる変更なら、`from_project` の
+  `audio_graph` のような局所の版を足すこと。
+- **式の最大・ランプ判定を格子だけで見ない。** `scale` の pad 見積もり（100 等分の格子）と
+  native fade の判定は、多点 keyframes の細い山・谷（10 秒の 4.02〜4.08 秒など）を取りこぼし、
+  前者は pad 不足の EINVAL、後者は谷が消えた。描くコマ（`_frame_us`）と式の頂点でも確かめる。
+- **ただし全コマを eval_at で評価しない。** eval_at は if の両方の枝を評価するので、多点
+  keyframes では手間が「コマ数 × 点の数」になる（60fps・128 点の scale で、600 秒の Object は
+  フィルタを組むたびに 17 秒、3600 秒は 107 秒止まった。チェックポイントのコマンドを組むたび・
+  `p.audit()` の内部の dry_run でも同じだけ掛かる）。`expr_scan.py` の2つを使う:
+  `_pl_pieces` は区分線形の式（keyframes / keyframes_sec / ramp / phase / lerp / clip / min / max /
+  abs / 比較と if）を u の区分ごとの1次式へ展開する。区分の内側は1次式なので、区分の端（頂点）と
+  端の前後のコマ（`_frame_us_near`）だけで全コマと同じ最大になり（`_expr_frame_max`）、native fade
+  は候補ランプとの差を全区間で確かめる。`_compile_u_eval` は eval_at と同じ値を返し、if は
+  選んだ枝だけを評価する（ffmpeg と同じ。選ばれない枝の 0 除算などで例外を投げない）。
+  区分線形でない式（イージング・振動系）だけ全コマを評価する。実測（60fps・128 点・3600 秒）:
+  区分線形 0.01 秒、`ease_in_out_sine` 0.6 秒、`ease_out_back` 1.1 秒（コマ数に比例、点の数には
+  対数）。丸めで clip の折れ点と lt の境目が 1ulp ずれてできる幅 1e-12 以下の区分は隣へ含める
+  （そこだけの値＝不連続点の手前の片側極限を頂点として拾うと、丸めの向きで pad が変わる）。
+  pad の大きさは topleft 等の配置にも効くので、どのコマも取らない片側極限で pad を広げない。
+- 回帰は `tests/test_alpha_per_frame.py`（経路・鍵・画素・st/ld の値の一致・本レンダ・時間の上限）・
+  `tests/test_scale_pad_keyframes.py`・`tests/test_expr_scan.py`（eval_at との一致・区分線形の
+  展開・全コマとの一致・評価回数と時間の上限）。
+
 ## 5. 設計規約（コードを変更するときに守ること）
 
 ### bakeable / live
@@ -426,8 +487,12 @@ Effect は2種類ある。
 **明示された例外が1つある**: `trim` は尺を変えるが `_BAKEABLE_EFFECTS` に入っている
 （`cache.py` の `_fold_time_effects` がベイク尺の計算に反映する前提）。
 
-`morph_to` / `explode_to` / `assemble_from` は終端フレーム生成 Effect
+`morph_to` / `explode_to` / `assemble_from` / `fly_to` は終端フレーム生成 Effect
 （`_TERMINAL_FRAME_EFFECTS`）で、bakeable な ops の末尾に1つだけ置ける。
+`fly_to` の本体は `morph_flight.py`（`morph.py` の色の道具を使うので、`morph.py` から
+`morph_flight` を import しない。循環になる。キーの集合 `FLY_PARAM_KEYS` だけを
+`morph.py` に置き、`morph_flight` が import 時にシグネチャと突き合わせる）。
+描き方を変えたら `cache.py` の `_FLIGHT_VER` を上げ、`tests/golden/flyto/` の金型を作り直す。
 
 **焼く枚数は「閉区間の enable 窓を覆う枚数」にする**（`checkpoint.py`）。overlay の窓は
 `between(t, 開始, 開始+尺)` の閉区間で、尺がフレームの整数倍だと「開始 + 尺」ちょうどの
@@ -734,6 +799,132 @@ ffp.json（撤廃済み）の罠は「古い永続値が実測より優先され
   op が Object から外れるので、`_apply_checkpoint_final_state` が焼く前の op を
   `Object._pre_checkpoint_ops` に控え、audit はそこから画面上の倍率を求める。
 
+### 図解アニメ（`framekit.py` とその上の図）
+
+`regex_view` / `slots` / `text_transition` / `odometer` / `flow_graph` / `flow_tree` / `globe` は、
+Python で描いたコマを `framekit.build`（中身は `frames()`）へ渡して透過の .mov を1本作り、
+Object を1個返す。鍵・描画・時刻・文字・金型テストの規則は `framekit.py` の1か所に置く
+（内部モジュール。`from scriptvedit import *` には入らない）。
+
+- **鍵は「kind・図の版・`_FRAMEKIT_VER`・`norm(params)`・偶数へ切り上げる前の寸法・
+  `fonts=` に渡した Sprite の署名・files の内容指紋」**（フォントを使うときだけ、その内容指紋と
+  Pillow の版も）。`draw` のコードは鍵に入らないので、**描き方を変えたら版を上げる**（下の表）。
+  `draw` の中で作る文字や `fonts=` に渡さない文字は params に入れる（入れないと古い図が命中する）。
+  配置の結果（座標）のように params から決まる値は鍵に入れない（同一出力なら同一鍵）。
+- **絵は金型テスト（`tests/golden/<種類>/`）で守る**。作り直しは絵を目視してから
+  `pytest tests/<その図のテスト> -k golden --golden-update`。`--golden-update` は版定数が金型と
+  同じまま絵だけ変わったものを**書き換えずに失敗させる**（版を上げずに小さな変化が積もらない
+  ように）。金型と別のフォントの環境では skip する（理由に「フォント」を含む）。
+- **生成物の `_origin_sources` は .mov 自身を先頭に持つ**（`stillseq._finalize_hold_object`。
+  stills / frames / framekit.build の共通）。外から来る params（環境変数・`p.param()`）で鍵が
+  変わっても、`cache='auto'` のレイヤーキャッシュが作り直される。
+- **座標は SVG と同じ連続座標**（画素 (i, j) は [i, i+1)×[j, j+1)）で、縁は画素の正方形が図形に
+  入る面積（箱フィルタの被覆率）。cv2 の LINE_AA / fillPoly は使わない（幅が合わず、端数の
+  位置に反応しない。実測は framekit の docstring）。
+- **blit の変換（端数位置・回転・縮小は INTER_AREA → INTER_LINEAR）は `framekit.warp_patch` の
+  1か所**。text_transition の字（縁取りと塗りの2ch）も同じ関数で写す。図のモジュール
+  （`fx_*.py`）は framekit の私有関数（`fk._*`）を呼ばない。共有したい処理は framekit の
+  公開関数にする（`tests/test_framekit.py` が見張る）。選択肢の検証は `validate._require_choice`。
+- 文字を描く図は `text=fk.text_meta(...)` で `p.audit()` へ申告する（一番小さい字の大きさ・装飾）。
+- 依存は numpy・opencv-python・Pillow（extra は `figures`。`framekit.need()` が遅延 import）。
+  dry_run は `draw` を呼ばない。
+- スナップショット（test117〜128・132〜135）では、図の版を上げると frames の .mov の鍵ハッシュ
+  だけが変わる。**`_FRAMEKIT_VER` を上げたら全部の図のスナップショットを、差分を目視してから
+  作り直す**（鍵にフォントか Pillow の版が入る図は `_FIGURE_FONT_DEPENDENT_TESTS` で畳まれる
+  ので通るが、test127・128・132〜135 は畳まない）。
+- 陸のデータ（globe の land）は **Natural Earth 1:110m の陸を同梱している**
+  （`src/scriptvedit/data/ne_110m_land_1440.png`。`land=True` が既定。`False` で陸なし、`None` は
+  ValueError）。同梱の素材・データ（`assets/` と `data/`）の「全部自作・第三者素材ゼロ」の
+  **唯一の例外**（パブリックドメイン。自作の大陸は不正確な地図が実データに見え、同梱しないと
+  既定が陸の無い地球になるため。ユーザーの承認済み）。素材ではなくライブラリとして同梱している
+  formula() 用の KaTeX（`templates/vendor/katex/`。MIT。同ディレクトリのライセンスに従う）は
+  この原則の外。出典・利用条件・元データの SHA-256 は同じフォルダの `NOTICE.md` と PNG の
+  tEXt。作り直しは `scripts/make_land_mask.py`（ネットに出る。`--zip <zip> --check` で再現の確認）。
+  PNG を作り直したら `NOTICE.md` の SHA-256 も直す（`tests/test_fx_globe.py` が突き合わせる）。
+  package-data の書き漏れは editable install のテストでは分からないので、CI の build ジョブが
+  wheel の中身とインストール先から読めることを確かめる。
+- globe の既定の見た目（陸の点 0.55・拠点の点の堀と光の輪・ortho の `atmosphere=0.25`・plate の
+  `view="auto"`）は見本動画で拠点の点が陸に埋もれたのを受けて決めた。`view="auto"` の選んだ経度は
+  鍵に入る（手で同じ経度を書いたのと同じ鍵。選び方を変えても、選ぶ経度が変われば鍵が変わる）。
+  堀と光の輪（`_disc_cov`）は `_fade_line` と同じく、円の数 × 窓の画素を `_WINDOW_CHUNK` ずつに
+  分けて計算する（**点の数に比例してメモリを確保しない**。globe は 20 万点まで受けるので、
+  全部の円の窓を一度に作ると 2 万点で 1 コマ 1.5GB になった）。`points(halo=False)` は芯だけ
+  （既定の `halo=True` は鍵に入れない）。
+
+| 図 | モジュール | 版定数 | 金型 |
+|---|---|---|---|
+| 共通部品 | `framekit.py` | `_FRAMEKIT_VER`（全部の図の鍵に入る） | `tests/golden/framekit/` |
+| regex_view | `fx_regex.py`（照合は `regex_vm.py`） | `_REGEX_VIEW_VER`・`_REGEX_VM_VER` | `tests/golden/regex/` |
+| slots | `fx_slots.py` | `_SLOTS_VER` | `tests/golden/slots/` |
+| text_transition / odometer | `fx_textmove.py` | `_TEXTMOVE_VER` | `tests/golden/textmove/`（字は同梱の自作フォント `svtm_block.ttf`。作り直しは同じ所の `make_font.py`、fonttools が要る） |
+| flow_graph / flow_tree | `fx_flow.py` | `_FLOW_VER` | `tests/golden/flow/` |
+| globe | `fx_globe.py` | `_GLOBE_VER` | `tests/golden/globe/` |
+| fly_to（終端フレーム Effect。framekit は使わない。§5「bakeable / live」） | `morph_flight.py` | `cache.py` の `_FLIGHT_VER` | `tests/golden/flyto/` |
+
+`regex_trace` / `regex_count` / `regex_view` の規則:
+
+- `regex_vm.py` は **scriptvedit 内 import ゼロの葉**（標準ライブラリだけ）。照合は再帰を使わない
+  （後戻り点は明示のスタック、捕獲と取り分は undo ログ。再帰版は空白 1000 個で C のスタックが
+  溢れた）。命令の組み方・event の記録の仕方を変えたら `_REGEX_VM_VER` を上げる（regex_view の
+  鍵に入る。event の列そのものは鍵に入れない）。
+- `re` との一致は `tests/test_regex_vm.py` の差分ファジング（3.10 / 3.11+ の両方）で守る。
+  sre の既知の癖（3.10 の印の戻し忘れ、3.11+ のグループに付けた min≥2 の所有量指定子）は
+  ファジングの文法から外し、そのテストの docstring の表に書いてある。
+- `fx_regex.py` は framekit.build の上。描き方を変えたら `_REGEX_VIEW_VER` を上げ、絵を目視してから
+  `pytest tests/test_fx_regex.py -k golden --golden-update` で `tests/golden/regex/` を作り直す。
+  スナップショット（test117〜119）は図の寸法がフォントのメトリクスで変わらないよう `size=` を
+  固定し、frames の鍵ハッシュだけを `_FIGURE_FONT_DEPENDENT_TESTS` で畳む。
+- regex_view の描き直しは「帯（細帯）ごとの署名が同じなら前の画素を使い回す」。**描くのは署名に
+  入れた値（丸めた座標）だけ**にし、tape の動く印は上端・下端の範囲で触れる細帯を全部描き直す
+  （印を足すときは範囲を控えめに取る）。順に描いたコマと、そのコマだけを新しい図で描いたコマが
+  画素まで同じことを `test_sequential_and_fresh_frames_match` が確かめる。
+- regex_count の外挿は、上限のある量指定子の「上限の手前の増え方」で当てると黙って数倍ずれる。
+  当てはめの n は式の中の有限の回数・幅の最大（`_Program.reach`）より先に置き、`{m,n}` 型が
+  あれば当てはめの外の大きな n でも検算する（この安全域を外さないこと）。
+
+`flow_graph` / `flow_tree`（`fx_flow.py`）の規則:
+
+- 鍵は「ノード・辺・layout の引数・出来事（呼んだ順）・色・寸法」と、文字があるときだけ
+  フォント。**配置の結果（座標）は鍵に入れない**ので、配置の手順（BFS・重心法・radial の角度・
+  点の塊の散らし方）や描き方を変えたら `_FLOW_VER` を上げ、絵を目視してから
+  `pytest tests/test_fx_flow.py -k golden --golden-update` で `tests/golden/flow/` を作り直す。
+- 毎コマの描画は uint8 の上で「触れた画素だけ」重ねる（float の全面キャンバス＋to_rgba8 は
+  1080p で毎コマ約 30ms かかり、葉 3000＋パケット 200 で 40ms に収まらない）。framekit の
+  polyline / to_rgba8 は辺の層（cut の進み具合ごとに使い回す）にだけ使う。
+- 経路（BFS・Dijkstra）と配置は自前（networkx は import しない。版で結果が変わらないように）。
+- **描く線とパケットの道は同じ折れ線（`_edge_pts`）から作る**。扇（細く薄い辺）も各辺の
+  折れ線を往復して描く。別々に作ると `curve=` を渡したときにパケットが辺から外れる（実際に
+  扇だけ直線で描いていて 67px 外れた）。
+- 点の文字の置き場所は `_refine_labels` が辺・ノードとの重なりで選び直す（layered の第一候補は
+  `_layered` の中、余白を測る前に決める）。鍵には配置の結果と同じく入らないので、選び方を
+  変えたら `_FLOW_VER` を上げる。
+- パケットの札（send の label）は**ノードの枠・点・ノードの文字・先に出た札に重ねない**。
+  `_place_packet_labels` が build の描くコマの秒（`Fraction(i) / fps`）ごとに札の矩形を出し、
+  重なるコマを隠す区間にする（描くときは `_plabel_alpha` で区間の中を α 0、前後
+  `_PLABEL_FADE` 秒で薄れる・現れる）。重なりを辺との交差と同じ秤の「量」で比べて側を1つに
+  保つだけだと、着く先の文字や出たばかりの box を覆った（見本 s13）ので、量ではなく隠す。
+  採点と描画は同じ `_plabel_side` / `_plabel_at` で同じ秒の位置を出す（別々に書くと、
+  隠すと決めたコマと描いたコマがずれて、重なりが漏れる）。
+- 札の側（`_plabel_side` の側の列）はコマごとに選び直さない（ぱたぱた入れ替わる）。変えて
+  よいのは途中のノードの先で1回と、止まる所で1回（`_PLABEL_REST_SIDES` = パケットより後ろの
+  左右）だけで、変わる所のコマを必ず隠す。止まった札を中央のまま残すと、止まる先のノードに
+  掛かって隠れ続けた。
+- 図全体の `curve` は `_curve_caps` が辺の集まるノードで弱める（辺ごとの 'curve' は弱めない）。
+  上限は隣の辺との角の間で決まり、辺の本数ではない（片側へ開く layered の扇は 3 本でも約 0.16 に
+  なる。文書に「何本ならそのまま」と書くときは均等に散った radial の場合だと明記する）。
+- 札の置き方も curve の弱め方も鍵に入らないので、変えたら `_FLOW_VER` を上げる。
+
+`slots` / `text_transition` の規則:
+
+- slots のあふれの札は `row(overflow_label=)`（既定 'total' = 入った数の合計）。描かなかった数
+  だけの「+N」を既定に戻さない（400 を入れて「+190」と出て、数として誤解された）。札の書式は
+  あふれる行だけ鍵に入る。
+- text_transition の入れ替わる組は `swing`（行の字の高さの倍。既定 1）より遠くへ振らない。
+  `_route_moves` の重なりの採点で、縦にだけ動く間に横へ箱を広げないこと（隣の字と接した箱を
+  縦にすり抜けるだけで重なりに数え、深く振れる候補ほど得をして、字の 2.5 倍振れていた）。
+- 描画の作業領域（`_Renderer`。1080p で約 100MB）は build の draw が最後のコマで手放す
+  （Object は p.objects に残り続けるので、持ったままだと図の数だけ積み上がる）。
+
 ### 検査系（viz.py / p.inspect()）は本体の規則を再実装しない
 
 `viz.py` は `Project._plan_object_checkpoints()` と
@@ -878,7 +1069,7 @@ drawtext / subtitles のパス・文字列エスケープ（filtergraph イン�
 ## 6. 機能を追加するときの判断フロー
 
 1. **まず `python -m scriptvedit describe` で既存機能を確認する。**
-   41 の Effect と 102 の Expr が既にある。車輪の再発明を避ける。
+   42 の Effect と 102 の Expr が既にある。車輪の再発明を避ける。
 2. **その動画プロジェクト固有の一発ネタ → `plugins/*.py` に `@effect_plugin`。**
    コアを汚さない。`plugins/` は自動読込され、`from scriptvedit import *` で使える。
    雛形は `describe` の `usage.plugin_template` にある。参考実装:
@@ -919,6 +1110,10 @@ drawtext / subtitles のパス・文字列エスケープ（filtergraph イン�
    `test_snapshot.py` は `_SPECS` を parametrize するだけなので個別登録は要らない。
    エラーケースは `tests/test_errors.py` に `check_*` を書き、末尾の `ALL_TESTS` へ登録する
    （未登録はメタテストが落とす）。
+   **ffmpeg のフィルタで描けない図（コマごとに Python で描く図解アニメ）は
+   `framekit.build` の上に作る**（§5「図解アニメ」。鍵・dry_run・最後のコマの保持・
+   金型テストを受け継ぐ）。テストは図ごとのファイル（`tests/test_fx_<名前>.py`。
+   画素・決定性・鍵・エラーケース・金型）に置く。
 4. **マニフェストへの掲載は自動。** 網羅性テストが載せ忘れを検出するので、
    `manifest.py` を手で書き足す必要は基本的にない。
    手書きが要るのは `**kwargs` 経由の引数・単位・choices・notes・constraints だけで、

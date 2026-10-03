@@ -4,6 +4,8 @@
 - `tests/layers/` はレイヤー定義ファイル（testNN_*.py）とテスト用プラグインの置き場であり、
   pytest のテストモジュールではないため収集対象から外す。
 - スナップショット再生成用のオプション `--snapshot-update` を提供する。
+- 図解アニメの金型（tests/golden/）の作り直し用オプション `--golden-update` を提供する
+  （tests/framekit_golden.py）。
 - 実 FFmpeg レンダ（重い）は既定で**収集から外す**。`--realrender`（選抜）/
   `--realrender-all`（全件）/ 環境変数 `SCRIPTVEDIT_REALRENDER` で有効化する
   （tests/test_real_render.py）。skip ではなく deselect にしているのは、
@@ -25,6 +27,11 @@ def pytest_addoption(parser):
     parser.addoption(
         "--realrender-all", action="store_true", default=False,
         help="実FFmpegレンダを全プロジェクトで実行する（非常に重い）")
+    parser.addoption(
+        "--golden-update", action="store_true", default=False,
+        help="図解アニメの金型(tests/golden/<kind>/*.png と .json)を現在の描画で作り直す"
+             "（tests/framekit_golden.py の assert_golden。版定数が金型と同じまま絵が"
+             "変わったものは書き換えずに失敗させる）")
 
 
 def _real_render_mode(config):

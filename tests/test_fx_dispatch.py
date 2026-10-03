@@ -16,7 +16,7 @@ import warnings
 import pytest
 
 from scriptvedit import (
-    Object, Project, asset, assemble_from, blend_mode, color_shift,
+    Object, Project, asset, assemble_from, blend_mode, color_shift, fly_to,
     freeze_frame, inertia, ken_burns, look_at, lut, mask, mask_wipe, morph_to,
     move_along, opacity, path_bezier, perspective_warp,
     rotate_to, rounded, speed, throw, tint, trim, zoom,
@@ -51,6 +51,7 @@ _FIXTURES = {
     "assemble_from": lambda: assemble_from(Object(asset("images/shape_dots.png"))),
     "blend_mode": lambda: blend_mode("screen"),
     "color_shift": lambda: color_shift(hue=30),
+    "fly_to": lambda: fly_to(Object(asset("images/shape_dots.png"))),
     "freeze_frame": lambda: freeze_frame(0.5, 0.5),
     "inertia": lambda: inertia(0.1, 0.1),
     "ken_burns": lambda: ken_burns((0, 0, 100, 100), (10, 10, 80, 80)),

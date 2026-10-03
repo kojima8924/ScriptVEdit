@@ -434,6 +434,64 @@ _SPECS = [
                 doc="duck_under(hold=): 検出用の枝を保持つきの包絡（aeval）へ / "
                     "video_sequence(...).time() の合成尺",
                 assets=("audio/効果音.mp3", "video/flowerbg_noaudio.mp4")),
+    ProjectSpec("test117", ["test117_regex_tape.py"], needs=("font",),
+                doc="regex_view(view='tape'): .*(?:.*=.*) × xxxxx を beats='literal:=' の 56 拍で"
+                    "（framekit.build の frames 生成物。鍵にフォントの内容指紋が入るので比較では畳む）"),
+    ProjectSpec("test118", ["test118_regex_rows.py"], needs=("font",),
+                doc="regex_view(view='rows'): \\s+$ × x＋空白10個＋x、count='matches' と "
+                    "count_to（regex_count の外挿値）"),
+    ProjectSpec("test119", ["test119_regex_both.py"], needs=("font",),
+                doc="regex_view(view='both'): \\s++$ と (?<!\\s)\\s+$ を左右に、at= つき"),
+    ProjectSpec("test120", ["test120_slots_capacity.py"], needs=("font",),
+                configure=_cfg(width=1920, height=1080),
+                doc="slots: n=200・capacity=200・elide=(6, 3) の棚に fill(400)、あふれと halt"
+                    "（framekit.build の frames 生成物。鍵にフォントの内容指紋が入るので"
+                    "比較では畳む。size 固定で寸法は環境に依らない）"),
+    ProjectSpec("test121", ["test121_slots_pointer.py"], needs=("font",),
+                configure=_cfg(width=1920, height=1080),
+                doc="slots: 21 個と 20 個の2行・ghost=[21]・put・link（先が ghost で accent）・"
+                    "範囲外の read（斜線の区画「?」）"),
+    ProjectSpec("test122", ["test122_slots_sort.py"], needs=("font",),
+                configure=_cfg(width=1920, height=1080),
+                doc="slots: [1, 2, 10] の to_str・compare(by='str')・swap（上下の弧）"),
+    ProjectSpec("test123", ["test123_textmove_code.py"], needs=("font",),
+                doc="text_transition: 公式の正規表現 → \\s+$（unit=正規表現・leave='fall'・"
+                    "状態ごとの size・anchor='center'）と \\s+$ → \\s++$（赤い '+' が drop）。"
+                    "同梱の自作フォントで鍵と寸法を環境に依らず固定"),
+    ProjectSpec("test124", ["test124_textmove_odometer.py"], needs=("font",),
+                doc="odometer: 32ビットの数え盤（base=2・twos・group=8）と日時の "
+                    "odometer.text（roll_dir='down'）"),
+    ProjectSpec("test125", ["test125_textmove_states.py"], needs=("font",),
+                doc="text_transition: 3つの状態と hold・duration のリスト / unit='word'・"
+                    "move='arc'"),
+    ProjectSpec("test126", ["test126_flow_health.py"], needs=("font", "morph"),
+                doc="flow_graph: LB＋サーバー6台（layered・box と文字）。送って戻し、遅れた"
+                    "サーバーは drop・state(dim, mark='x')・cut（framekit.build の frames 生成物。"
+                    "鍵にフォントの内容指紋が入るので比較では畳む）"),
+    ProjectSpec("test127", ["test127_flow_tree.py"], needs=("morph",),
+                doc="flow_tree: [1, 50, 3000]（葉は点の塊）・amount・根からの broadcast"),
+    ProjectSpec("test128", ["test128_flow_packets.py"], needs=("morph",),
+                doc="flow_graph: 35 個のうち 30 個が ('stop', 'ny') で並び、5 個が pass"
+                    "（layout='given'・曲がった辺）"),
+    ProjectSpec("test129", ["test129_flyto_basic.py"], needs=("morph",),
+                doc="fly_to: 粒子の輸送モーフ（前処理の resize を PNG チェックポイントへ焼き、"
+                    "flight キャッシュ生成物へ。鍵に target の内容指紋）"),
+    ProjectSpec("test130", ["test130_flyto_anchor.py"], needs=("morph",),
+                doc="fly_to: anchor='topleft' の overlay 式は余白を除いた A の箱が基準 / "
+                    "delay・duration の tpad"),
+    ProjectSpec("test131", ["test131_flyto_text.py"], needs=("font", "morph"),
+                doc="fly_to: text_image の赤い部分 → 締めの一文（動画の結びの形）"),
+    ProjectSpec("test132", ["test132_globe_points.py"], needs=("morph",),
+                doc="globe: 多角形の陸（模式図）・points の appear=wave / staged"
+                    "（framekit.build の frames 生成物。鍵は環境に依らない）"),
+    ProjectSpec("test133", ["test133_globe_arcs.py"], needs=("morph",),
+                doc="globe: 大円の弧3本（裏へ回る・縁の外へ出る）・ripple・turn（slerp）"),
+    ProjectSpec("test134", ["test134_globe_plate.py"], needs=("morph",),
+                doc="globe(projection='plate'): night（2024-07-19 04:09 UTC）・"
+                    "日付変更線をまたぐ弧"),
+    ProjectSpec("test135", ["test135_globe_earth.py"], needs=("morph",),
+                doc="globe: 既定の陸（同梱の地球 = Natural Earth 1:110m。鍵は PNG の内容指紋）・"
+                    "拠点の点の堀と光の輪・plate の view='auto'（太平洋を渡る弧がつながる）"),
     # --- 以下は実レンダ専用（dry_run では踏めない経路） ---
     ProjectSpec("test92", ["test92_formula_scale.py"], snapshot=False,
                 configure=_cfg(width=640, height=360, fps=15), needs=("web",),

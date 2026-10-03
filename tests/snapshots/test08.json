@@ -12,9 +12,9 @@
     "-i",
     "color=c=darkgreen:s=1280x720:d=5:r=30",
     "-i",
-    "__cache__/artifacts/checkpoint/a04e6a90/227f931cd7c8ea4e.mkv",
+    "__cache__/artifacts/checkpoint/a04e6a90/31f8bf2fbb0064d0.mkv",
     "-i",
-    "__cache__/artifacts/checkpoint/ad076f7b/db20c7a39052dbe0.mkv",
+    "__cache__/artifacts/checkpoint/ad076f7b/226f8db0289cc3c9.mkv",
     "-filter_complex",
     "[1:v]trim=end=5.066666666666666[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,5)'[v1];[2:v]trim=end=5.066666666666666[obj2];[v1][obj2]overlay=trunc(clip((t-0)/5/,0/,1)*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,5)'[v2]",
     "-map",
@@ -29,7 +29,7 @@
     "test08.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/checkpoint/a04e6a90/227f931cd7c8ea4e.mkv": [
+    "__cache__/artifacts/checkpoint/a04e6a90/31f8bf2fbb0064d0.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -44,7 +44,7 @@
       "-i",
       "assets/images/bg_pattern_tiles.jpg",
       "-vf",
-      "scale=iw*1:ih*1,scale=w='trunc(iw*((1.2+(-0.19999999999999996*clip((t-0)/5/,0/,1))))/2)*2':h='trunc(ih*((1.2+(-0.19999999999999996*clip((t-0)/5/,0/,1))))/2)*2':eval=frame,format=rgba,pad=960:540:(ow-iw)/2:(oh-ih)/2:color=0x00000000:eval=frame,copy,format=rgba,geq=r='r(X/,Y)':g='g(X/,Y)':b='b(X/,Y)':a='alpha(X/,Y)*clip(clip((T-0)/5/,0/,1)/,0/,1)'",
+      "scale=iw*1:ih*1,scale=w='trunc(iw*((1.2+(-0.19999999999999996*clip((t-0)/5/,0/,1))))/2)*2':h='trunc(ih*((1.2+(-0.19999999999999996*clip((t-0)/5/,0/,1))))/2)*2':eval=frame,format=rgba,pad=960:540:(ow-iw)/2:(oh-ih)/2:color=0x00000000:eval=frame,copy,format=rgba,format=gbrap,sendcmd=c='0 [expr] colorchannelmixer@fxe1 aa clip(clip((T-0)/5//,0//,1)//,0//,1)',colorchannelmixer@fxe1=aa=0.0",
       "-c:v",
       "ffv1",
       "-level",
@@ -54,9 +54,9 @@
       "-an",
       "-t",
       "5.033333",
-      "__cache__/artifacts/checkpoint/a04e6a90/227f931cd7c8ea4e.mkv"
+      "__cache__/artifacts/checkpoint/a04e6a90/31f8bf2fbb0064d0.mkv"
     ],
-    "__cache__/artifacts/checkpoint/ad076f7b/db20c7a39052dbe0.mkv": [
+    "__cache__/artifacts/checkpoint/ad076f7b/226f8db0289cc3c9.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -71,7 +71,7 @@
       "-i",
       "assets/images/shape_starburst.png",
       "-vf",
-      "scale=iw*0.3:ih*0.3,format=rgba,geq=r='r(X/,Y)':g='g(X/,Y)':b='b(X/,Y)':a='alpha(X/,Y)*clip(clip((T-0)/5/,0/,1)/,0/,1)'",
+      "scale=iw*0.3:ih*0.3,format=rgba,format=gbrap,sendcmd=c='0 [expr] colorchannelmixer@fxe0 aa clip(clip((T-0)/5//,0//,1)//,0//,1)',colorchannelmixer@fxe0=aa=0.0",
       "-c:v",
       "ffv1",
       "-level",
@@ -81,7 +81,7 @@
       "-an",
       "-t",
       "5.033333",
-      "__cache__/artifacts/checkpoint/ad076f7b/db20c7a39052dbe0.mkv"
+      "__cache__/artifacts/checkpoint/ad076f7b/226f8db0289cc3c9.mkv"
     ]
   }
 }
