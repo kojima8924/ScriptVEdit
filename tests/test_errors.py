@@ -1,6 +1,7 @@
 # エラーケーステスト: 各種エラー条件の自動検証
 import sys, os, tempfile, shutil, json, re, subprocess
 import uuid as _uuid
+from unittest.mock import patch
 import pytest
 
 # tests ディレクトリ内一時ファイルのプロセス単位ユニーク化トークン。
@@ -57,6 +58,7 @@ from scriptvedit.effects.composite import _BLEND_MODES
 from scriptvedit.manifest import _MANIFEST_ENTRY_SECTIONS
 from scriptvedit.media import _XFADE_TRANSITIONS
 from scriptvedit.plugins import _EFFECT_PLUGINS, _LOADED_PLUGIN_FILES
+from scriptvedit.params import check_unconsumed_params
 from scriptvedit.state import (
     _ARTIFACT_DIR, _BAKEABLE_EFFECTS, _ENCODER_MAP, _PRESETS,
     _TERMINAL_FRAME_EFFECTS, _TIME_LIVE_EFFECTS,
@@ -6289,6 +6291,250 @@ ALL_TESTS += [
     ("keyframes_sec 引数エラー", check_keyframes_sec_argument_errors),
     ("秒の式: 表示秒なしの数値評価", check_seconds_expr_without_display_seconds),
     ("duck_under hold 引数エラー", check_duck_under_hold_errors),
+]
+
+
+def check_from_project_unconsumed_params():
+    """親子で未使用の CLI 上書きは拒否し、無関係な Project と消費記録を共有しない。"""
+    previous = current_project()
+    argv = sys.argv
+    try:
+        sys.argv = ["main.py", "--param", "clip_count=2", "--param", "typo=9"]
+        with tempfile.TemporaryDirectory() as directory:
+            child = os.path.join(directory, "child.py")
+            parent = os.path.join(directory, "parent.py")
+            with open(child, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write(
+                    "from scriptvedit import pause\n"
+                    "from scriptvedit.context import current_project\n"
+                    "pause.time(current_project().param('clip_count', 1))\n")
+            with open(parent, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write(
+                    "from scriptvedit import Object, Project\n"
+                    "sub = Project()\n"
+                    "sub.configure(width=160, height=90, fps=10)\n"
+                    f"sub.layer({child!r})\n"
+                    "Object.from_project(sub).time(2)\n")
+            p = Project()
+            p.configure(width=160, height=90, fps=10)
+            p.layer(parent)
+            with pytest.raises(ValueError, match="--param typo=9") as caught:
+                p.render(os.path.join(directory, "out.mp4"), dry_run=True)
+            if "--param clip_count=2" in str(caught.value):
+                return False, "サブで使用済みの上書きを誤って拒否しました"
+            if "clip_count" not in p._param_consumed:
+                return False, "親にサブの消費記録が届いていません"
+            other = Project()
+            other.param("title", "既定")
+            with pytest.raises(ValueError, match="--param clip_count=2"):
+                check_unconsumed_params(other)
+        return True, "親子の真の未使用名を拒否し、独立 Project は別に検査"
+    finally:
+        sys.argv = argv
+        activate(previous)
+
+
+def check_plugin_failed_override_restores_namespace():
+    """読込失敗で上書き済みファクトリを戻し、新規登録も全て取り消す。"""
+    name = "t_failed_override"
+    added = "t_failed_override_added"
+    try:
+        old_factory = _def_plugin(name, bakeable=True, params={
+            "radius": {"type": "number", "default": 1}})
+        old_spec = _EFFECT_PLUGINS[name]
+        old_all = list(_sv.__all__)
+        with tempfile.TemporaryDirectory() as directory:
+            for error_type in ("RuntimeError", "PluginError"):
+                path = os.path.join(directory, f"broken_{error_type}.py")
+                with open(path, "w", encoding="utf-8", newline="\r\n") as f:
+                    f.write(
+                        "from scriptvedit import effect_plugin, PluginError\n"
+                        f"@effect_plugin({name!r}, override=True, bakeable=False, "
+                        "params={'radius': {'type': 'number', 'default': 2}})\n"
+                        "def replacement(params, ctx):\n"
+                        "    return ['null']\n"
+                        f"@effect_plugin({added!r}, bakeable=True, params={{}})\n"
+                        "def added_factory(params, ctx):\n"
+                        "    return ['null']\n"
+                        f"raise {error_type}('意図した読み込み失敗')\n")
+                with pytest.raises(_sv.PluginError):
+                    _sv.load_plugin(path)
+                restored = (
+                    getattr(_sv, name) is old_factory
+                    and _EFFECT_PLUGINS[name] is old_spec
+                    and getattr(_sv, name)().params["radius"] == 1
+                    and name in _BAKEABLE_EFFECTS
+                    and list(_sv.__all__) == old_all
+                    and not hasattr(_sv, added)
+                    and added not in _EFFECT_PLUGINS
+                    and added not in _BAKEABLE_EFFECTS)
+                if not restored:
+                    return False, f"{error_type} 後の登録状態が元に戻りません"
+        return True, "両例外経路で元ファクトリ・登録・公開名を復元"
+    finally:
+        _sv.unregister_plugin(added)
+        _sv.unregister_plugin(name)
+
+
+def check_storyboard_too_many_frames():
+    """絵コンテの120コマ上限は素材の実体化・コマ抽出より前に拒否する。"""
+    pytest.importorskip("PIL", reason="Pillow が無い環境")
+    previous = current_project()
+    try:
+        p = Project()
+        p.configure(duration=121, fps=1)
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, "board.png")
+            with patch("scriptvedit.preview._prepare_thumbnail_plan"), \
+                    patch("scriptvedit.preview._ensure_thumbnail_media") as ensure, \
+                    patch("scriptvedit.preview._extract_storyboard_frames") as extract:
+                with pytest.raises(ValueError, match="120") as caught:
+                    p.storyboard(output, interval=1)
+                assert "interval" in str(caught.value)
+                ensure.assert_not_called()
+                extract.assert_not_called()
+            with patch("scriptvedit.preview._review_source",
+                       return_value=("unused.mp4", 121)), \
+                    patch("scriptvedit.preview._extract_source_frame") as extract:
+                with pytest.raises(ValueError, match="120") as caught:
+                    p.storyboard(output, interval=1, source="unused.mp4")
+                assert "interval" in str(caught.value)
+                extract.assert_not_called()
+        return True, "Project・完成動画の両経路で抽出前に上限を検査"
+    finally:
+        activate(previous)
+
+
+ALL_TESTS += [
+    ("from_project 未使用paramと独立性", check_from_project_unconsumed_params),
+    ("plugin 失敗時の名前空間復元", check_plugin_failed_override_restores_namespace),
+    ("storyboard コマ数上限", check_storyboard_too_many_frames),
+]
+
+
+def check_review3_partial_layer_cache_make():
+    """部分 make は dry_run と実レンダの両方で生成前に拒否する。"""
+    layer = _tmp_file("_tmp_review3_partial_layer.py")
+    try:
+        with open(layer, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write('from scriptvedit import *\ntext("部分").time(4)\n')
+        for dry_run in (True, False):
+            p = Project()
+            p.configure(width=64, height=36, fps=10, duration=4)
+            p.layer(layer, cache="make")
+            with patch("scriptvedit.project._run_ffmpeg",
+                       side_effect=AssertionError("計画エラーより先に FFmpeg が起動した")):
+                try:
+                    p.render("_tmp_review3_partial.mp4", start=0, end=1,
+                             dry_run=dry_run)
+                except ValueError as e:
+                    if not all(word in str(e) for word in ("部分レンダ", "cache='make'", "cache='off'")):
+                        return False, str(e)
+                else:
+                    return False, "部分 make が拒否されなかった"
+        return True, "dry_run / 実レンダとも計画時に部分 make を拒否"
+    finally:
+        if os.path.exists(layer):
+            os.remove(layer)
+        activate(None)
+
+
+def check_review3_layer_cache_priority():
+    """片側・両側のキャッシュ化で順序が変わる priority を拒否する。"""
+    a = _tmp_file("_tmp_review3_priority_a.py")
+    b = _tmp_file("_tmp_review3_priority_b.py")
+    try:
+        # (A の実 priority, B の実 priority, A の層 priority, B の層 priority, 両側キャッシュ)
+        cases = [(2, 1, 0, 1, False),
+                 (0, 2, 1.5, 0.5, True),  # 片側ずつなら同順でも両側を畳むと逆転
+                 (0, 1, 2, 3, True)]     # 両側なら同順でも片側だけ命中すると逆転
+        for own_a, own_b, layer_a, layer_b, both in cases:
+            for filename, color, priority in ((a, "赤", own_a), (b, "青", own_b)):
+                with open(filename, "w", encoding="utf-8", newline="\r\n") as f:
+                    f.write("from scriptvedit import *\n"
+                            f'text("{color}").show(1, priority={priority})\n')
+            for cache in ("make", "auto", "use"):
+                p = Project()
+                p.configure(width=64, height=36, fps=10)
+                p.layer(a, cache=cache, priority=layer_a)
+                p.layer(b, cache=cache if both else "off", priority=layer_b)
+                try:
+                    p.render("_tmp_review3_priority.mp4", dry_run=True)
+                except ValueError as e:
+                    if not all(word in str(e) for word in ("priority", "重なり順", "cache='off'")):
+                        return False, str(e)
+                else:
+                    return False, f"cache={cache}, priority={(own_a, own_b, layer_a, layer_b)} の順序変更が拒否されなかった"
+        return True, "片側・両側の make / auto / use で順序変更を拒否"
+    finally:
+        for filename in (a, b):
+            if os.path.exists(filename):
+                os.remove(filename)
+        activate(None)
+
+
+def check_review3_terminal_compute():
+    """終端フレーム Effect を compute が黙って捨てず、状態を変える前に止める。"""
+    previous = current_project()
+    try:
+        p = Project()
+        for name in sorted(_TERMINAL_FRAME_EFFECTS):
+            obj = Object("dummy.png")
+            obj <= Effect(name)
+            effects = list(obj.effects)
+            with pytest.raises(ValueError, match="compute.*終端フレーム"):
+                obj.compute(duration=1)
+            assert obj.source == "dummy.png" and obj.effects == effects
+            assert obj in p.objects
+        return True, "全終端 Effect を compute 前に拒否"
+    finally:
+        activate(previous)
+
+
+ALL_TESTS += [
+    ("review3 部分レンダのmake拒否", check_review3_partial_layer_cache_make),
+    ("review3 レイヤー外とのpriority順序", check_review3_layer_cache_priority),
+    ("review3 終端Effectのcompute拒否", check_review3_terminal_compute),
+]
+
+
+def check_review3_live_time_before_trim():
+    """live 時間操作の後ろの trim をチェックポイント計画で拒否する。"""
+    for effect in (speed(2), reverse(), freeze_frame(0.2, 0.2),
+                   Effect("repeat", count=2)):
+        p = Project()
+        p.configure(width=64, height=36, fps=10)
+        obj = Object("review3_pending.mp4").time(1)
+        obj <= effect & trim(start=0.1, duration=0.5)
+        ok, msg = _expect_raise(
+            lambda: p._plan_object_checkpoints(obj), ValueError,
+            (effect.name, "trim", "処理順", "off"))
+        if not ok:
+            return False, msg
+    return True, "speed/reverse/freeze_frame/repeat の後ろの trim を拒否"
+
+
+def check_review3_terminal_off():
+    """終端フレーム Effect は全 off でも部分 off でも消さずに拒否する。"""
+    for name in ("morph_to", "explode_to", "assemble_from", "fly_to"):
+        for with_prefix in (False, True):
+            p = Project()
+            p.configure(width=64, height=36, fps=10)
+            obj = Object(asset("images/shape_dots.png")).time(1)
+            if with_prefix:
+                obj <= opacity(0.5)
+            obj <= -Effect(name)
+            ok, msg = _expect_raise(
+                lambda: p._plan_object_checkpoints(obj), ValueError,
+                (name, "終端フレーム", "off"))
+            if not ok:
+                return False, msg
+    return True, "終端4種の全 off/部分 off を計画で拒否"
+
+
+ALL_TESTS += [
+    ("review3 live時間操作後のtrim拒否", check_review3_live_time_before_trim),
+    ("review3 終端Effectのoff拒否", check_review3_terminal_off),
 ]
 
 

@@ -25,7 +25,7 @@ from scriptvedit.chapters import _chapters_metadata_path, _write_chapters_metada
 from scriptvedit.ffmpeg import _atomic_write_text, _run_ffmpeg, _unique_tmp_path
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_input_args, _build_video_overlay_parts, _unwrap_raw_stream_ref, _visible_window
+from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_input_args, _build_video_overlay_parts, _unwrap_raw_stream_ref, _visible_window, _t_enable_from, _t_ceil
 from scriptvedit.objects import Object
 
 
@@ -198,10 +198,14 @@ def _build_chunk_ffmpeg_cmd(project, chunk_path, k0, k1, threads,
     for o in sorted_objects:
         if not o.has_video:
             continue
-        if o.start_time >= w_end:
-            continue  # チャンク終了後に始まる → 不可視
-        if o.duration is not None and o.start_time + o.duration <= t0:
-            continue  # チャンク開始前に終わる（duration未確定は安全側で残す）
+        # overlay の enable と同じ丸めを使い、チャンクに実在する
+        # 最初・最後のコマとの交差を調べる。終端は閉区間なので残す。
+        # duration 未確定の Object は enable が無く全編可視になる。
+        if o.duration is not None:
+            if _t_enable_from(o.start_time, fps) > (k1 - 1) / fps:
+                continue
+            if _t_ceil(o.start_time + o.duration) < t0:
+                continue
         chunk_objs.append(o)
 
     filter_parts = []

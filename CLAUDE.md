@@ -256,7 +256,7 @@ framesync のタイムベース評価が壊れるため、メイン入力と同�
 ### 4.5 ネイティブ VP9 デコーダは alpha 非対応
 
 `.webm` 入力には `-c:v libvpx-vp9` を付ける。入力側の分岐は
-`ffmpeg.py` の `_decoder_input_args` に一本化されている。
+`ffmpeg.py` の `_decoder_input_args` に一本化されている（動画→静止画の `compute()` も通す）。
 **ただし無条件ではない**: `__cache__` 配下の `.webm` は拡張子で確定して強制、
 **外部の `.webm` は probe して vp9/vp8 のときだけ指定**する。
 一律に強制すると AV1 等が `Bitstream not supported` で落ちる（issue #15 で実際に踏んだ）。
@@ -486,6 +486,8 @@ Effect は2種類ある。
 なる」ものかを確かめてから登録すること。** 時間依存の尺変更を伴うものは live のまま。
 **明示された例外が1つある**: `trim` は尺を変えるが `_BAKEABLE_EFFECTS` に入っている
 （`cache.py` の `_fold_time_effects` がベイク尺の計算に反映する前提）。
+ただし live な時間 Effect の後の `trim` を前へ移して焼く並びは計画時エラーにする。
+終端フレーム Effect は `compute()` 内・`policy="off"` で処理できないため明示拒否する。
 
 `morph_to` / `explode_to` / `assemble_from` / `fly_to` は終端フレーム生成 Effect
 （`_TERMINAL_FRAME_EFFECTS`）で、bakeable な ops の末尾に1つだけ置ける。
@@ -516,6 +518,7 @@ Effect は2種類ある。
   これに揃った（以前は焼いた動画が1枚短く、境目は後ろの Object だけだった。live の Effect と
   静止画は元からこの挙動）。後ろが前を覆わない並びでは前の絵が1枚重なって見える。
   README の「表示の窓と境目の1枚」に利用者向けの説明がある。
+  並列チャンクの枝刈りも enable と同じ fps 丸め・閉区間で判定し、境界の1枚を落とさない。
 - **`compute()` はこの対象外**（生成物の `length()` が1フレーム伸びると、`time()` の
   既定尺と後続の並びが動くため）。
 
@@ -550,6 +553,15 @@ overlay の位置が1画素ずれ、4:2:0 出力で元の絵の色差が半画�
 `_build_ffmpeg_cmd` が**音声専用入力を末尾に1本追加**する。
 入力本数が増えるので、FFMETADATA のストリーム index は
 `1 + len(sorted_objects)` ではなく**実際の入力総数**で数えること（チャプターが壊れる）。
+
+### 音声の素材選択と表示尺は別にトリムする
+
+`_build_ffmpeg_cmd` は素材選択の `atrim` があっても、音声前処理の末尾で `.time()` の
+表示尺へトリムする。前処理を `_fold_time_effects(..., audio=True)` で無限長から畳み、
+上限が表示尺以内と確定するときだけ追加を省く（同一出力なら同一コマンド）。
+`atempo` の実サンプル数は理論尺を超えることがあるため上限を未確定へ戻し、後続の
+`atrim` があれば再確定する。素材の probe に依存させず cold/warm を揃え、
+並列音声レグ・ラウドネス測定も同じ関数を通す。
 
 ### 音声は混ぜる前に 48kHz・ステレオへ揃える
 
@@ -662,7 +674,9 @@ overlay の位置が1画素ずれ、4:2:0 出力で元の絵の色差が半画�
 - **素材は内容ハッシュ**（sha256 先頭16桁、`cache.py` `_file_fingerprint`）。
   パスにも mtime にも依存せず、同一バイト列なら別マシンでも鍵が変わらない。
   ただし環境ごとに生成内容が変わる素材は、その内容差が下流の鍵へ伝播する。
-  高速化はプロセス内メモ化のみ。**ディスクキャッシュ（`__cache__/ffp.json`）は撤廃した**
+  高速化は最外側の1レンダ内だけメモ化し、ネストしたサブプロジェクトとは共有する。
+  `_begin_render_pass` で `_FFP_MEMO` を破棄し、同じ size/mtime の差し替えも次回検出する。
+  **ディスクキャッシュ（`__cache__/ffp.json`）は撤廃した**
   — (パス, サイズ, mtime) を参照キーに永続化すると、mtime を保持するコピー
   （`cp -p` / `rsync -t` / `tar -x` / `unzip -o`）で同サイズの別内容に差し替えたとき
   古いハッシュを返し「変更したのに再生成されない」。復活させないこと。
@@ -692,6 +706,12 @@ overlay の位置が1画素ずれ、4:2:0 出力で元の絵の色差が半画�
   そのレイヤー分だけを取る。**アンカー解決のロジックを二重実装しないこと**
   （旧実装は `time(name=)` の `X.start`/`X.end`・`@`・`>>`・`until` を落として空の
   メタを書いていた）。
+- **部分レンダの `cache='make'` は計画時に拒否する。** 部分的な web 素材を全編用に保存しない。
+  Object の priority 上書きでレイヤー外との重なり順が変わる場合もキャッシュを拒否する。
+  外部アンカーの参照名と解決値は Plan から `external_anchors` メタへ控え、鮮度に含める。
+- **`from_project` の解決済みレイヤー param は子の鍵に入れ、生成物の署名を親の依存へ渡す。**
+  `video_sequence` は入力 Object の `_generated_length` と確定済み音声有無を優先し、
+  未生成時の probe と生成後の丸めで計画を変えない。
 - **レイヤーキャッシュのパスは必ず `Project._layer_cache_paths_for(spec)` 経由で取る。**
   `_layer_cache_paths(filename, project)` を直呼びすると `spec` の `cache_quality` が落ち、
   品質は鍵と拡張子の両方に効くので**静かに別物のパス**を指す。
@@ -925,6 +945,8 @@ Object を1個返す。鍵・描画・時刻・文字・金型テストの規則
 - 描画の作業領域（`_Renderer`。1080p で約 100MB）は build の draw が最後のコマで手放す
   （Object は p.objects に残り続けるので、持ったままだと図の数だけ積み上がる）。
 
+- globe も最後のコマを描いた後に renderer を手放す。再描画時だけ作り直し、画素・鍵は変えない。
+
 ### 検査系（viz.py / p.inspect()）は本体の規則を再実装しない
 
 `viz.py` は `Project._plan_object_checkpoints()` と
@@ -953,6 +975,8 @@ overlay の中央配置は `(W-pad_size[0])/2` で計算される
 `rounded` は pad を出さないので `pad_size` を触らない（`format=rgba` + `geq` で
 アルファを削るだけ）。**手本にしないこと。**
 プラグインからは `ctx["expand_pad"](dw, dh)` / `ctx["set_pad"](w, h)` を使う。
+コアの寸法変更 Effect の後の `scale` は入力寸法を `_FxCtx.current_dims` で追跡する（元の `base_dims` で計算しない）。
+寸法変更後も FFmpeg 8 用の pad/copy を保ち、出力が変わる連鎖だけ鍵の版を更新する。
 
 ### その他
 
@@ -972,8 +996,10 @@ overlay の中央配置は `(W-pad_size[0])/2` で計算される
   `sec(…)` を返し、ffmpeg が Unknown function で止まる。黙って別の値にはならない）。
   数値評価（`eval_at`）は `_UValue(u, dur)` を渡す（scale の pad 見積もり・native fade の判定・
   morph の blend）。素の float だと秒のノードは ValueError。
+- **終端 Effect が消費した数式も生成する。** `_ensure_formula_objects` は表示対象に加え
+  morph / assemble / fly の画像依存をたどる（非表示でも生成責務は消えない）。
 - **生成物の尺は `Object._generated_length`**（`media.py` の `_finalize_generated_object` が置く
-  合成尺）。`length()` はこれがあれば生成物を probe しない: Plan pass では未生成で probe できず
+  合成尺。`from_project` も設定する）。`length()` はこれがあれば生成物を probe しない: Plan pass では未生成で probe できず
   （`video_sequence(...).time()` が初回レンダで落ちていた）、Render pass では在るので、probe に
   頼ると cold / warm で尺が数 ms 食い違い Plan/Render の構造差になる。
   **source を差し替える処理はこの値も差し替えること**: `compute(duration=d)` は d へ

@@ -36,8 +36,61 @@ def _layer_cache_paths_for(project, spec):
 
 
 def _validate_cache_specs(project):
-    """cache='use' のファイル存在チェック"""
-    for spec in project._layer_specs:
+    """解決済み Plan でキャッシュの適用条件と外部アンカー依存を検証する。"""
+    project._layer_external_anchors = {}
+    visual = [(i, o) for i, o in enumerate(project.objects)
+              if isinstance(o, Object) and o.has_video]
+    visual_by_index = dict(visual)
+    # 他レイヤーも同時に1枚へ畳まれる場合の順序を先に求める。
+    # auto は片側だけ命中しうるので、後段では未圧縮側との比較も残す。
+    cached_order = {}
+    for spec, (start, end, _) in zip(project._layer_specs, project._layers):
+        if spec["cache"] != "off":
+            for i in range(start, end):
+                cached_order[i] = (spec["priority"], start)
+    for layer_index, spec in enumerate(project._layer_specs):
+        if spec["cache"] == "make" and project._render_window is not None:
+            raise ValueError(
+                "部分レンダでは cache='make' を使えません。全編用キャッシュへ"
+                "部分的な素材を保存しないため、cache='off' にするか、"
+                "start/end を外して全編をレンダしてください。")
+        if layer_index < len(project._layers):
+            start, end, _ = project._layers[layer_index]
+            refs = set()
+            for item in project.objects[start:end]:
+                until = getattr(item, "_until_anchor", None)
+                fixed = getattr(item, "_fixed_start", None)
+                if until is not None:
+                    refs.add(until)
+                if isinstance(fixed, str):
+                    refs.add(fixed)
+            # 正規リゾルバの結果だけを控える。Render pass で Object を
+            # キャッシュへ置き換えても Plan の依存が失われないようにする。
+            project._layer_external_anchors[spec["filename"]] = {
+                name: project._anchors[name] for name in sorted(refs)
+                if name in project._anchors
+                and project._anchor_defined_in.get(name) != spec["filename"]
+            }
+            if spec["cache"] != "off":
+                for i in range(start, end):
+                    obj = visual_by_index.get(i)
+                    # 上書きの無い Object は外部との順序を変えない。
+                    # 通常レイヤーでは全 Object 対の比較を省く。
+                    if obj is None or obj.priority == spec["priority"]:
+                        continue
+                    for j, other in visual:
+                        if start <= j < end:
+                            continue
+                        before = (obj.priority, i) < (other.priority, j)
+                        own_after = (spec["priority"], start)
+                        after = own_after < (other.priority, j)
+                        both_after = own_after < cached_order.get(j, (other.priority, j))
+                        if before != after or before != both_after:
+                            raise ValueError(
+                                f"レイヤー '{spec['filename']}' は Object の priority "
+                                "上書きにより他レイヤーとの重なり順が変わるため、"
+                                "レイヤーキャッシュを使えません。cache='off' にするか、"
+                                "Object を同じ priority の別レイヤーへ分けてください。")
         if spec["cache"] == "use":
             webm_path, json_path = project._layer_cache_paths_for(spec)
             if not os.path.exists(webm_path):
@@ -121,6 +174,9 @@ def _layer_cache_is_fresh(project, spec):
     # 現在値は project._layer_params に揃っている）
     if meta.get("params", None) != project._layer_params.get(
             spec["filename"], {}):
+        return False
+    if meta.get("external_anchors", {}) != getattr(
+            project, "_layer_external_anchors", {}).get(spec["filename"], {}):
         return False
     return True
 

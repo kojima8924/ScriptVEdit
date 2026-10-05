@@ -178,9 +178,11 @@ def test_parallel_chunk_command_structure(tmp_path, monkeypatch):
     # chunk1 の各Objectは頭破棄（境界誤差ぶん2フレーム手前=2.8sから）
     assert "trim=start=2.8" in fc1
 
-    # 窓外Objectの除外: a=[0,3) は chunk1(t>=3.0) に不要、b=[3,6) は chunk0 に不要
+    # overlay は閉区間なので a=[0,3] の終端は chunk1 の先頭にも必要。
+    # 半開区間として除外すると逐次レンダに在る境界の1コマが消える。
+    # b=[3,6] は chunk0 の最後のコマ(2.9秒)には届かない。
     assert fc0.count("drawtext") == 1
-    assert fc1.count("drawtext") == 1
+    assert fc1.count("drawtext") == 2
     # フィルタ式は絶対時刻基準のまま（chunk1 に b の絶対 enable が残る）
     assert "between(t\\,2.999999\\,6)" in fc1
 

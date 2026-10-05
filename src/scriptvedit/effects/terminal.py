@@ -53,6 +53,11 @@ def _check_timing_params(func, params):
                       lo=0, lo_exclusive=True)
 
 
+def _omit_none_defaults(params, keys):
+    """省略と同義の None だけを外す（数値必須などの不正値は隠さない）"""
+    return {k: v for k, v in params.items() if v is not None or k not in keys}
+
+
 def morph_to(target, blend=None, **morph_params):
     """モーフィングEffect: 画像→画像のモーフ動画を生成（既定は形状ベースの sdf）
 
@@ -66,12 +71,17 @@ def morph_to(target, blend=None, **morph_params):
     # パラメータのタイポはレンダ深部（チェックポイント生成後）ではなく
     # 構築時点で検出する。morph モジュールが無い環境ではレンダ時に検出される
     try:
-        from scriptvedit.morph import MORPH_PARAM_KEYS
+        from scriptvedit.morph import MORPH_PARAM_KEYS, _resolve_method
     except ImportError:
         pass
     else:
         _reject_unknown_keys("morph_to", morph_params,
                              set(MORPH_PARAM_KEYS) | set(_TERMINAL_TIMING_KEYS))
+        # fit は sdf でだけ省略と同義。別方式への誤指定は消さずに検証へ渡す。
+        if _resolve_method(dict(morph_params)) == "sdf":
+            morph_params = _omit_none_defaults(morph_params, {"fit"})
+    morph_params = _omit_none_defaults(
+        morph_params, set(_TERMINAL_TIMING_KEYS) | {"method"})
     # ターゲットObjectをProjectから除外（morphに消費される）
     proj = current_project()
     if proj is not None and target in proj.objects:
@@ -125,6 +135,8 @@ def explode_to(blend=None, **particle_params):
       delay, duration。
     """
     _check_particle_params("explode_to", particle_params)
+    particle_params = _omit_none_defaults(
+        particle_params, set(_TERMINAL_TIMING_KEYS) | {"expand", "toward"})
     if blend is None:
         blend = _resolve_param(lambda u: u)
     else:
@@ -144,6 +156,8 @@ def assemble_from(source, blend=None, **particle_params):
         raise TypeError(f"assemble_from の source は Object のみ: {type(source)}")
     _validate_terminal_input_object("assemble_from", "source", source)
     _check_particle_params("assemble_from", particle_params)
+    particle_params = _omit_none_defaults(
+        particle_params, set(_TERMINAL_TIMING_KEYS) | {"expand", "from_point"})
     proj = current_project()
     if proj is not None and source in proj.objects:
         proj.objects.remove(source)

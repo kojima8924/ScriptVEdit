@@ -19,11 +19,12 @@ from scriptvedit.context import (
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.audio import _duck_targets, _probe_audio_length
-from scriptvedit.cache import _is_pending_cache_path, _resolve_layer_cache_quality, _web_cache_path
+from scriptvedit.cache import _FFP_MEMO, _fold_time_effects, _is_pending_cache_path, _resolve_layer_cache_quality, _web_cache_path
 from scriptvedit.expr import Expr, _UValue, max, min
 from scriptvedit.ffmpeg import FFmpegError, _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _normalize_ffmpeg_cmd, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.audio import _MIX_AUDIO_FORMAT, _SIDECHAIN_FORMAT, _SIDECHAIN_MIX_FORMAT, _build_audio_effect_filters, _build_audio_pre_filters, _sidechain_hold_filter
 from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _get_base_dimensions, _optimize_filter_chain, _unwrap_raw_stream_ref, _visible_window
+from scriptvedit.formula import _render_formula_png
 from scriptvedit.objects import Object, _web_frames_dir
 from scriptvedit.assets import resolve_layer_path
 from scriptvedit.plugins import _autoload_plugins
@@ -505,6 +506,9 @@ class Project:
         """
         # objects を捨てる前に、レイヤー外で作られたアイテムを検出する
         self._check_layer_defined_objects()
+        # 内容指紋は最外側のレンダごとに再取得し、子のレンダとは共有する。
+        if not _in_layer_exec():
+            _FFP_MEMO.clear()
         self._reset_runtime_state()
         self._dry_run = dry_run
         self._draft = bool(draft)
@@ -1203,6 +1207,7 @@ class Project:
         interval秒ごと（省略時は 総尺/12）に thumbnail() と同じ抽出経路
         （plan解決+checkpoint確保+ffmpeg単フレーム抽出）でサムネイルを取り出し、
         PILでcols列のグリッドに結合する（各コマ左上に時刻ラベルを焼き込む）。
+        最大120コマ。ラベルは共通フォント解決（SCRIPTVEDIT_FONT 等）を使う。
         事前renderなしの場合も、Projectグラフの準備とFFmpeg実行は各1回だけ。
         source に既レンダ動画を指定すれば入力seekで軽量に抽出する。
 
@@ -1477,8 +1482,18 @@ class Project:
         （__cache__/artifacts/formula/<hash>.png）に決まっているため、
         dry_run ではPlaywrightを起動せずコマンドを組み立てられる。
         """
-        from scriptvedit.formula import _render_formula_png
-        for obj in self.objects:
+        # 終端 Effect に消費された画像も、表示対象とは別に実体化する。
+        pending = list(self.objects)
+        seen = set()
+        for obj in pending:
+            if id(obj) in seen:
+                continue
+            seen.add(id(obj))
+            for effect in getattr(obj, "effects", ()):
+                for attr in ("_morph_target", "_assemble_source", "_fly_target"):
+                    dependency = getattr(effect, attr, None)
+                    if dependency is not None:
+                        pending.append(dependency)
             spec = getattr(obj, "_formula_spec", None)
             if not isinstance(obj, Object) or spec is None:
                 continue
@@ -1591,6 +1606,7 @@ class Project:
             "anchors": anchors,
             "sources": sources_meta,
             "params": self._layer_params.get(spec["filename"], {}),
+            "external_anchors": getattr(self, "_layer_external_anchors", {}).get(spec["filename"], {}),
             "audio_sources": self._layer_audio_sources.get(spec["filename"], []),
             "unknown_audio_sources": self._layer_unknown_audio_sources.get(
                 spec["filename"], []),
@@ -1917,10 +1933,22 @@ class Project:
                     a_filters.append(self._build_aloop_filter(obj, loop_effect))
                 # atrim/atempo前処理
                 a_pre = _build_audio_pre_filters(obj)
-                # auto atrim: obj.durationがあり、明示atrimがなければ自動トリム
+                # 素材選択の atrim と表示尺のトリムは別。前処理後の上限が
+                # 表示尺以内と確定した場合だけ、従来どおり最終トリムを省く。
+                # 素材を probe せず無限長から畳み、cold/warm で判定を変えない。
                 has_explicit_atrim = any(
                     e.name == "atrim" for e in obj.audio_effects)
-                if not has_explicit_atrim and obj.duration is not None:
+                audio_bound = _math.inf
+                for effect in obj.audio_effects:
+                    if effect.name == "atempo":
+                        # atempo は理論尺より数サンプル長く出ることがある。
+                        # 後続の atrim で再確定するまで上限不明として扱う。
+                        audio_bound = _math.inf
+                    else:
+                        audio_bound = _fold_time_effects(
+                            audio_bound, (effect,), audio=True)
+                if (obj.duration is not None
+                        and (not has_explicit_atrim or audio_bound > obj.duration)):
                     # auto atrim は atempo（speed 追従含む）の後段に置く。
                     # 先頭に前置すると atrim=(base/factor)→atempo=factor の順になり
                     # 音声尺が base/factor² まで縮む不具合になるため末尾に回す。

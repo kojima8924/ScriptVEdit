@@ -985,7 +985,19 @@ class Globe:
         _set_margin(spec, n_frames, sprites)
         if sprites:
             _check_labels(spec, n_frames, sprites)
-        renderer = _Renderer(spec, sprites)
+        renderer = None
+
+        def draw(i):
+            nonlocal renderer
+            if renderer is None:
+                renderer = _Renderer(spec, sprites)
+            try:
+                return renderer.frame(i)
+            finally:
+                # 最後のコマの後は全面配列を手放す。再描画時には作り直す。
+                if i == n_frames - 1:
+                    renderer = None
+
         info = SimpleNamespace(
             xy=_XY(spec), subsolar=spec["subsolar"], view=tuple(spec["view"]),
             size=(spec["CW"], spec["CH"]),
@@ -993,7 +1005,7 @@ class Globe:
             radius=spec["R"], projection=spec["projection"], margin=(spec["ox"], spec["oy"]))
         land_kind, land_data, _sig = self._land
         return fk.build(
-            fn, kind="globe", ver=_GLOBE_VER, params=self._params(), draw=renderer.frame,
+            fn, kind="globe", ver=_GLOBE_VER, params=self._params(), draw=draw,
             n_frames=n_frames, size=(spec["CW"], spec["CH"]),
             fonts=list(sprites.values()),
             files=[land_data] if land_kind == "png" else (),

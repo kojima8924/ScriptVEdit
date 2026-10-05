@@ -14,12 +14,17 @@ import builtins as _builtins
 from scriptvedit.chapters import _fmt_timestamp
 from scriptvedit.ffmpeg import _run_ffmpeg, _unique_tmp_path
 from scriptvedit.state import _ARTIFACT_DIR
+from scriptvedit.text import _resolve_font
 from scriptvedit.validate import _require_number
 # project.py と同じシャドウを再現する: 素の max/min は Expr 対応版
 # （builtins へ変えると挙動が変わるため、この import を外さないこと）
 from scriptvedit.expr import max, min
 # サムネイルは並列レンダのチャンク生成器を1フレーム幅で再利用する（監査 項目19）
 from scriptvedit.parallel import _build_chunk_ffmpeg_cmd
+
+
+# 全コマを画像として保持するため、抽出前に要求数を制限する。
+_STORYBOARD_MAX_FRAMES = 120
 
 
 def thumbnail(project, at, out, *, timeout=600, source=None):
@@ -113,8 +118,18 @@ def _prepare_thumbnail_graph(project):
     準備シーケンス本体は render() と同一の共通ヘルパ
     （_begin_render_pass → _resolve_plan_duration → _execute_render_pass）を
     通し、逐語重複による手動同期を排除する。"""
+    _prepare_thumbnail_plan(project)
+    _ensure_thumbnail_media(project)
+
+
+def _prepare_thumbnail_plan(project):
+    """レンダ用のレイヤー再実行より前にタイムラインの総尺を確定する。"""
     project._begin_render_pass()
     project._resolve_plan_duration()
+
+
+def _ensure_thumbnail_media(project):
+    """レイヤーを実行し、抽出に必要な素材を実体化する。"""
     project._execute_render_pass()
     # render() と同じく数式PNG/Webクリップを先に実体化する
     # （formula の PNG が無いと ffmpeg が "No such file or directory" で落ちる）
@@ -174,11 +189,13 @@ def storyboard(project, out_path, *, cols=4, interval=None, source=None,
     PILでcols列のグリッドに結合する（各コマ左上に時刻ラベルを焼き込む）。
     事前renderなしの場合も、Projectグラフの準備とFFmpeg実行は各1回だけ。
     source に既レンダ動画を指定すれば入力seekで軽量に抽出する。
+    コマ数は最大120。超過時は interval を広げるようエラーで案内する。
+    時刻ラベルは OS 別の既定フォントを 18px で使用する。
 
     戻り値: 書き出したパス(out_path)。
     """
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
     except ImportError as e:
         raise ImportError(
             "storyboard() には Pillow が必要です。"
@@ -197,21 +214,17 @@ def storyboard(project, out_path, *, cols=4, interval=None, source=None,
     os.makedirs(tmp_dir, exist_ok=True)
     try:
         if source is None:
-            # プラン解決・レイヤーexec・checkpoint確保は一度だけ実施する。
-            _prepare_thumbnail_graph(project)
+            # コマ数の検査前はプラン解決だけを実施する。
+            _prepare_thumbnail_plan(project)
             total = project.duration
             review_source = None
         else:
             review_source, total = _review_source(project, source, "storyboard")
         if not total or total <= 0:
             raise RuntimeError("storyboard: タイムラインの総尺を確定できませんでした")
-        step = interval if interval is not None else max(total / 12.0, 0.01)
-
-        times = [0.0]
-        t = step
-        while t < total - 1e-6:
-            times.append(t)
-            t += step
+        times = _storyboard_times(total, interval)
+        if review_source is None:
+            _ensure_thumbnail_media(project)
 
         frame_paths = []
         if review_source is None:
@@ -249,10 +262,7 @@ def storyboard(project, out_path, *, cols=4, interval=None, source=None,
         grid_h = rows * th + (rows - 1) * gap
         canvas = Image.new("RGB", (grid_w, grid_h), (20, 20, 20))
         draw = ImageDraw.Draw(canvas)
-        try:
-            font = ImageFont.truetype("C:/Windows/Fonts/consola.ttf", 18)
-        except Exception:
-            font = ImageFont.load_default()
+        font = _storyboard_font()
         for i, ((tsec, _fp), img) in enumerate(zip(frame_paths, thumbs)):
             r, c = divmod(i, cols)
             x = c * (tw + gap)
@@ -278,6 +288,30 @@ def storyboard(project, out_path, *, cols=4, interval=None, source=None,
     finally:
         _shutil.rmtree(tmp_dir, ignore_errors=True)
     return out_path
+
+
+def _storyboard_times(total, interval):
+    """要求コマ数を定数時間で検査し、上限以内の抽出時刻だけを作る。"""
+    step = interval if interval is not None else max(total / 12.0, 0.01)
+    if total - 1e-6 > step * _STORYBOARD_MAX_FRAMES:
+        raise ValueError(
+            f"storyboard: コマ数は最大{_STORYBOARD_MAX_FRAMES}です。"
+            "interval を大きくしてください")
+    count = _builtins.max(1, _math.ceil((total - 1e-6) / step))
+    return [i * step for i in range(count)]
+
+
+def _storyboard_font():
+    """共通の OS 別候補を使い、英数字用フォントも順に試す。"""
+    from PIL import ImageFont
+
+    try:
+        return ImageFont.truetype(_resolve_font(None), 18)
+    except OSError:
+        try:
+            return ImageFont.truetype("DejaVuSans.ttf", 18)
+        except OSError:
+            return ImageFont.load_default()
 
 
 def _storyboard_frame_plan(project, times, total):

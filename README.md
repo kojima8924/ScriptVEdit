@@ -362,6 +362,7 @@ move(x=50%P, y=75%P)  # x=0.5, y=0.75
   - `morph_to(target_obj)` ... 画像→画像モーフィング（bakeable、重い。bakeable opsの末尾に配置必須）
 
 `u` は正規化時間（0〜1）。Effectの表示開始から終了まで線形に変化する。
+`scale` の連鎖は直前のキャンバス寸法を基準にする（64×36 に2倍を2回なら256×144）。
 
 ### zoom（scale エイリアス）
 
@@ -424,7 +425,7 @@ morph_to のモーフ方式（`method`）:
 
 morph_to の注意点:
 - bakeable ops の末尾に配置する必要がある（違反時は ValueError）
-- 1つの Object に1回のみ適用可能（複数指定は ValueError。多段モーフは `compute()` で中間素材を生成して分割）
+- 1つの Object に1回のみ適用可能（複数指定は ValueError）。終端 Effect を適用した Object の `compute()` と、終端 Effect の `policy="off"` はエラー。多段にするには一度レンダした動画を素材として読み直す
 - パラメータ名のタイポは構築時（`morph_to()` 呼び出し時点）に ValueError で検出される
 - morph_to 直前の未ベイク transforms/effects は中間チェックポイントに自動ベイクされる（resize 等がサイレントに消えない）
 - effect や動画ソースと併用した場合は、直前結果の最終フレームを RGBA PNG に抽出してモーフ入力にする
@@ -433,6 +434,7 @@ morph_to の注意点:
   その分のコマは生成しない。前後に同じ絵の静止画 Object を別に置かなくてよい。`delay + duration` が
   Object の尺を超えると ValueError。動く区間は最低2コマ（元の絵と到達点）を作るので、`duration` が
   1コマ以下でも・`delay` が尺の終わりぎりぎりでも、最後は必ず到達点の絵になる（その場合は次のコマで切り替わる）
+- `delay` / `duration` に `None` を指定すると省略と同じ扱いになり、キャッシュ鍵も同じ（`morph_to` / `explode_to` / `assemble_from` / `fly_to` 共通）。
 - **余白と `move` の anchor**: sdf の整列の余白・粒子の `expand` は左右・上下それぞれ対称に付き、
   `anchor` は余白を除いた元の絵の箱（`morph_to` は2枚を中央で重ねた共通キャンバス）を基準にする。
   `topleft` / `left` / `right` / `top` / `bottom` でも、静止画として置いたときと同じ位置に映る
@@ -450,6 +452,11 @@ TypeError）ので、別々の `<=` で適用する。`~` は品質ヒントで�
 - `atrim(duration, *, start=0)` ... 音声を切り出す（時間影響あり。`start` はイン点）
 - `atempo(rate)` ... テンポ変更（時間影響あり）
 - `adelete()` ... 音声をミックスから除外
+
+スライスや `atrim` は素材選択で、`.time(秒)` は加工後の音声を止める表示尺。
+`Object("tone.wav")[0:5].time(1)` は最初の1秒だけ鳴る。
+`atempo` や繰り返し後も表示尺で止め、既に尺以内と確定する場合は追加のトリムを行わない。
+`atempo` 後は実サンプル数が理論尺を超える場合があるため、後続のトリムで尺を確定する。
 
 ```python
 clip = Object("video.mp4")
@@ -672,6 +679,7 @@ signatureベースでキャッシュの安全性を保証。保存点はRAA+FSP�
 両方が映る**（焼かない Effect・静止画は以前からこの挙動。後の Object が上に重なる）。
 後の絵が前の絵を覆わない並び（小さい絵・透過のある絵が続く）で前の絵を1枚も残したくないときは、
 前の Object の尺を1フレーム縮める（`time(d - 1/fps)`）。
+並列レンダのチャンク境界でも同じ閉区間と開始時刻の丸めを使い、終端の1枚を保つ。
 
 **quality（品質ヒント）:**
 - `final`（無印） ... 通常処理
@@ -699,6 +707,10 @@ obj <= +(resize(sx=0.5, sy=0.5) | resize(sx=0.3, sy=0.3))
 ```
 
 キャッシュは `__cache__/artifacts/checkpoint/{src_hash}/{signature}.{ext}` に保存。
+時間を変える live Effect（`speed` / `reverse` / `freeze_frame` / リピート）の後に
+`trim` を置いて焼く並びは、処理順を保てないため計画時エラーになる。
+焼ける操作をすべて `policy="off"` にすれば記述順のまま処理できる。
+素材の内容指紋はレンダごとに取り直すため、同じサイズ・更新日時の差し替えにも追従する。
 品質ヒントを尊重するかは `describe()` の各 op にある `respects_fast_hint` で確認できる。
 
 **中間ベイクのピクセル形式**: 動画になる中間物（checkpoint / `compute()` / morph / 粒子 /
@@ -723,6 +735,9 @@ p.layer("maku.py", cache="auto")   # 新鮮なキャッシュがあれば利用�
 p.layer("maku.py", cache="off")    # キャッシュしない（デフォルト）
 ```
 
+- 部分レンダの `cache="make"` はエラー。全編で生成するか `cache="off"` を使う。
+- Object の `priority` 上書きで他レイヤーとの重なり順が変わる場合も、レイヤーキャッシュはエラー。
+- 参照する外部アンカーの解決値も鮮度検証に含める（無関係なアンカーの変更は影響しない）。
 - キャッシュに保存されるのは映像のみ。音声を含むレイヤーは生成時と再生時の両方で警告し、
   再生時には音声が脱落する。音声素材は `cache="off"` の別レイヤーへ分離する
 - 素材の鮮度検証: キャッシュ生成時に素材の内容ハッシュを anchors.json に記録し、素材が更新された場合は
@@ -846,7 +861,9 @@ overlay_c.show(3, priority=10) <= move(x=0.5, y=0.5)       # priority指定可
 ### compute（タイムライン外素材生成）
 
 Transform/bakeable Effectを適用した中間素材をタイムライン外で生成する。
-キャッシュ対応（checkpoint方式）。live Effect（move等）は使用不可。
+キャッシュ対応（checkpoint方式）。配置を変える live Effect（move等）と終端フレーム Effect は使用不可。
+`duration` 付きの動画生成では `speed` / `reverse` / `freeze_frame` などの時間操作は使用できる。
+動画から静止画を作る場合も WebM の alpha を保つデコーダを選ぶ。
 
 `compute()` は Object 自身を「焼いた素材」へその場で変異させる
 （source が生成物パスになり、焼き込み済みの transforms/effects と
@@ -1129,7 +1146,7 @@ fox.time(3) <= blur_background_fill(blur=24)
 progress_bar(height=8, color="orange", bg="white@0.15", y=1.0)
 ```
 
-- `Object.from_project(sub_project, *, cache="auto")` は `layer()` 登録済みの Project を透過webmにキャッシュ生成して1Objectとして返す（キャッシュ鍵は configure+レイヤーFFP+素材FFP、素材更新で自動再生成）
+- `Object.from_project(sub_project, *, cache="auto")` は `layer()` 登録済みの Project を透過webmにキャッシュ生成して1Objectとして返す（キャッシュ鍵は configure+レイヤーFFP+素材FFP+解決済みparam。子の鍵変更は親のレイヤーキャッシュにも伝わる）。生成前から尺が確定するため `.time()` の自動尺も使える
 - `mask` / `mask_wipe` の画像は輝度をアルファに使う。`mask_wipe(image, progress=None)` の `progress` は 0→1 の進行で Expr/lambda 可（省略時は線形）。グラデーション画像で方向・形状を制御できる
 - `opacity(value)` / `fade(alpha)` は定数（0〜1）だと colorchannelmixer。時間だけで決まる Expr/lambda（`u`・`elapsed()`・`ramp()`・`keyframes_sec()` 等）はコマごとに1回だけ評価して colorchannelmixer で掛けるので、点の多い keyframes でも速い（1080p・10 秒の書き出しが 8 / 56 / 128 点で 4.1 / 4.3 / 4.3 秒。式はコマごとに解析し直すので、点が多いほど 1 コマあたり少し（128 点で約 0.5ms）増える）。`fade` の入りと出だけの単純なランプは native の fade、`random()` 等の画素ごとに変わる式だけ geq になる（どちらも bakeable）
 - `blend_mode(mode)` の有効モード: addition/screen/multiply/overlay/darken/lighten/difference/hardlight/softlight/dodge/burn/negation ほか（`add`/`plus` は addition のエイリアス）。overlay フィルタは合成モード非対応のため、このObjectのみ blend + maskedmerge 経路に切り替わる（**キャンバス内合成が前提**）
@@ -1159,7 +1176,8 @@ seq <= move(x=0.5, y=0.5, anchor="center")     # 合成尺は自動で入る（t
 - `speed(factor)` は 0.01〜100。音声付き動画には対応する `atempo` が自動適用される（有効範囲0.5〜100を超える場合は多段に自動分解）
 - `reverse()` は全フレームをメモリ保持するため、**実効尺が30秒を超える素材には使用不可**（明示エラー。`trim()` で短縮してから適用）。音声は反転されない
 - `freeze_frame(at, duration)` の `at` は実効尺未満（**境界以上は拒否**）。音声は変化しない
-- `video_sequence(*objs, transition="fade", t_dur=0.5)` は2つ以上の動画Object/パスを連結。合成尺は `sum(実長) - t_dur*(n-1)` 秒、`t_dur` は最短クリップ未満。返す Object の `duration` には合成尺が入る（`audio_sequence` と同じ。`time()` は不要で、引数なしの `time()` も生成前の初回レンダで通る）。この `duration` は仮の値で、後から `speed()` / `trim()` を足したり `compute(duration=d)` で焼き直したりすると、レイヤーの実行後に加工後の尺へ入れ直される（`time(d)` / `show(d)` で明示した尺は変えない）。Transform/Effect適用済みObjectは先に `compute()` で素材化してから渡す
+- `compute` / `from_project` などの生成 Object を連結するときは計画上の尺・音声有無を使い、cold/warm で計画を変えない。
+- `video_sequence(*objs, transition="fade", t_dur=0.5)` は2つ以上の動画Object/パスを連結。同じObjectを繰り返し指定でき、入力の順序と回数を保つ。合成尺は `sum(実長) - t_dur*(n-1)` 秒、`t_dur` は最短クリップ未満。返す Object の `duration` には合成尺が入る（`audio_sequence` と同じ。`time()` は不要で、引数なしの `time()` も生成前の初回レンダで通る）。この `duration` は仮の値で、後から `speed()` / `trim()` を足したり `compute(duration=d)` で焼き直したりすると、レイヤーの実行後に加工後の尺へ入れ直される（`time(d)` / `show(d)` で明示した尺は変えない）。Transform/Effect適用済みObjectは先に `compute()` で素材化してから渡す
 - 動画の尺（`length()`）は映像と音声の**長い方**で決まる。音声の方が長い動画（AAC は 1024 サンプル単位なので、scriptvedit が書き出す mp4 も含めて多くの動画は音声が数十 ms 長い）は、音声が終わるまで**映像の最後のフレームを保持**する。`Object("a.mp4").time()` と並べても、つなぎ目に背景の黒が挟まらない。`time(d)` で素材より長く伸ばした分は保持しない（従来どおり背景が見える）
 - Object が映り始めるのは、開始時刻に**最も近いフレーム**から（映像の中身もそのフレームに届く）。開始時刻がフレームの格子から外れていても、中身の1枚目は欠けない
 
@@ -1287,6 +1305,7 @@ proof.time(3) <= move(x=0.5, y=0.5, anchor="center") & scale(lambda u: lerp(0.8,
 - `display=True` は別行立て（displayMode）、`False` はインライン
 - `duration` を渡すと `.time(秒)` 相当。省略時は通常どおり `.time(秒)` / `.show(秒)` で配置する
 - 数式要素だけを要素スクリーンショットで切り出すため余白がない（`padding` で調整）
+- `formula()` を morph / assemble / fly の画像に渡した場合も、非表示の依存として数式PNGを生成する。
 - 生成物は content-addressed キャッシュ（`__cache__/artifacts/formula/*.png`）。キャッシュ鍵には KaTeX の CSS/フォント（woff2）も含まれる
 - **Playwright + Chromium が必要**（web Object と同じ経路）
 
@@ -1392,6 +1411,8 @@ red <= move(x=0.68, y=0.62, anchor="center")
 - 粒子は最も目を引く道具。`explode_to` / `assemble_from` と合わせて1本に2〜3回まで。粒の数に意味を持たせない（お金が均等に分かれたように見える）。道すじが字幕を横切らないよう、`arc` の向きと重ね順は呼び出し側で決める
 
 ### 点で描いた地球と世界地図（globe）
+
+globe は最終コマを描いた後に大きな作業配列を解放し、再描画が必要なときだけ作り直す。
 
 正射影の地球（`projection="ortho"`）か正距円筒の世界地図（`"plate"`）を等間隔の点で描き、回転・都市の点・大円の弧・波紋・昼夜の境・札を時刻つきで積んで、透過動画 Object にする（framekit.build。`frames()` と同じ qtrle の .mov）。
 
@@ -1582,7 +1603,7 @@ title_text = p.param("title", "デフォルト")   # --param title=... / SCRIPTV
 ```
 
 - `grid(cols, rows, *, gap=0)` は画像素材のみ。`marker` は `render()` 時にチャプターとして埋め込まれる。`marker` の time にはアンカー名（`"q2.start"` / `"scene:導入"` 等）も渡せ、レンダ時（タイムライン解決の後）に解決される。存在しない名前は候補つきの ValueError
-- `param` は `default` の型（int/float/bool）に合わせて文字列値を変換する（バッチ生成用）
+- `param` は `default` の型（int/float/bool）に合わせて文字列値を変換する（バッチ生成用）。`from_project` の親子で読んだ名前はまとめて使用済みとし、未使用のCLI上書きは一番外側の `render()` で検査する
 
 ### パスアニメーション・Expr拡張
 
@@ -1912,7 +1933,7 @@ p.export_metadata("meta.txt")   # .txt=概要欄にそのまま貼れるプレ�
 ```
 
 - `slide(html_file, page=None, *, duration=5.0, width=None, height=None, name=None, debug_frames=False, deps=None)`: `page` 指定時はキャプチャ前に `window.showSlide(page)` を実行、無ければ `id="page-<page>"` の要素のみ表示（他 `id^="page-"` を非表示）。`renderFrame` 未定義なら no-op を自動注入（静止スライド可）。キャッシュは web Object と同じ signature 方式
-- `storyboard(out_path, *, cols=4, interval=None, source=None, timeout=600)`: 事前renderなしでもProjectグラフ準備1回・FFmpeg 1回で全コマを抽出する。`source`へ完成動画を渡すとProjectを再構築せず入力seekする。Pillowが必要
+- `storyboard(out_path, *, cols=4, interval=None, source=None, timeout=600)`: 事前renderなしでもProjectグラフ準備1回・FFmpeg 1回で全コマを抽出する。`source`へ完成動画を渡すとProjectを再構築せず入力seekする。最大120コマで、超過時は抽出前にエラーとなるため `interval` を広げる。時刻ラベルはOS別の既定フォント（`SCRIPTVEDIT_FONT` で上書き可）を18pxで使い、見つからなければDejaVu Sans、Pillow既定フォントの順に試す。Pillowが必要
 - `export_metadata(path=None, *, title=None, description=None, tags=None)`: `title` 省略時は `param("title")`、`path` 省略時は `metadata.json`。拡張子で .json（構造化）/ .txt（概要欄用）を切替。`marker()` で打った章が目次になる。`tags="foo"` は1個のタグとして扱う（複数はリスト）
 
 ### テスト・検証ツール（scriptvedit.testkit）

@@ -23,7 +23,8 @@ from scriptvedit.state import _ARTIFACT_DIR, _BAKE_PIXFMT_VER, _BAKEABLE_EFFECTS
 # 別マシンへの clone・ファイルのコピー・CRLF変換なしの touch ではキャッシュ鍵が
 # 変わらない（＝スナップショットが環境をまたいで一致する＝移植性）。
 #
-# 性能対策はプロセス内メモ化（_FFP_MEMO）のみ。
+# 性能対策はレンダ内メモ化（_FFP_MEMO）のみ。
+# 最外側の _begin_render_pass で破棄し、ネストした子のレンダとは共有する。
 #   同一 render 中に同じファイルを再ハッシュしないためのメモ化で、
 #   参照キーは (絶対パス, サイズ, mtime_ns)。
 #
@@ -158,19 +159,11 @@ def _op_fingerprint_str(op):
     # policy はレンダ結果に影響しないためフィンガープリントに含めない
     quality = _effective_quality(op)
     parts.append(f"q={quality}")
-    # morph_to: ターゲット画像のFFPをsignatureに含める
+    # 生成物は生成前後ともパス署名、通常素材は内容指紋にそろえる。
     if op.name == "morph_to" and hasattr(op, '_morph_target'):
-        try:
-            tgt_ffp = _file_fingerprint(op._morph_target.source)
-            parts.append(f"tgt_ffp={tgt_ffp}")
-        except OSError:
-            parts.append(f"tgt_src={_norm_src_path(str(op._morph_target.source))}")
-    # assemble_from: 集合元画像のFFPをsignatureに含める
+        parts.append(f"tgt_{_src_signature(op._morph_target.source)}")
     if op.name == "assemble_from" and hasattr(op, '_assemble_source'):
-        try:
-            parts.append(f"asm_ffp={_file_fingerprint(op._assemble_source.source)}")
-        except OSError:
-            parts.append(f"asm_src={_norm_src_path(str(op._assemble_source.source))}")
+        parts.append(f"asm_{_src_signature(op._assemble_source.source)}")
     # fly_to: 行き先の絵（target）の署名。素材は内容指紋（tgt_ffp=…）、キャッシュ
     # 生成物（text_image の PNG 等）はパス署名（tgt_src=…）。_src_signature に一本化して
     # おくと、dry_run の時点で未生成の生成物でも実レンダと同じ鍵になる
@@ -210,8 +203,25 @@ def _sig_key(sigs):
 def _op_prefix_fingerprint(ops_list):
     """ops列のSHA256[:16]フィンガープリントを計算"""
     sigs = []
+    canvas_changed = False
     for typ, op in ops_list:
         sigs.append(f"{typ}:{_op_fingerprint_str(op)}")
+        if typ != "effect":
+            continue
+        # 後続 scale の pad が前段の寸法を使う経路だけ旧キャッシュを失効させる。
+        # 単独 scale や、寸法を変えない Effect の列には版を混ぜない。
+        if op.name == "scale" and canvas_changed:
+            sigs.append("scale_canvas=1")
+        if op.name == "scale":
+            # 1倍でも奇数寸法は偶数padへ広がるので、恒等操作とは見なせない。
+            canvas_changed = True
+        elif op.name == "rotate_to":
+            canvas_changed |= op.params.get("expand", True)
+        elif op.name in ("outline", "ken_burns", "blur_background_fill"):
+            canvas_changed = True
+        elif op.name == "drop_shadow":
+            canvas_changed |= any(op.params.get(k, 0) != 0
+                                  for k in ("dx", "dy", "blur"))
     return _sig_key(sigs)
 
 
@@ -376,13 +386,9 @@ def _morph_cache_path(src_path, morph_op, duration, fps):
     """morph WebMのキャッシュパスを計算"""
     # キャッシュ生成物はパス署名、素材は内容指紋（_src_signature に一本化）
     sigs = [_src_signature(src_path)]
-    # ターゲットFFP
+    # op 側と同じ署名規則を使い、生成済みかどうかで鍵を変えない。
     if hasattr(morph_op, '_morph_target'):
-        try:
-            sigs.append(f"tgt_ffp={_file_fingerprint(morph_op._morph_target.source)}")
-        except OSError:
-            sigs.append(
-                f"tgt_src={_norm_src_path(str(morph_op._morph_target.source))}")
+        sigs.append(f"tgt_{_src_signature(morph_op._morph_target.source)}")
     sigs.append(f"op={_op_fingerprint_str(morph_op)}")
     sigs.append(f"dur={duration}")
     sigs.append(f"fps={fps}")

@@ -731,3 +731,33 @@ def test_morph_margin_does_not_shift_anchored_object(tmp_path, anchor):
     got, want = _box(baked[30], "green"), _box(still_b[0], "green")
     assert got is not None
     assert all(abs(g - w) <= 1 for g, w in zip(got, want)), (got, want)   # 縁の AA ぶん
+
+
+@pytest.mark.parametrize("factory, keys", [
+    ("morph_to", ("delay", "duration", "method", "fit")),
+    ("explode_to", ("delay", "duration", "expand", "toward")),
+    ("assemble_from", ("delay", "duration", "expand", "from_point")),
+])
+def test_terminal_none_defaults_share_cache_key(factory, keys):
+    """省略と同じ意味の None は指紋・生成物パス・時間計画を変えない"""
+    def make(params):
+        args = () if factory == "explode_to" else (sv.Object("target.png"),)
+        return getattr(sv, factory)(*args, **params)
+
+    plain = make({})
+    cache_path = (cache_mod._morph_cache_path if factory == "morph_to"
+                  else cache_mod._particle_cache_path)
+    for params in [{key: None} for key in keys] + [dict.fromkeys(keys)]:
+        explicit = make(params)
+        assert _terminal_frame_plan(explicit, 2, 30) == _terminal_frame_plan(plain, 2, 30)
+        assert cache_mod._op_fingerprint_str(explicit) == cache_mod._op_fingerprint_str(plain)
+        assert cache_path("source.png", explicit, 2, 30) == cache_path("source.png", plain, 2, 30)
+
+
+def test_terminal_none_normalization_preserves_other_arguments():
+    """必須値や他方式の引数を None の正規化で黙って捨てない"""
+    assert "speed" in sv.explode_to(speed=None).params
+    assert "fit" in sv.morph_to(sv.Object("target.png"), method="transport", fit=None).params
+    assert "fit" in sv.morph_to(sv.Object("target.png"), max_pixels=100, fit=None).params
+    assert sv.explode_to(delay=0, expand=0, fade=False).params["expand"] == 0
+    assert sv.morph_to(sv.Object("target.png"), fit=False).params["fit"] is False

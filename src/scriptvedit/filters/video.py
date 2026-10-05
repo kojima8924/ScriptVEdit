@@ -621,12 +621,14 @@ class _FxCtx:
     """Effectビルダー間で共有する可変コンテキスト
 
     filters: 生成中のフィルタリスト（各ビルダーが追記する）
+    current_dims: コアEffect適用後のキャンバス寸法。後段scaleの入力寸法に使う。
+        base_dimsは元の基底寸法で、プラグインに渡す既存の契約を保つ。
     pad_size: (max_w, max_h) or None。scale が設定し、drop_shadow/outline が
         拡張分を加算、blur_background_fill が上書き、プラグインは pad_state
         経由で更新する（Effectの並び順どおりに反映される）。
     """
     __slots__ = ("obj", "filters", "pad_size", "start", "dur",
-                 "base_dims", "label_prefix")
+                 "base_dims", "current_dims", "label_prefix")
 
     def __init__(self, obj, start, dur, base_dims, label_prefix):
         self.obj = obj
@@ -635,6 +637,7 @@ class _FxCtx:
         self.start = start
         self.dur = dur
         self.base_dims = base_dims
+        self.current_dims = base_dims
         self.label_prefix = label_prefix
 
 
@@ -741,8 +744,8 @@ def _fx_scale(e, eff_idx, ctx):
         f"scale=w='trunc(iw*({ffmpeg_str})/2)*2':h='trunc(ih*({ffmpeg_str})/2)*2':eval=frame"
     )
     # pad: scaleの出力を最大サイズの固定フレームに収め、overlay位置を安定化
-    if ctx.base_dims and ctx.base_dims[0] is not None:
-        bw, bh = ctx.base_dims
+    if ctx.current_dims and ctx.current_dims[0] is not None:
+        bw, bh = ctx.current_dims
         # 定数スケールはサンプリング不要（固定点評価の短絡）
         if isinstance(scale_expr, Const):
             max_s = scale_expr.value
@@ -782,6 +785,7 @@ def _fx_scale(e, eff_idx, ctx):
         # copy フィルタによるバッファ分離が必要（検証済みの回避策）。
         ctx.filters.append("copy")
         ctx.pad_size = (max_w, max_h)
+        ctx.current_dims = ctx.pad_size
 
 
 # --- 時間だけで決まる不透明度を、コマごとに1回だけ評価して掛ける経路 ---
@@ -971,6 +975,10 @@ def _fx_rotate_to(e, eff_idx, ctx):
             f"rotate=angle='{ang_str}':fillcolor={fill}"
             f":ow='hypot(iw,ih)':oh='hypot(iw,ih)'"
         )
+        if ctx.current_dims and ctx.current_dims[0] is not None:
+            # rotate の ow/oh は正数を整数へ切り捨てる。
+            side = int(_math.hypot(*ctx.current_dims))
+            ctx.current_dims = (side, side)
     else:
         ctx.filters.append(
             f"rotate=angle='{ang_str}':fillcolor={fill}:ow=iw:oh=ih"
@@ -1120,6 +1128,7 @@ def _fx_ken_burns(e, eff_idx, ctx):
     ctx.filters.append(
         f"scale=w='trunc(iw*({s_str})/2)*2':h='trunc(ih*({s_str})/2)*2':eval=frame")
     ctx.filters.append(f"crop={ow}:{oh}:x='{x_str}':y='{y_str}'")
+    ctx.current_dims = (ow, oh)
     # SEGVバリア: scale(eval=frame)後のバッファ分離（既存scale実装と同じ回避策）
     ctx.filters.append("copy")
 
@@ -1153,6 +1162,9 @@ def _fx_drop_shadow(e, eff_idx, ctx):
     if ctx.pad_size:
         ctx.pad_size = (ctx.pad_size[0] + left + right,
                         ctx.pad_size[1] + top + bottom)
+    if ctx.current_dims and ctx.current_dims[0] is not None:
+        ctx.current_dims = (ctx.current_dims[0] + left + right,
+                            ctx.current_dims[1] + top + bottom)
 
 
 def _fx_tint(e, eff_idx, ctx):
@@ -1210,6 +1222,9 @@ def _fx_outline(e, eff_idx, ctx):
     # scale等で固定サイズ化済みなら、縁取りの拡張分(2*wd)を加算して中央配置ずれを防ぐ
     if ctx.pad_size:
         ctx.pad_size = (ctx.pad_size[0] + 2 * wd, ctx.pad_size[1] + 2 * wd)
+    if ctx.current_dims and ctx.current_dims[0] is not None:
+        ctx.current_dims = (ctx.current_dims[0] + 2 * wd,
+                            ctx.current_dims[1] + 2 * wd)
 
 
 def _fx_mask(e, eff_idx, ctx):
@@ -1320,6 +1335,7 @@ def _fx_blur_background_fill(e, eff_idx, ctx):
     )
     # 出力はキャンバスサイズ固定 → overlay中央配置の基準を更新
     ctx.pad_size = (cw, ch)
+    ctx.current_dims = (cw, ch)
 
 
 def _fx_plugin(e, eff_idx, ctx):

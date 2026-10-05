@@ -302,6 +302,13 @@ def _plan_object_checkpoints(project, obj):
                 raise ValueError(_text_terminal_effect_message(e.name))
         return None
     ops = _build_unified_ops(obj)
+    # 終端フレームは live フィルタを持たず、off にすると黙って消える。
+    for typ, op in ops:
+        if (typ == "effect" and op.name in _TERMINAL_FRAME_EFFECTS
+                and getattr(op, "policy", "auto") == "off"):
+            raise ValueError(
+                f"{op.name} は終端フレーム生成が必要なため policy='off' にできません。"
+                "単項 - を外してキャッシュ生成を有効にしてください。")
     bakeable_ops, live_ops = _split_ops(ops)
     if not bakeable_ops:
         return None
@@ -314,6 +321,19 @@ def _plan_object_checkpoints(project, obj):
     save_points = _compute_save_points(bakeable_ops)
     if not save_points:
         return None
+
+    # 分割で trim が live 時間操作の前へ動く並びは、尺と画素が変わるため拒否する。
+    # 全 off の場合は分割を適用せず、元の Effect 順のまま処理できる。
+    time_live = None
+    for typ, op in ops:
+        if typ != "effect":
+            continue
+        if op.name in _TIME_LIVE_EFFECTS:
+            time_live = op.name
+        elif op.name == "trim" and time_live is not None:
+            raise ValueError(
+                f"{time_live} の後の trim はチェックポイント化すると処理順が変わります。"
+                "全ての焼ける操作を policy='off' にしてください。")
 
     original_source = obj.source
     dur = _checkpoint_bake_duration(project, obj, original_source)

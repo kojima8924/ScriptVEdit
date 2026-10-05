@@ -393,8 +393,8 @@ def _snapshot_registries():
         "bakeable": set(_BAKEABLE_EFFECTS),
         "all": list(_all),
         # 名前空間はプラグイン由来のファクトリだけ差分復元する（全コピーは重い）
-        "ns_plugin_names": {k for k, v in g.items()
-                            if getattr(v, "_plugin_spec", None) is not None},
+        "ns_plugins": {k: v for k, v in g.items()
+                       if getattr(v, "_plugin_spec", None) is not None},
     }
 
 
@@ -409,8 +409,9 @@ def _restore_registries(snap):
     g = _pkg_ns()
     for k in [k for k, v in g.items()
               if getattr(v, "_plugin_spec", None) is not None
-              and k not in snap["ns_plugin_names"]]:
+              and k not in snap["ns_plugins"]]:
         del g[k]
+    g.update(snap["ns_plugins"])
 
 
 def load_plugin(path):

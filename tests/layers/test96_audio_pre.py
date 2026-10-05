@@ -2,8 +2,8 @@ from scriptvedit import *
 
 # 音声前処理（filters/audio.py の _build_audio_pre_filters）の回帰ゲート。
 # atrim / atempo はここまでスナップショット対象が1件も無く、フィルタ文字列が
-# 変わっても誰も気づけなかった。明示 atrim があると auto atrim（time() 由来の
-# atrim=duration=... 後置）が付かないことも同時に固定する。
+# 変わっても誰も気づけなかった。前処理後の尺が time() の表示尺以内なら
+# 最終 atrim を省き、超える場合だけ末尾に追加することも固定する。
 
 # 音声だけのプロジェクトにしないための映像側（1枚だけ置く）
 badge = Object(asset("images/shape_badge.png"))

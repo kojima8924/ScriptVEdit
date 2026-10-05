@@ -150,6 +150,11 @@ def move(*, x=None, y=None, from_x=None, from_y=None, to_x=None, to_y=None,
     # from/to アニメーション → lerp Exprに自動変換
     has_anim = any(v is not None for v in (from_x, from_y, to_x, to_y))
     if has_anim:
+        # 補間の端点として使う x/y は、lambda も先に Expr へ解決する。
+        if x is not None and (from_x is None or to_x is None):
+            x = _resolve_param(x)
+        if y is not None and (from_y is None or to_y is None):
+            y = _resolve_param(y)
         fx = from_x if from_x is not None else (x if x is not None else 0.5)
         fy = from_y if from_y is not None else (y if y is not None else 0.5)
         tx = to_x if to_x is not None else (x if x is not None else 0.5)

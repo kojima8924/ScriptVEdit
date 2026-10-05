@@ -13,7 +13,7 @@ param はバッチ生成（同じ構成で値だけ変えて N 本作る）の�
 - `--param title`（`=` 忘れ）→ 黙って無視せずエラー
 - どの `p.param()` にも読まれなかった `--param` → 誤記としてエラー
   （環境変数 SCRIPTVEDIT_PARAM_* は複数プロジェクトで共有されうるので警告）。
-  ただし `p.param()` を1回も呼ばないプロジェクトでは上書きを解釈しない
+  ただし親子のどこでも `p.param()` を呼ばない場合は上書きを解釈しない
   （_param_overrides が None のまま）ので、この検査も働かず黙って無視される
 """
 
@@ -23,6 +23,7 @@ import sys
 import warnings
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
+from scriptvedit.context import exec_parent
 from scriptvedit.state import _suggest_hint
 
 
@@ -124,7 +125,7 @@ def param(project, name, default=None):
     `--param name=値` または環境変数 SCRIPTVEDIT_PARAM_<name> で上書きできる。
     default の型（int/float/bool）に合わせて文字列値を変換する。バッチ生成用。
     変換できない値・書式違反・どの param にも読まれない --param はエラー
-    （最後の1つは p.param() を1回以上呼んだプロジェクトだけ。check_unconsumed_params 参照）。
+    （最後の1つは親子のどこかで p.param() を呼んだ場合だけ。check_unconsumed_params 参照）。
     """
     if project._param_overrides is None:
         project._param_overrides = _parse_param_sources()
@@ -157,10 +158,20 @@ def check_unconsumed_params(project):
     `--param titel=X` のような1文字の誤記は、現状どのレイヤーにも届かず
     N 本すべてが既定値のまま「成功」する。CLI 由来は ValueError、
     環境変数由来は警告（複数プロジェクトで共有されうるため）にする。
-    p.param() が1回も呼ばれていない（_param_overrides が None）ときは
-    何もしない＝未消費の --param も検出されない。
+    入れ子の render では使用済みの名前を親へ渡し、最外側でまとめて検査する。
+    親子のどこでも p.param() が呼ばれていない（_param_overrides が None）
+    ときは何もしない＝未消費の --param も検出されない。
     """
     overrides = project._param_overrides
+    parent = exec_parent()
+    if parent is not None and parent is not project:
+        # サブの完了時には、親の後続レイヤーや別のサブがまだ実行されていない。
+        # ここでは未使用を判定せず、消費記録を外側へ順に集約する。
+        for key in getattr(project, "_param_consumed", ()):
+            _mark_consumed(parent, key)
+        if parent._param_overrides is None and overrides is not None:
+            parent._param_overrides = dict(overrides)
+        return
     if not overrides:
         return
     consumed = getattr(project, "_param_consumed", None) or set()

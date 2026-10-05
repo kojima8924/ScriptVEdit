@@ -803,6 +803,12 @@ class Object:
                 raise ValueError(
                     f"compute() では live Effect '{e.name}' は使用できません。"
                     f"bakeable Effect のみ使用可能です。")
+        # 終端フレーム生成はチェックポイント専用で、通常の ffmpeg フィルタでは焼けない。
+        for e in self.effects:
+            if e.name in _TERMINAL_FRAME_EFFECTS:
+                raise ValueError(
+                    f"compute() では終端フレーム Effect '{e.name}' は使用できません。"
+                    "compute() の後に Effect を適用してください。")
         # 静止画（duration なし）の生成コマンドは Effect を適用しない
         # （u 正規化に尺が必要なため）。黙って捨てると fade 等が消えるので明示拒否
         if duration is None and self.effects:
@@ -912,6 +918,10 @@ class Object:
             sigs.append(
                 f"layer={_src_signature(spec['filename'])}|p={spec['priority']}")
             layer_files.append(spec["filename"])
+            # サブの解決済み値は環境や CLI で変わり、レイヤーファイルには現れない。
+            params = sub_project._layer_params.get(spec["filename"], {})
+            if params:
+                sigs.append(f"params={sorted(params.items())!r}")
         dep_sources = []
         for srcs in sub_project._layer_sources.values():
             dep_sources.extend(srcs)
@@ -993,8 +1003,10 @@ class Object:
             parent._extra_layer_deps.setdefault(
                 parent._current_layer_file, []).extend(layer_files + dep_sources)
         obj = Object(cache_path)
-        obj._origin_sources = list(layer_files) + list(dep_sources)
+        # サブの解決済み param による鍵の変化も親レイヤーの鮮度へ伝える。
+        obj._origin_sources = [cache_path] + list(layer_files) + list(dep_sources)
         obj._resolved_length = total
+        obj._generated_length = total
         # 音声有無は鍵と同じ判定（上の sub_has_audio）を使う
         obj._has_audio = sub_has_audio
         return obj
@@ -1029,6 +1041,12 @@ class Object:
             sigs.append(f"bpf={_BAKE_PIXFMT_VER}")
             # fade / opacity の不透明度の経路の版（チェックポイントと同じ判定。cache.py）
             sigs.extend(_alpha_cmd_sigs(ops, duration))
+        if duration is None and self.media_type == "video":
+            decoder_args = _decoder_input_args(self.source, self.media_type,
+                                               proj.fps if proj else 30)
+            if decoder_args[:1] == ["-c:v"]:
+                # alpha を失っていた旧静止画キャッシュは再利用しない。
+                sigs.append(f"image_decoder={decoder_args[1]}")
         key = _sig_key(sigs)
         # バケットも _src_bucket に統一（生パス由来だとリポジトリを移動しただけで
         # compute キャッシュが全ミスする＝移植性が壊れる）
@@ -1043,7 +1061,14 @@ class Object:
         temp.transforms = list(self.transforms)
         temp.effects = []
         filters = _build_transform_filters(temp)
-        cmd = ["ffmpeg", "-y", "-i", self.source]
+        cmd = ["ffmpeg", "-y"]
+        # 動画の先頭フレームにも共通のデコーダ選択を通す（WebM の alpha を保持）。
+        if self.media_type == "video":
+            proj = current_project()
+            cmd.extend(_decoder_input_args(self.source, self.media_type,
+                                           proj.fps if proj else 30))
+        else:
+            cmd.extend(["-i", self.source])
         if filters:
             cmd.extend(["-vf", ",".join(filters)])
         cmd.extend(["-frames:v", "1", "-pix_fmt", "rgba", cache_path])

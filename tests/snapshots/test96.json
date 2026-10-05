@@ -24,7 +24,7 @@
     "-i",
     "assets/audio/bgm_loop.mp3",
     "-filter_complex",
-    "[1:v]trim=end=8.066666666666666[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,8)'[v1];[2:a]atrim=duration=3,asetpts=PTS-STARTPTS,volume=volume='0.5':eval=frame,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];[3:a]atrim=start=2:duration=3,asetpts=PTS-STARTPTS,atempo=1.5,adelay=3000:all=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];[4:a]atrim=duration=1,asetpts=PTS-STARTPTS,atempo=0.5,atempo=0.5,adelay=5000:all=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a2];[a0][a1][a2]amix=inputs=3:normalize=0[aout]",
+    "[1:v]trim=end=8.066666666666666[obj1];[0:v][obj1]overlay=trunc(0.5*W-w/2):trunc(0.5*H-h/2):eof_action=pass:enable='between(t/,0/,8)'[v1];[2:a]atrim=duration=3,asetpts=PTS-STARTPTS,volume=volume='0.5':eval=frame,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];[3:a]atrim=start=2:duration=3,asetpts=PTS-STARTPTS,atempo=1.5,atrim=duration=2,asetpts=PTS-STARTPTS,adelay=3000:all=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];[4:a]atrim=duration=1,asetpts=PTS-STARTPTS,atempo=0.5,atempo=0.5,atrim=duration=3,asetpts=PTS-STARTPTS,adelay=5000:all=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a2];[a0][a1][a2]amix=inputs=3:normalize=0[aout]",
     "-map",
     "[v1]",
     "-map",

@@ -237,6 +237,7 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
 
     objs: 動画Object または動画パス文字列（2つ以上）。素のObjectのみ
     （Transform/Effect適用済みは先に compute() で素材化する）。
+    同じ Object は繰り返し指定でき、タイムラインからは1回だけ取り除く。
     各クリップの実長は probe で取得し、t_dur が最短クリップ以上ならエラー。
     合成尺は sum(実長) - t_dur*(n-1) 秒。返す Object の duration にはこの合成尺が
     入るので time() は呼ばなくてよい（引数なしの time() も、生成前の初回レンダで通る）。
@@ -261,7 +262,7 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
                     f"video_sequence: '{o.source}' に Transform/Effect が適用されています。"
                     f"先に compute() で素材化してから渡してください。")
             sources.append(o.source)
-            if proj is not None and o in proj.objects:
+            if proj is not None and o in proj.objects and o not in consumed:
                 consumed.append(o)
         elif isinstance(o, str):
             if not os.path.exists(o):
@@ -276,7 +277,11 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
 
     # 映像/音声ストリーム個別の尺を取得（コンテナ尺の全用途流用による
     # A/V ドリフトを避ける）。取得不能時はコンテナ尺→5.0 にフォールバック。
-    def _stream_lengths(src):
+    def _stream_lengths(src, obj):
+        # 生成動画の尺は生成計画を正とする。未生成時の fallback や生成後の
+        # コンテナ丸めへ依存すると cold / warm で合成尺が変わってしまう。
+        if isinstance(obj, Object) and obj._generated_length is not None:
+            return float(obj._generated_length), float(obj._generated_length)
         vd = ad = None
         cont = None
         if proj is not None:
@@ -288,7 +293,7 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
         vd = vd or cont or 5.0
         ad = ad or cont or vd
         return vd, ad
-    stream_lengths = [_stream_lengths(s) for s in sources]
+    stream_lengths = [_stream_lengths(s, o) for s, o in zip(sources, objs)]
     lengths = [v for v, _ in stream_lengths]       # 映像trim/offset/合成尺用
     a_lengths = [a for _, a in stream_lengths]      # 音声atrim用
 
@@ -301,13 +306,15 @@ def video_sequence(*objs, transition="fade", t_dur=0.5):
     total = sum(lengths) - t_dur * (n - 1)
 
     # 音声: 全クリップが音声を持つ場合のみ acrossfade で連結（混在は映像のみ）
-    def _has_audio(src):
+    def _has_audio(src, obj):
+        if isinstance(obj, Object) and obj._has_audio is not None:
+            return obj._has_audio and not obj._audio_deleted
         if proj is not None:
             info = proj._probe_media(src)
             if info is not None:
                 return bool(info.get("has_audio"))
         return False
-    all_audio = all(_has_audio(s) for s in sources)
+    all_audio = all(_has_audio(s, o) for s, o in zip(sources, objs))
     # acrossfade も各音声が t_dur 超であることを要する
     if all_audio:
         for s, ln in zip(sources, a_lengths):
