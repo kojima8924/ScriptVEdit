@@ -45,3 +45,6 @@ IDEA_video_awareness.md
 
 # Codexセッション成果物
 .codex-remote-attachments/
+
+# 秘密情報
+.env
