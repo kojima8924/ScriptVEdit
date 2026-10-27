@@ -3,6 +3,9 @@
 import os
 import json
 import hashlib
+import array as _array
+import subprocess
+import sys as _sys
 import math as _math
 import builtins as _builtins
 from importlib import import_module as _import_module
@@ -93,14 +96,131 @@ def _duck_targets(effect):
     return (other,)
 
 
-def loop(until=None):
+def loop(until=None, *, crossfade=0, tail="auto", head=0):
     """aloop で音声を until 時刻までループさせるAudioEffect。
 
     ループする尺は「time(N) / until() / show(N) で決まった尺 → until（タイムラインの
     絶対秒）→ Project の総尺」の順で決まる（project.py の音声チェーン）。
     引数なしの time() と組み合わせてはいけない: time() は尺を素材の長さで確定させるので
-    bgm.time() <= loop() は1回再生で終わる。bgm <= loop() と time を呼ばずに書く。"""
-    return AudioEffect("loop", until=until)
+    bgm.time() <= loop() は1回再生で終わる。bgm <= loop() と time を呼ばずに書く。
+
+    crossfade（秒。既定 0 = 従来どおり素材の終わりまで鳴らしてそのまま頭へ戻る）を
+    指定すると、各周を「素材の head 秒から、末尾の減衰の始まりまで」に限り、次の周を
+    crossfade 秒の等パワー（qsin）で重ねてつなぐ。曲の最後のフェードアウトや無音を
+    繰り返さないので、周の境目で音が痩せたり途切れたりしない。
+    tail: 末尾から捨てる秒。"auto"（既定）は減衰の始まりを測る（0.5 秒ごとの RMS が
+      全体の中央値より 6dB 小さくなる前の最後の窓の終わり。結果は __cache__ に覚える）。
+      0 なら素材の終わりまで使う。
+    head: 各周の頭で飛ばす秒（曲の頭の無音。最初の周も同じ所から鳴る）。
+    tail / head は crossfade > 0 のときだけ指定できる。"""
+    _require_number("loop", "crossfade", crossfade, lo=0)
+    if not crossfade:
+        if tail != "auto" or head != 0:
+            raise ValueError(
+                "loop: tail / head は crossfade（周のつなぎの秒）と一緒に指定してください"
+                "（crossfade=0 は素材の終わりまで鳴らしてそのまま頭へ戻る従来のループ）")
+        return AudioEffect("loop", until=until)
+    if tail != "auto":
+        if isinstance(tail, str):
+            raise ValueError(
+                f"loop: tail は 'auto' か秒（0 以上の数値）で指定してください: {tail!r}")
+        _require_number("loop", "tail", tail, lo=0)
+    _require_number("loop", "head", head, lo=0)
+    return AudioEffect("loop", until=until, crossfade=crossfade, tail=tail, head=head)
+
+
+# --- loop(crossfade=…, tail="auto") の減衰の始まりの測定 ---
+# 0.5 秒ごとの RMS が全体の中央値より _LOOP_DECAY_DB 以上小さい窓を「減衰」とみなし、
+# そうでない最後の窓の終わりを減衰の始まりとする（scriptvedit-projects の解説動画の
+# エンジンで実測して決めた値。曲の最後のフェードアウト 2〜3 秒は本体より約 10dB 小さい）。
+_LOOP_DECAY_RATE = 8000          # 測定用にデコードするサンプリング周波数（モノラル）
+_LOOP_DECAY_WINDOW = 4000        # 窓のサンプル数（0.5 秒）
+_LOOP_DECAY_DB = 6.0
+# 測り方（デコードの引数・窓・閾値・判定）を変えたら上げる（測定結果 JSON の鍵に入る）
+_LOOP_DECAY_VER = 1
+_LOOP_DECAY_TIMEOUT = 600
+
+
+def _loop_decay_path(path):
+    """測定結果 JSON のキャッシュパス（素材の内容指紋と測り方から作る鍵）"""
+    sigs = ["loop_decay", f"v={_LOOP_DECAY_VER}", _src_signature(path),
+            f"rate={_LOOP_DECAY_RATE}", f"win={_LOOP_DECAY_WINDOW}",
+            f"db={_LOOP_DECAY_DB!r}"]
+    return os.path.join(_ARTIFACT_DIR, "loop_decay", f"{_sig_key(sigs)}.json")
+
+
+def _read_loop_decay(path):
+    """保存済みの測定結果を読む。無い・壊れている・形式違いなら None（測り直す）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    v = data.get("decay_start") if isinstance(data, dict) else None
+    if (isinstance(v, bool) or not isinstance(v, (int, float))
+            or not _math.isfinite(v) or v < 0):
+        return None
+    return float(v)
+
+
+def _decay_start_from_pcm(samples):
+    """s16 モノラル（_LOOP_DECAY_RATE）のサンプル列から減衰の始まり（秒）を求める。
+
+    整数の二乗和で窓ごとの強さを比べるので、同じサンプル列なら環境によらず同じ値になる。
+    窓が4つに満たない短い素材・全部が無音の素材は、素材の終わり（サンプル数 / 周波数）を返す。
+    """
+    win = _LOOP_DECAY_WINDOW
+    n = len(samples) // win
+    whole = len(samples) / _LOOP_DECAY_RATE
+    if n < 4:
+        return whole
+    energy = [sum(x * x for x in samples[i * win:(i + 1) * win]) for i in range(n)]
+    if not any(energy):
+        return whole
+    # 中央値（偶数個なら中の2つの平均）より _LOOP_DECAY_DB 小さい線。二乗和の比で比べる
+    ordered = sorted(energy)
+    mid = n // 2
+    median = ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+    floor = median * 10 ** (-_LOOP_DECAY_DB / 10)
+    last = _builtins.max((i for i, en in enumerate(energy) if en >= floor), default=n - 1)
+    return _builtins.min(whole, (last + 1) * win / _LOOP_DECAY_RATE)
+
+
+def _measure_loop_decay(path):
+    """素材の減衰の始まり（秒）を返す。結果は __cache__/artifacts/loop_decay/ に覚える。
+
+    dry_run でも測る（text_image() が dry_run でも PNG を描くのと同じ扱い）。値は素材の
+    内容だけで決まるので、測定済みか（キャッシュの有無）で main のコマンドは変わらない。
+    再生成に素材の全編のデコードが要るので命中ガードを置く（書き込みは原子的、
+    壊れた JSON は測り直す。loudness の測定結果 JSON と同じ扱い。CLAUDE.md §5）。
+    """
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"loop(crossfade=…, tail='auto'): 減衰を測る素材がありません: {path}")
+    cache_path = _loop_decay_path(path)
+    cached = _read_loop_decay(cache_path)
+    if cached is not None:
+        return cached
+    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-vn",
+           "-ac", "1", "-ar", str(_LOOP_DECAY_RATE), "-f", "s16le", "-"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=_LOOP_DECAY_TIMEOUT)
+    except FileNotFoundError as e:
+        raise RuntimeError("ffmpeg が見つかりません。PATH を確認してください") from e
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"loop(crossfade=…, tail='auto'): 減衰を測るためのデコードに失敗しました: "
+            f"{path}\n{err}")
+    raw = proc.stdout
+    samples = _array.array("h")
+    samples.frombytes(raw[:len(raw) // 2 * 2])
+    if _sys.byteorder != "little":
+        samples.byteswap()
+    value = _decay_start_from_pcm(samples)
+    _atomic_write_text(cache_path, json.dumps(
+        {"decay_start": value, "samples": len(samples)}, ensure_ascii=False) + "\n")
+    return value
 
 
 def _probe_audio_length(path):

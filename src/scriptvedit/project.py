@@ -18,11 +18,11 @@ from scriptvedit.context import (
 )
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.audio import _duck_targets, _probe_audio_length
-from scriptvedit.cache import _FFP_MEMO, _fold_time_effects, _is_pending_cache_path, _resolve_layer_cache_quality, _web_cache_path
+from scriptvedit.audio import _duck_targets, _measure_loop_decay, _probe_audio_length
+from scriptvedit.cache import _FFP_MEMO, _fold_time_effects, _is_cache_artifact_path, _is_pending_cache_path, _resolve_layer_cache_quality, _web_cache_path
 from scriptvedit.expr import Expr, _UValue, max, min
 from scriptvedit.ffmpeg import FFmpegError, _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _normalize_ffmpeg_cmd, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
-from scriptvedit.filters.audio import _MIX_AUDIO_FORMAT, _SIDECHAIN_FORMAT, _SIDECHAIN_MIX_FORMAT, _build_audio_effect_filters, _build_audio_pre_filters, _sidechain_hold_filter
+from scriptvedit.filters.audio import _MIX_AUDIO_FORMAT, _SIDECHAIN_FORMAT, _SIDECHAIN_MIX_FORMAT, _build_audio_effect_filters, _build_audio_pre_filters, _loop_crossfade_graph, _sidechain_hold_filter
 from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_effect_filters, _build_input_args, _build_move_exprs, _build_transform_filters, _build_video_overlay_parts, _get_base_dimensions, _optimize_filter_chain, _unwrap_raw_stream_ref, _visible_window
 from scriptvedit.formula import _render_formula_png
 from scriptvedit.objects import Object, _web_frames_dir
@@ -1654,6 +1654,45 @@ class Project:
             size = 192000 * 60  # 取得不能時のフォールバック（約1分・192kHz相当）
         return f"aloop=loop=-1:size={size}"
 
+    def _loop_body_bounds(self, obj, loop_effect):
+        """loop(crossfade=…) の各周で使う素材の区間 (head, body_end) を秒で返す。
+
+        tail="auto" は元素材の減衰の始まりを測る（audio._measure_loop_decay。dry_run でも
+        測る。値は素材の内容だけで決まり、測定済みかどうかでコマンドは変わらない）。
+        tail が秒なら「素材の長さ − tail」。素材は _build_aloop_filter と同じく
+        obj.audio_source（元素材）を見る。
+
+        __cache__ の生成物（audio_sequence / from_project 等）は cold の dry_run では
+        まだ無いので、測ると cold と warm でコマンドが食い違う。tail="auto" は拒否し、
+        秒の指定の長さは生成物の合成尺（Object._generated_length）から取る（probe しない）。
+        """
+        p = loop_effect.params
+        xf, tail, head = p["crossfade"], p["tail"], p["head"]
+        src = obj.audio_source
+        generated = _is_cache_artifact_path(src)
+        if tail == "auto":
+            if generated:
+                raise ValueError(
+                    "loop(crossfade=…, tail='auto'): 生成物（audio_sequence / "
+                    "from_project 等）の減衰は測れません（初回の dry_run ではまだ無いため）。"
+                    "tail=秒 で指定してください")
+            body_end = _measure_loop_decay(src)
+        else:
+            if generated:
+                length = getattr(obj, "_generated_length", None)
+            else:
+                length = _probe_audio_length(src)
+            if not length:
+                raise ValueError(
+                    f"loop(crossfade=…, tail={tail}): 素材の長さを取得できません: {src}")
+            body_end = float(length) - float(tail)
+        if body_end - head <= 2 * xf:
+            raise ValueError(
+                f"loop(crossfade={xf}): 各周で使う区間（head {head} 秒〜減衰の始まり"
+                f" {body_end:g} 秒）がクロスフェードの2倍より短い。crossfade を短くするか、"
+                f"head / tail を小さくしてください")
+        return head, body_end
+
     def _resolve_obj_duration(self, obj, fallback=5):
         """objのduration未設定/0のとき実長で補完（取得不能・0のときのみfallback）
 
@@ -1926,10 +1965,19 @@ class Project:
                 start = obj.start_time
 
                 a_filters = []
+                src_label = f"[{input_idx}:a]"
                 # loop（aloop）: atrim/adelayより前に置き、以降のトリムで尺を確定
                 loop_effect = next(
                     (e for e in obj.audio_effects if e.name == "loop"), None)
-                if loop_effect is not None:
+                if loop_effect is not None and loop_effect.params.get("crossfade"):
+                    # loop(crossfade=…): 周をクロスフェードでつなぐ部分グラフを前に置き、
+                    # その出力を以降のチェーンの入力にする（無限長。後段のトリムで尺を確定）
+                    head, body_end = self._loop_body_bounds(obj, loop_effect)
+                    parts, src_label = _loop_crossfade_graph(
+                        src_label, ai, head, body_end,
+                        loop_effect.params["crossfade"])
+                    filter_parts.extend(parts)
+                elif loop_effect is not None:
                     a_filters.append(self._build_aloop_filter(obj, loop_effect))
                 # atrim/atempo前処理
                 a_pre = _build_audio_pre_filters(obj)
@@ -1982,14 +2030,14 @@ class Project:
                              else f"asplit={len(taps) + 1}")
                     pre_label = f"[apre{ai}]"
                     filter_parts.append(
-                        f"[{input_idx}:a]{','.join(a_filters + [split])}"
+                        f"{src_label}{','.join(a_filters + [split])}"
                         f"{pre_label}{''.join(taps)}")
                     filter_parts.append(
                         f"{pre_label}{_MIX_AUDIO_FORMAT}{a_label}")
                 else:
                     a_filters.append(_MIX_AUDIO_FORMAT)
                     filter_parts.append(
-                        f"[{input_idx}:a]{','.join(a_filters)}{a_label}"
+                        f"{src_label}{','.join(a_filters)}{a_label}"
                     )
                 audio_labels.append(a_label)
 

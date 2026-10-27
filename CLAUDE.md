@@ -58,7 +58,7 @@ plugin / project_method / transform。
 
 - `usage` … 概念・main スクリプト雛形・レイヤー雛形・DSL・Expr・**プラグイン雛形**・CLI
 - `constraints` … 守らないと壊れる制約（severity: error/warning/info）
-- `effects`(42) / `transforms`(8) / `audio_effects`(7) / `factories`(44) /
+- `effects`(42) / `transforms`(8) / `audio_effects`(7) / `factories`(46) /
   `objects`(19) / `object_methods`(9) / `project_methods`(14) / `expr`(102) / `plugins`(3)
   （件数は変動する。正は `describe` の実測で、整合は tests/test_issue17_docs.py が検証する）
 
@@ -630,6 +630,33 @@ overlay の位置が1画素ずれ、4:2:0 出力で元の絵の色差が半画�
   低くなる（実測: TTS の声＋BGM を +8.8dB、ピークを最大 5dB 抑えて -14.46 LUFS）。
   **補正の再測定はしていない**（仕様は「target − 測定値」の一定増幅）。
 
+### `loop(crossfade=…)` は減衰を避けて周を重ねる（`filters/audio.py` の `_loop_crossfade_graph`）
+
+引数なしの `loop()`（`crossfade=0`）は従来どおり `aloop` 1つで、グラフ・params（`{"until": …}`）とも
+変えていない（test58 / test116 のスナップショットが守る）。`crossfade > 0` のときだけ、音声チェーンの
+先頭に部分グラフを置いてその出力をチェーンの入力にする（`project.py` の `src_label`）:
+
+- 使う区間 S = 元素材 [head, 減衰の始まり)、長さ L、周期 P = L − X。出力は「A = S[0, P)」の後に
+  「Q = fadein(A) + fadeout(S[P, L)) を P まで apad」を `aloop` で無限に続けたもの（`concat`）。
+  1周ずつ adelay して amix する形にしないこと（`aloop` が2周期分を抱え、形が周の数で変わる）。
+- **先に `aresample=48000` → `asetpts=N/SR/TB` してから区間をサンプル数で書く**（`atrim` の
+  `start_sample` / `end_sample`、`afade` の `ns`、`apad` の `whole_len`、`aloop` の `size`）。素材の
+  周波数を probe しないので size の見積もり不足（§5「48kHz・ステレオへ揃える」）が起きない。
+  `afade` は標本ごとに利得を計算するので、§4.9 の音声フレームの粒度の問題は無い。
+- `tail="auto"` の減衰の始まりは `audio.py` の `_measure_loop_decay`（8kHz モノラル s16 へデコードし、
+  0.5 秒窓の二乗和を整数で比べる。numpy に依存しない）。**測定は dry_run でも行う**
+  （`normalize_audio(mode="linear")` のような表記 `<MEASURED_…>` にしない）。値は素材の内容だけで
+  決まる決定的な関数なので、cold / warm で main が変わらず、検証（区間がつなぎの2倍以下なら
+  ValueError）も dry_run で効く。結果 JSON（`__cache__/artifacts/loop_decay/<鍵>.json`。鍵は
+  `_src_signature` と測り方の定数・`_LOOP_DECAY_VER`）は命中ガードつき（原子的に書き、壊れていれば
+  測り直す）。**測り方を変えたら `_LOOP_DECAY_VER` を上げる。**
+- **`__cache__` の生成物には `tail="auto"` を使わせない**（cold の dry_run ではまだ無く、測れないので
+  cold / warm でコマンドが食い違う）。`tail=秒` の長さは生成物なら `Object._generated_length`、
+  素材なら probe（`_build_aloop_filter` と同じく `obj.audio_source` を見る）。
+- `p.audit()` の `bgm-loop`（info）は crossfade なしの loop だけに出す。
+- 回帰は `tests/test_loop_crossfade.py`（部分グラフの出力と期待値の標本単位の一致・実レンダの
+  20ms ごとの音量・cold / warm・エラー）と test136 のスナップショット。
+
 ### 絵の列は1本の動画にまとめる（`stillseq.py` の `stills()` / `frames()`）
 
 全面 PNG を1枚ずつ Object にすると、どの入力も 0 秒から流れて出番まで捨てられるので
@@ -821,7 +848,8 @@ ffp.json（撤廃済み）の罠は「古い永続値が実測より優先され
 
 ### 図解アニメ（`framekit.py` とその上の図）
 
-`regex_view` / `slots` / `text_transition` / `odometer` / `flow_graph` / `flow_tree` / `globe` は、
+`regex_view` / `slots` / `text_transition` / `odometer` / `flow_graph` / `flow_tree` / `globe` / `annotate` /
+`timeline` は、
 Python で描いたコマを `framekit.build`（中身は `frames()`）へ渡して透過の .mov を1本作り、
 Object を1個返す。鍵・描画・時刻・文字・金型テストの規則は `framekit.py` の1か所に置く
 （内部モジュール。`from scriptvedit import *` には入らない）。
@@ -848,7 +876,7 @@ Object を1個返す。鍵・描画・時刻・文字・金型テストの規則
 - 文字を描く図は `text=fk.text_meta(...)` で `p.audit()` へ申告する（一番小さい字の大きさ・装飾）。
 - 依存は numpy・opencv-python・Pillow（extra は `figures`。`framekit.need()` が遅延 import）。
   dry_run は `draw` を呼ばない。
-- スナップショット（test117〜128・132〜135）では、図の版を上げると frames の .mov の鍵ハッシュ
+- スナップショット（test117〜128・132〜135・137）では、図の版を上げると frames の .mov の鍵ハッシュ
   だけが変わる。**`_FRAMEKIT_VER` を上げたら全部の図のスナップショットを、差分を目視してから
   作り直す**（鍵にフォントか Pillow の版が入る図は `_FIGURE_FONT_DEPENDENT_TESTS` で畳まれる
   ので通るが、test127・128・132〜135 は畳まない）。
@@ -879,6 +907,8 @@ Object を1個返す。鍵・描画・時刻・文字・金型テストの規則
 | text_transition / odometer | `fx_textmove.py` | `_TEXTMOVE_VER` | `tests/golden/textmove/`（字は同梱の自作フォント `svtm_block.ttf`。作り直しは同じ所の `make_font.py`、fonttools が要る） |
 | flow_graph / flow_tree | `fx_flow.py` | `_FLOW_VER` | `tests/golden/flow/` |
 | globe | `fx_globe.py` | `_GLOBE_VER` | `tests/golden/globe/` |
+| annotate（画像の矩形に囲み・下線・暗くする・寄り） | `fx_annotate.py` | `_ANNOTATE_VER` | `tests/golden/annotate/` |
+| timeline | `fx_timeline.py` | `_TIMELINE_VER` | `tests/golden/timeline/` |
 | fly_to（終端フレーム Effect。framekit は使わない。§5「bakeable / live」） | `morph_flight.py` | `cache.py` の `_FLIGHT_VER` | `tests/golden/flyto/` |
 
 `regex_trace` / `regex_count` / `regex_view` の規則:
@@ -946,6 +976,40 @@ Object を1個返す。鍵・描画・時刻・文字・金型テストの規則
   （Object は p.objects に残り続けるので、持ったままだと図の数だけ積み上がる）。
 
 - globe も最後のコマを描いた後に renderer を手放す。再描画時だけ作り直し、画素・鍵は変えない。
+
+`annotate`（`fx_annotate.py`。スクリーンショットの引用の演出）の規則:
+
+- **矩形はどれも元の画像の px の `(x0, y0, x1, y1)`**（ken_burns の `(x, y, w, h)` と形が違う。
+  取り違えは右下が左上より左上になるので ValueError で案内する）。線の太さ・あき・角は画面の px。
+- Effect にせず framekit の上のファクトリにした: ffmpeg の drawbox は縁がにじまず角丸も時刻で
+  伸びる線も描けず、crop は整数の画素でしか動かない（寄りがふらつく）。印を寄りに追従させるには
+  画像の座標で描く必要がある。既存の `ken_burns`（動画全体の整数の切り出し）・`spotlight`
+  （diagram の SVG の円）・`mask`（アルファの切り抜き）とは受け持ちが重ならない。
+- 画像は「切り出しの全部を覆う範囲」だけを取り込み、一番寄った倍率が 1 未満なら **2^-n（≥ その倍率）
+  へ面積平均で縮める**（倍率がちょうど 2^-n なので位置がずれない。端は複製して 2^n の倍数へ広げる）。
+  描く変換は `fk.blit`（`pivot=(0, 0)`・`clip=` で見えている範囲に切る）。
+- 自動の尺（`build()` の duration 省略）は **終わりの秒以降の最初のコマまで**描く
+  （`n_frames_for(終わり)` だと最後のコマが i/fps < 終わりの絵になり、`time()` で残る最後のコマが
+  引き終わる手前の下線になった）。
+- 何も変わらないコマは前のコマ（uint8）をそのまま返す（状態の署名で比べる）。止まっている区間は
+  ほぼ 0ms。renderer は最後のコマで手放す。
+- 矩形が見えている範囲に掛からない印は描かない（寄った先の外の印が余白に浮かない）。掛かる印は
+  見えている範囲を margin だけ広げた所で切る。
+- 鍵: 画像の内容指紋（`files=`）・枠・余白・切り出し・frame（描くときだけ太さも）・印（積んだ順）・
+  dim と zoom（時刻順に並べ替える。積む順は鍵に入らない）。描き方を変えたら `_ANNOTATE_VER` を上げる。
+
+`timeline`（`fx_timeline.py`。年表・時刻の帯・期間の横棒）の規則:
+
+- API は小さく保つ（ユーザーの方針）。要素は `mark` / `span` / `bracket` の3つだけで、数字が回る
+  見出しなどは既存の図（`odometer`）を `obj.figure.x` / `axis_y` の位置へ重ねて作る。引数を足す前に
+  組み合わせで書けないかを考える。
+- 札の置き場所は build のときに全部の要素込みで決める（`_layout` → `_unknot` → `_order` →
+  `_place`。後から出る札で前の札が動かない）。配置の結果は鍵に入らないので、置き方を変えたら
+  `_TIMELINE_VER` を上げて `tests/golden/timeline/` を作り直す。
+- 札の箱が別の札の柱に掛かるなら、その札より軸から遠くに置く（呼んだ順のまま置くと、後から
+  呼んだ印の札が先の札の下へ入れず、柱が札を貫いた。時刻の帯の 23:00 の札）。互いの柱に掛かる
+  2枚は柱の側へ寄せてほどく。同じ値の札のように避けられないときだけ警告する。
+- 目盛りの字を横切る柱は切る（`_stem_pieces`）。動いていないコマは前のコマを返す（`_Renderer.frame`）。
 
 ### 検査系（viz.py / p.inspect()）は本体の規則を再実装しない
 

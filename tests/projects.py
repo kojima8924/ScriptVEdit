@@ -492,6 +492,16 @@ _SPECS = [
     ProjectSpec("test135", ["test135_globe_earth.py"], needs=("morph",),
                 doc="globe: 既定の陸（同梱の地球 = Natural Earth 1:110m。鍵は PNG の内容指紋）・"
                     "拠点の点の堀と光の輪・plate の view='auto'（太平洋を渡る弧がつながる）"),
+    ProjectSpec("test136", ["test136_loop_crossfade.py"],
+                configure=_cfg(width=320, height=180, fps=15),
+                doc="loop(crossfade=, tail=, head=): 周をクロスフェードでつなぐ部分グラフ"
+                    "（48kHz のサンプル数で区間を書く・aloop は1周期だけ）+ duck_under",
+                assets=("audio/効果音.mp3",)),
+    ProjectSpec("test137", ["test137_timeline.py"], needs=("font", "morph"),
+                configure=_cfg(width=1920, height=1080),
+                doc="timeline: 省いた年表（breaks）・板つきの札が立つ・2つの印の間の赤い帯が伸び、"
+                    "上に odometer を重ねる（framekit.build の frames 生成物。鍵にフォントの"
+                    "内容指紋が入るので比較では畳む）"),
     # --- 以下は実レンダ専用（dry_run では踏めない経路） ---
     ProjectSpec("test92", ["test92_formula_scale.py"], snapshot=False,
                 configure=_cfg(width=640, height=360, fps=15), needs=("web",),

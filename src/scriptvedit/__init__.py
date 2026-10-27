@@ -118,6 +118,10 @@ __all__ = [
     "flow_graph", "flow_tree",
     # 番号つきの箱の列・読みにいく針・上限の線
     "slots",
+    # 画像（スクリーンショット）の矩形に時刻つきの囲み・下線・暗くする・寄り
+    "annotate",
+    # 年表・時刻の帯・期間の横棒
+    "timeline",
     # 図形ビルダー
     "circle", "rect", "arrow", "label", "spotlight",
     # プラグイン機構
@@ -257,6 +261,12 @@ from scriptvedit.fx_flow import (  # noqa: F401
 )
 from scriptvedit.fx_slots import (  # noqa: F401
     slots
+)
+from scriptvedit.fx_annotate import (  # noqa: F401
+    annotate
+)
+from scriptvedit.fx_timeline import (  # noqa: F401
+    timeline
 )
 from scriptvedit.plugins import (  # noqa: F401
     PluginError, effect_plugin, load_plugin, load_plugins, plugin_manifest, unregister_plugin

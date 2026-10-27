@@ -6538,6 +6538,39 @@ ALL_TESTS += [
 ]
 
 
+def check_loop_tail_without_crossfade():
+    """loop: tail / head は crossfade と一緒でなければ ValueError（黙って無視しない）"""
+    for kwargs in (dict(tail=2), dict(head=0.5)):
+        ok, msg = _expect_raise(lambda: loop(**kwargs), ValueError, ("crossfade",))
+        if not ok:
+            return False, msg
+    return _expect_raise(lambda: loop(crossfade=1, tail="end"), ValueError, ("auto",))
+
+
+def check_loop_crossfade_too_long():
+    """loop(crossfade=…): 各周で使う区間がクロスフェードの2倍以下 → ValueError（レンダ時）"""
+    tmp = _tmp_file("_tmp_loop_xf.py")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("from scriptvedit import *\n"
+                    "bgm = Object(asset(\"audio/bgm_loop.mp3\"))\n"
+                    # 31.56 秒の素材の 0.5〜(31.56 − 28) 秒 = 3.06 秒に 1.6 秒のつなぎは入らない
+                    "bgm.time(10) <= loop(crossfade=1.6, tail=28, head=0.5)\n")
+        p = _mk_project()
+        p.layer(tmp, priority=0)
+        return _expect_raise(lambda: p.render("_tmp.mp4", dry_run=True), ValueError,
+                             ("crossfade", "2倍より短い"))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+ALL_TESTS += [
+    ("loop tail/head は crossfade と一緒", check_loop_tail_without_crossfade),
+    ("loop crossfade が区間に入らない", check_loop_crossfade_too_long),
+]
+
+
 @pytest.mark.parametrize("name,check", ALL_TESTS, ids=[n for n, _ in ALL_TESTS])
 def test_error_case(name, check):
     """各エラーケースを pytest 経由で検証する（失敗時はメッセージを表示）

@@ -52,6 +52,8 @@ _MANIFEST_CATEGORY_MEMBERS = {
     "正規表現の照合": ["regex_trace", "regex_count", "regex_view"],
     "ネットワーク図": ["flow_graph", "flow_tree"],
     "データ構造の図": ["slots"],
+    "画像の注記": ["annotate"],
+    "年表・時刻の帯": ["timeline"],
 }
 _MANIFEST_CATEGORIES = {}
 for _cat, _members in _MANIFEST_CATEGORY_MEMBERS.items():
@@ -731,6 +733,43 @@ _MANIFEST_PARAM_META = {
         "desc": "根の量。分かれるたびに等分し、パケットの直径を √(量) に比例させる（合計は保つ）"},
     ("flow_tree", "size"): {"type": "any", "default": None,
                             "desc": "flow_graph と同じ（**kw で受ける。colors・node_radius・seed なども同様）"},
+    # 年表・時刻の帯・期間の横棒（fx_timeline.py）。choices は fx_timeline の _TICK_PLACES と同じ
+    # （tests/test_fx_timeline.py が突き合わせる）。要素（mark / span / bracket）の引数は notes
+    ("timeline", "start"): {
+        "type": "any", "required": True,
+        "desc": "軸の左端。数値か日時（datetime・date・ISO の文字列 '2026-10-23 19:30'）。end と同じ種類"},
+    ("timeline", "end"): {"type": "any", "required": True, "desc": "軸の右端（start より後）"},
+    ("timeline", "ticks"): {
+        "type": "any", "default": None,
+        "desc": "目盛り。None は自動（8 個まで）。数値の軸は間隔、日時の軸は単位 "
+                "'year' / 'month' / 'day' / 'hour' / 'minute' か (単位, 数)。値のリスト・"
+                "(値, 字) のリストも可（[] で目盛りなし）"},
+    ("timeline", "tick_format"): {
+        "type": "string", "default": None,
+        "desc": "目盛りの字の書式（str.format）。数値の軸は {v}、日時の軸は {year} {month} {day} "
+                "{hour} {minute} {second} {wd}（曜日）。例 '{v}:00'・'{v}年'・'{month}/{day}'"},
+    ("timeline", "tick_place"): {"type": "choice", "default": "tick", "choices": ["tick", "between"],
+                                 "desc": "tick=字を目盛りの下に / between=隣の目盛りとの間の中央（日の名前など）"},
+    ("timeline", "breaks"): {"type": "any", "default": [],
+                             "desc": "省く区間 [(a, b), …]。40px の隙間と斜めの2本線になり、残りは同じ縮尺"},
+    ("timeline", "arrow"): {"type": "bool", "default": False, "desc": "軸の右端を矢じりにする"},
+    ("timeline", "grid"): {"type": "bool", "default": False,
+                           "desc": "段（row）の帯の中に目盛りの縦線を引く（段が無ければ効かない）"},
+    ("timeline", "size"): {"type": "any", "default": None,
+                           "desc": "キャンバス (幅, 高さ) px。省略時は Project の解像度"},
+    ("timeline", "padding"): {"type": "number", "default": 40, "min": 0, "desc": "余白 px"},
+    ("timeline", "axis_y"): {"type": "number", "default": None, "min": 0,
+                             "desc": "軸の高さ px（省略時は全体を縦の中央に置く）"},
+    ("timeline", "bar"): {"type": "number", "default": 40, "min": 2, "max": 400,
+                          "desc": "段（row）の横棒の太さ px"},
+    ("timeline", "label_size"): {"type": "number", "default": 44, "min": 8, "max": 400,
+                                 "desc": "札の字の大きさ px"},
+    ("timeline", "tick_size"): {"type": "number", "default": 32, "min": 8, "max": 400,
+                                "desc": "目盛りと note の字の大きさ px"},
+    ("timeline", "font"): {"type": "string", "default": None, "desc": "字のフォントファイルパス"},
+    ("timeline", "weight"): {"type": "any", "default": None, "desc": "字の太さ（可変フォントの wght）"},
+    ("timeline", "colors"): {"type": "any", "default": None,
+                             "desc": "図の色の差し替え {名前: 色}（fg / accent / muted / line / dim / panel）"},
     # transition は Object のみ受ける（実装は文字列パスを TypeError で拒否）
     ("transition", "obj_a"): {"type": "object", "required": True,
                               "desc": "前半の Object（Transform/Effect 未適用の素材）"},
@@ -811,6 +850,19 @@ _MANIFEST_PARAM_META = {
     ("duck_under", "hold"): {"type": "number", "default": 0, "min": 0,
                              "desc": "相手が止んでから戻り始めるまでの保持時間（ミリ秒。"
                                      "0=保持なし）。読点や文の間で BGM が戻るのを防ぐ"},
+    ("loop", "until"): {"type": "number", "default": None, "min": 0, "unit": "秒",
+                        "desc": "ループを止めるタイムラインの絶対時刻（秒）。省略時は"
+                                "time() 等で決まった尺 → Project の総尺"},
+    ("loop", "crossfade"): {"type": "number", "default": 0, "min": 0, "unit": "秒",
+                            "desc": "周のつなぎのクロスフェード（秒。等パワー qsin）。"
+                                    "0=従来どおり素材の終わりまで鳴らしてそのまま頭へ戻る"},
+    ("loop", "tail"): {"type": "any", "default": "auto", "unit": "秒",
+                       "desc": "各周で使わない素材の末尾（秒）。'auto'=減衰の始まりを測る"
+                               "（0.5 秒ごとの RMS が中央値より 6dB 小さくなる前まで）、"
+                               "0=素材の終わりまで。crossfade > 0 のときだけ指定できる"},
+    ("loop", "head"): {"type": "number", "default": 0, "min": 0, "unit": "秒",
+                       "desc": "各周の頭で飛ばす秒（曲の頭の無音。最初の周も同じ所から）。"
+                               "crossfade > 0 のときだけ指定できる"},
     # Project.configure(**kwargs) の各キー（_CONFIGURE_KEYS。**kwargs なので
     # シグネチャからは導出できず、宣言しないと params が空になる）
     ("Project.configure", "width"): {
@@ -1042,6 +1094,28 @@ _MANIFEST_NOTES = {
         "生成物は framekit.build → __cache__/artifacts/frames/<鍵>.mov。鍵は行の定義・"
         "出来事の列・寸法・色・size・フォントの内容指紋・_SLOTS_VER（dry_run は描かない）",
     ],
+    "timeline": [
+        "tl = timeline(start, end, ...) → 要素を足す → tl.build() で動画 Object。"
+        "表示は tl.build().time()（引数なしは図の尺ぶん）。at はこの図の先頭からの秒",
+        "tl.mark(v, label=None, *, note=None, at=0, dur=0.5, enter='fade'|'rise'|'slide'|'cut', "
+        "side='above'|'below', color='fg', text_color='fg', dot='fill'|'ring'|'none', card=False): "
+        "点と、柱でつないだ札（note は muted の小さい字。card=True で板つき）",
+        "tl.span(a, b, label=None, *, note=None, at=0, dur=0.8, enter='grow'|'fade'|'cut', row=None, "
+        "side='above', color='line', text_color='fg', thickness=1.0): 期間の横棒。row=None は軸の上の帯"
+        "（札は帯の中央の上か下）、row=0, 1, … は軸の下の段（label は棒の左端の上、note は棒の右）。"
+        "同じ段に細い棒（thickness=0.35）を重ねて区間の中の区間を示せる",
+        "tl.bracket(a, b, label=None, *, at=0, dur=0.6, enter='grow'|'fade'|'cut', side='below', "
+        "color='fg', text_color='fg'): 2点の間の括弧と注記（└──┘。'above' なら ┌──┐）",
+        "札は全部の要素込みで build のときに置く（後から出る札で前の札が動かない）。重なる・柱が"
+        "ほかの札を貫く所は外側の段へずらし、互いの柱に掛かる2枚は柱の側へ寄せる。"
+        "同じ値の札のように避けられないときは警告する。段の字の重なり・はみ出しは ValueError",
+        "数字が回る見出しは odometer を重ねる（位置は tl.x(v) / obj.figure.x(v) と "
+        "obj.figure.axis_y。キャンバスの px なので、全面の図なら move(x=px/幅, y=px/高さ)）",
+        "日時は datetime・date・ISO の文字列。タイムゾーンの有無は start に揃える",
+        "生成物は framekit.build → __cache__/artifacts/frames/<鍵>.mov。鍵は軸・目盛り・要素の列・"
+        "寸法・色・字の絵の署名・_TIMELINE_VER（配置の結果は入らない。dry_run は描かない）",
+        "numpy・opencv-python・Pillow が要る（構築のときにも。目盛りの字の寸法を測る）",
+    ],
     "frames": [
         "draw のコードは鍵に入らない。同じ key なら draw を呼ばずに前回の動画を使うので、"
         "描き方や元データを変えたら key を変える（版番号や元データを key に入れる）",
@@ -1068,6 +1142,19 @@ _MANIFEST_NOTES = {
         "札（label）は裏へ回ると消え、重なり・はみ出しは build のときに警告する",
         "plate の弧は弦に垂直に上へ反る（弦が縦に近いと地図の内側へ）。反りで日付変更線を"
         "またいで反対の端に描かれるときは反りを縮める",
+        "numpy・opencv-python・Pillow が要る（framekit と同じ。描画のときに遅延 import）",
+    ],
+    "annotate": [
+        "戻り値は組み立て役。box / underline / dim / zoom を積んで build() で透過動画 Object にする"
+        "（obj.figure.area(t)・obj.figure.rect(r, t) が付く）",
+        "矩形はどれも元の画像の px の (x0, y0, x1, y1)（左上と右下）。ken_burns の (x, y, w, h) とは"
+        "形が違う（右下が左上より左上にあると ValueError）。線の太さ・あきは画面の px",
+        "キャンバスは size の上下左右に margin（既定 24px）の透明な余白を足した大きさ。"
+        "move(x=0.5, y=0.5, anchor='center') で枠が画面の中央に来る",
+        "dim は1つずつ順に積む（穴が次の矩形へ移る。dim(None) で戻す）。zoom も区間を重ねない",
+        "寄りでは印と暗くする穴が画像の座標についていく。矩形が見えている範囲の外へ出た印は描かない",
+        "印が出そろって止まっている区間は前のコマを使い回すので、time() で長く出しても軽い",
+        "文字の札・矢印・ぼかしは持たない（札は text_image を重ねる）",
         "numpy・opencv-python・Pillow が要る（framekit と同じ。描画のときに遅延 import）",
     ],
     "text_image": [
@@ -1181,6 +1268,13 @@ _MANIFEST_NOTES = {
              "bgm.time() <= loop() は1回再生で終わる（loop(until=) も効かない）。"
              "bgm <= loop()（time を呼ばない）なら総尺まで、bgm.time(30) <= loop() や "
              "bgm.until('outro.end') <= loop() ならその尺までループする",
+             "loop(crossfade=秒): 各周を素材の head〜減衰の始まり（tail='auto' で測る）に限り、"
+             "次の周を crossfade 秒の等パワーで重ねてつなぐ。曲の最後のフェードアウトや無音を"
+             "繰り返さないので、周の境目で音が痩せない（周期 = 使う区間 − crossfade）。"
+             "使う区間がクロスフェードの2倍以下ならレンダ時に ValueError",
+             "tail='auto' の測定は dry_run でも行い、__cache__/artifacts/loop_decay/ に覚える。"
+             "値は素材の内容だけで決まるので、測定済みかどうかでコマンドは変わらない。"
+             "__cache__ の生成物（audio_sequence / from_project 等）は測れないので tail=秒 で指定する",
              "尺の決まり方: time(N) / until() / show(N) で決まった尺 → loop(until=秒)"
              "（タイムラインの絶対時刻）→ Project の総尺"],
     "keyframes": ["時刻は秒ではなく u（0..1。表示区間の進行度）。obj.time(4) なら u=0.5 は"
@@ -1393,6 +1487,19 @@ _MANIFEST_EXAMPLES = {
               "t.row('rule', 21, label='受け取る項目')\n"
               "t.row('input', 20, label='渡す項目', ghost=[21])\n"
               "t.link(1.2, ('rule', 21), ('input', 21))  # 先が ghost なので赤くなる"),
+    "annotate": ("a = annotate('shots/page.png', size=(1600, 900))\n"
+                 "a.underline((212, 388, 1180, 426), t=1.2)   # 引用の一文に下線（左から引く）\n"
+                 "a.box((640, 520, 812, 560), t=2.0)          # 別の語を赤で囲む\n"
+                 "a.dim((640, 520, 812, 560), t=2.0)          # まわりを暗く\n"
+                 "a.zoom((400, 300, 1300, 806), t=3.0)        # 寄る（印もついていく）\n"
+                 "a.build().time(6) <= move(x=0.5, y=0.5, anchor='center')"),
+    "timeline": ("tl = timeline(18, 24, ticks=1, tick_format='{v}:00')       # 時刻の帯\n"
+                 "tl.mark(19, '19:00\\nニコニコ 停止', note='予防のため', at=0.5)\n"
+                 "tl.mark(22.5, '22:30過ぎ\\n公開', at=1.5)\n"
+                 "tl.bracket(19, 22.5, '約3時間半', at=2.5)                  # 軸の下に括弧が伸びる\n"
+                 "tl.build().time() <= move(x=0.5, y=0.5, anchor='center')\n"
+                 "d = timeline('2026-10-23', '2026-10-28', ticks='day', tick_place='between', grid=True)\n"
+                 "d.span('2026-10-23 19:30', '2026-10-25 09:25', 'ドコモ', row=0, note='25日 9:25', at=1)"),
     "globe": ("g = globe(projection='plate', size=(1400, 700))   # 陸は同梱の地球・中心は自動\n"
               "g.points(sites)                                # 出典を書くか「模式図」と明記する\n"
               "g.arc((37.8, -122.4), (35.7, 139.7), t=1.0)    # 太平洋を渡る弧も1本につながる\n"
@@ -1401,7 +1508,9 @@ _MANIFEST_EXAMPLES = {
     "keyframes": "img <= scale(keyframes((0, 1.0), (0.5, 1.5), (1, 1.0), easing=ease_in_out_sine))",
     "avolume": "bgm <= avolume(0.3)",
     "loop": ("bgm <= loop() & duck_under(narration_audio)   # time() は呼ばない（総尺までループ）\n"
-             "bgm2.time(30) <= loop()                        # 30秒までループ"),
+             "bgm2.time(30) <= loop()                        # 30秒までループ\n"
+             "bgm3.time(300) <= loop(crossfade=2.5)          # 曲の減衰を避け、2.5秒のクロスフェードで周をつなぐ\n"
+             "bgm4.time(300) <= loop(crossfade=2, tail=3, head=0.8)  # 末尾3秒と頭の無音0.8秒を使わない"),
     "duck_under": ("bgm <= duck_under(voice_obj, ratio=8)\n"
                    "# 相手が複数（どれかが鳴っている間は下がる）: "
                    "bgm <= duck_under(n1, n2, n3, ratio=8)"),

@@ -133,6 +133,14 @@ def test_loop_is_info(tmp_path):
     assert "bgm-loop" in _codes(p.audit(quiet=True))
 
 
+def test_loop_with_crossfade_is_not_reported(tmp_path):
+    """loop(crossfade=…) は周をクロスフェードでつなぐので bgm-loop を出さない"""
+    p = _mk()
+    bgm = Object(_tone(tmp_path, "bgm.wav", 6))
+    bgm.time(15) <= loop(crossfade=1, tail=0)
+    assert "bgm-loop" not in _codes(p.audit(quiet=True))
+
+
 def test_short_bgm_warns(tmp_path):
     """duck_under持ち音声(=BGM相当)の実尺が表示区間より短ければwarning"""
     p = _mk()

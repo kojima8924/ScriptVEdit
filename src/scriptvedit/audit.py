@@ -25,7 +25,8 @@
                                    ダックしていない音声が1秒以上重なる（BGM 役が無ければ
                                    全ての組を調べる。前景同士の重なりは数えない。
                                    sfx() は各発音区間で判定。組の件数も示す）
-  bgm-loop (info)                … loop() 使用（短い曲のループは人間に気付かれやすい）
+  bgm-loop (info)                … crossfade なしの loop() 使用（短い曲のループは人間に
+                                   気付かれやすい。loop(crossfade=…) なら出さない）
   bgm-too-short (warning)        … BGM（duck_underを持つ音声）の実尺が表示区間より短い
   no-normalize-audio (info)      … 音声があるのに normalize_audio() 未設定
   web-content-uninspected (info) … Canvas/DOM内部は静的lint対象外。storyboard確認を促す
@@ -851,13 +852,18 @@ def _audit_audio(project, objects, findings):
 
     for obj in audio_objs:
         effects = list(getattr(obj, "audio_effects", []))
-        looped = any(getattr(e, "name", None) == "loop" for e in effects)
+        loop_effect = next(
+            (e for e in effects if getattr(e, "name", None) == "loop"), None)
+        looped = loop_effect is not None
         ducks = any(getattr(e, "name", None) == "duck_under" for e in effects)
         if looped:
-            findings.append(_finding(
-                "info", "bgm-loop",
-                f"{_obj_label(obj)}: loop() はつなぎ目が人間に気付かれやすいです"
-                f"（動画より長い曲を選ぶのが確実）"))
+            # loop(crossfade=…) は減衰を避けて周を重ねてつなぐので、つなぎ目の注意は出さない
+            if not loop_effect.params.get("crossfade"):
+                findings.append(_finding(
+                    "info", "bgm-loop",
+                    f"{_obj_label(obj)}: loop() はつなぎ目が人間に気付かれやすいです"
+                    f"（動画より長い曲を選ぶのが確実。ループするなら loop(crossfade=2) で"
+                    f"曲の終わりの減衰を避けて周をクロスフェードでつなぐ）"))
         elif ducks:
             # duck_under を持つ音声＝BGM相当。実尺が表示区間より短いと途中で切れる
             try:

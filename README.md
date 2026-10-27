@@ -14,7 +14,8 @@
   実測（2分56秒・87オブジェクトの実プロジェクトを20コアPCで計測）で**逐次 1012 秒 → 並列8 で 106 秒**（→「時間分割並列レンダ」節）
 - **AI が読める機能マニフェスト** — `python -m scriptvedit describe` で全機能のシグネチャ・引数レンジを JSON / Markdown 出力（→「ケイパビリティ・マニフェスト」節）
 - **図解アニメ** — 正規表現の照合の後戻り（`regex_view`）・番号つきの箱の列（`slots`）・文字列の組み替え（`text_transition` / `odometer`）・
-  点と線の上を流れるパケット（`flow_graph` / `flow_tree`）・点で描いた地球（`globe`）を、コマごとに Python で描いた透過動画の
+  点と線の上を流れるパケット（`flow_graph` / `flow_tree`）・点で描いた地球（`globe`）・スクリーンショットの矩形に
+  時刻つきで足す囲み・下線・暗くする・寄り（`annotate`）・年表と時刻の帯（`timeline`）を、コマごとに Python で描いた透過動画の
   Object として1行で置ける。共通部品 `scriptvedit.framekit` で自作の図も描ける（→「図を描く部品（framekit）」節）
 
 素材は画像・動画・音声のほか、HTML（Playwright 経由）・LaTeX 数式（KaTeX 同梱・オフライン）・TTS 音声も
@@ -37,7 +38,7 @@ FFmpeg 8 の機能を使うため、初回実行時にメジャーバージョ�
 - numpy + scipy（`beat_sync` 使用時。scipy はビート検出に必須）
 - numpy + PIL（`scriptvedit.testkit` の SSIM検証。scipy は任意で高速化）
 - numpy + opencv-python + Pillow（図解アニメ `regex_view` / `slots` / `text_transition` / `odometer` /
-  `flow_graph` / `flow_tree` / `globe` と、その部品 `scriptvedit.framekit`。`pip install "scriptvedit[figures]"`）
+  `flow_graph` / `flow_tree` / `globe` / `annotate` / `timeline` と、その部品 `scriptvedit.framekit`。`pip install "scriptvedit[figures]"`）
 - numpy + scipy + opencv-python + Pillow + tqdm（`morph_to` / `explode_to` / `assemble_from` / `fly_to`。`pip install "scriptvedit[morph]"`）
 - Pillow（`storyboard` 使用時）
 - TTS（`voice` / `narrate` 使用時。`scriptvedit.tts` 経由。いずれか1つ）
@@ -1319,6 +1320,7 @@ p.normalize_audio(-14, mode="linear")
 
 bgm <= loop() & duck_under(narration, ratio=8)   # ループ + 自動ダッキング（time() は呼ばない）
 bgm2.time(30) <= loop()                          # 尺を決めてループするなら time(秒) を付ける
+bgm3.time(300) <= loop(crossfade=2.5)            # 曲の減衰を避けて、周を 2.5 秒のクロスフェードでつなぐ
 
 seq = audio_sequence("a.mp3", "b.mp3", crossfade=1.0)  # acrossfade連結（2つ以上）
 hit = sfx("click.wav", at=[0.5, 1.5, 3.0], volume=1.0) # 同一音源を複数時刻に配置
@@ -1335,6 +1337,22 @@ viz = audio_viz("bgm.mp3", kind="waves", color="cyan") # 波形/スペクトル�
   `bgm.time() <= loop()` は1回再生で終わる（`loop(until=)` も効かない）。`bgm <= loop()` と
   `time()` を呼ばずに書けば総尺まで、`bgm.time(30) <= loop()` / `bgm.until("outro.end") <= loop()` なら
   その尺までループする
+- `loop(until=None, *, crossfade=0, tail="auto", head=0)`: 引数なし（`crossfade=0`）は素材の終わりまで
+  鳴らしてそのまま頭へ戻る（曲の最後のフェードアウトや無音まで繰り返すので、周の境目で音が痩せて途切れる）。
+  **`crossfade=秒`** を付けると、各周を「素材の `head` 秒〜末尾の減衰の始まり」に限り、次の周を `crossfade` 秒の
+  等パワー（qsin）で重ねてつなぐ（周期 = 使う区間 − crossfade）
+  - `tail="auto"`（既定）は減衰の始まりを測る: 0.5 秒ごとの RMS が全体の中央値より 6dB 以上小さい窓を減衰とみなし、
+    そうでない最後の窓の終わりまで使う（曲の最後のフェードアウト 2〜3 秒は本体より約 10dB 小さい）。
+    `tail=秒` は「素材の長さ − tail」まで、`tail=0` は素材の終わりまで。`head=秒` は各周の頭で飛ばす秒
+    （曲の頭の無音。最初の周も同じ所から鳴る）。`tail` / `head` は `crossfade > 0` のときだけ指定できる
+  - 使う区間（`head`〜減衰の始まり）がクロスフェードの2倍以下ならレンダ時に `ValueError`
+  - 測定は dry_run でも行い（`text_image()` が dry_run でも PNG を描くのと同じ扱い）、結果を
+    `__cache__/artifacts/loop_decay/<鍵>.json` に覚える（鍵は素材の内容指紋）。値は素材の内容だけで決まるので、
+    測定済みかどうかで dry_run の main は変わらない。`__cache__` の生成物（`audio_sequence` / `from_project` 等）は
+    初回の dry_run ではまだ無く測れないので、`tail="auto"` は `ValueError`。`tail=秒` で指定する
+  - 周をつなぐ区間は 48kHz に揃えてからサンプル数で書く。`aloop` が抱えるのは定常の1周期だけ
+    （「最初の周の前半」の後に「前の周の終わりを fade out・次の周の頭を fade in して重ねた1周期」を繰り返す）なので、
+    メモリは引数なしの `loop()` と同程度で、周の数が増えてもフィルタグラフは大きくならない
 - `audio_sequence` は連結後の実尺を返却Objectの`duration`へ自動設定する。`Narration`を直接渡すと字幕もcrossfade込みで並び、返却Objectの数値`@`配置へ追従する。追加の`.time(total)`は不要
 - `normalize_audio(target=-14, *, true_peak=-1.5, lra=11, limiter=True, sample_rate=48000, mode="dynamic")` は最終音声へ正規化、サンプルレート確定、任意のピークリミッター（`alimiter`。look-ahead 5ms）を順に適用する。`true_peak`は最終lossy出力の目標で、AAC/Opus再上昇向けに内部で0.5dBの余裕を確保する。WebM/Opusの出力レートは48kHz固定
 - **`mode` は正規化の方式**:
@@ -1445,6 +1463,28 @@ e.points(cities, appear=("staged", [(0.5, 1), (0.8, 300)]))   # 1点 → 300点�
 - `spin` は既定では使わない。毎コマ全面が変わり qtrle が効かない（900×900 で 5 秒回すと約 80MB）。3 度/秒を超えると警告
 - 重さ（1コマ。900×900・同梱の地球）: 回転なし 約 22ms（地球の点の層を使い回す）、spin / turn 中 約 60ms（毎コマ点の層を描き直す）。plate 1400×700・night で 約 30ms。1 秒ぶんで 1.5〜2.5 秒
 - 使い方の推奨: 1回 10 秒以内、1本の動画に 2 回まで。色は白・灰・赤だけ、国境と国旗は描かない。都市の点は実データに見えるので、出典を書くか「模式図」と明記する
+
+### スクリーンショットの矩形に囲み・下線・暗くする・寄り（annotate）
+
+公式ページのスクリーンショットを枠に収めて出し、読み上げに合わせて引用の一文に下線を引く・語を囲む・
+まわりを暗くする・一部へ寄る、を時刻つきで積んで、透過動画 Object にする（framekit.build。`frames()` と同じ qtrle の .mov）。
+
+```python
+a = annotate("shots/page.png", size=(1600, 900), frame="line")   # 画像は枠に収めて中央（拡大もする）
+a.underline((212, 388, 1180, 426), t=1.2)      # 引用の一文に 1.2 秒で下線（左から引く）
+a.box((640, 520, 812, 560), t=2.0)             # 2.0 秒で別の語を赤で囲む
+a.dim((640, 520, 812, 560), t=2.0)             # 同じ時刻にまわりを暗く（囲みの枠は穴に入る）
+a.zoom((400, 300, 1300, 806), t=3.0, dur=1.2)  # 3.0 秒から寄る（印と穴もいっしょに動く）
+a.build().time(6) <= move(x=0.5, y=0.5, anchor="center")
+```
+
+- **矩形はどれも元の画像の画素座標 `(x0, y0, x1, y1)`**（左上と右下。画像を開いて読んだ値をそのまま書ける）。`ken_burns` の `(x, y, w, h)` とは形が違う（取り違えは ValueError で案内する）。線の太さ・あき（`width` / `pad` / `gap` / `radius`）は画面の px で、寄っても太さは変わらない
+- 印: `box(rect, t, color="accent", width=5, pad=8, radius=6, dur=0.25, until=None)`（`dur` 秒で現れる角丸の枠）・`underline(rect, t, width=5, gap=6, dur=0.4, until=None)`（左から右へ引く。終わりで減速）。`until` の秒から 0.25 秒で消える。色の既定は図の赤（`accent` = `#e0241b`。`colors=` で差し替え）
+- 暗く: `dim(rect, t, amount=0.6, pad=8, dur=0.3)` は画像の見えている範囲のうち `rect` の外を黒で暗くする（印は暗くならない）。続けて `dim(別の矩形, t=)` を積むと穴がその矩形へ移り、`dim(None, t=)` で戻る。dim は区間を重ねずに順に積む
+- 寄り: `zoom(rect, t, dur=1.0, easing="ease_in_out_cubic")` はいまの切り出しから `rect` へ切り出しを動かす（寄る・引く・横へ動く）。縦横比は保って枠に収める。`annotate(crop=…)` が最初の切り出し。矩形が見えている範囲の外へ出た印は描かない
+- キャンバスは `size`（既定は画面の大きさ）の上下左右に `margin`（既定 24px）の透明な余白を足した大きさで、印と `frame`（画像のまわりの細い枠）がはみ出せる。`obj.figure.area(t)`（画像が見えている範囲）・`obj.figure.rect(r, t)`（元の画像の矩形がキャンバスのどこに来るか）で、札（`text_image`）などを横に置ける
+- `build()` の尺の既定は最後の印・寄りが終わるまで。`time()` で長く出すと最後のコマが残る。止まっている区間は前のコマを使い回すので軽い（1600×900 で、下線が伸びるコマ 約 35ms・寄りのコマ 約 150ms。1 秒の寄りの生成に約 5 秒。2 回目からはキャッシュ）
+- 鍵は画像の**内容指紋**（パスは入らない）と、枠・切り出し・印と寄りの並び。文字の札・矢印・ぼかしは持たない（札は `text_image` を重ね、氏名などは撮るときにぼかす）
 
 ### 後戻り型の正規表現の照合を描く（regex_trace / regex_count / regex_view）
 
@@ -1575,6 +1615,66 @@ fig3.figure.arrival["L2_0"]      # 葉に届く秒（字幕・効果音の時刻
 - 鍵: ノード・辺・layout の引数・出来事・使う色（fg・accent・line・dim・panel）・寸法（文字があるときだけフォントの内容指紋）と版 `_FLOW_VER`。配置の結果は鍵に入らない。効かない値（n=1 の every）は入れない
 - 依存: 構築（`flow_graph()` の呼び出し）にも numpy・opencv-python・Pillow が要る（`pip install "scriptvedit[figures]"`）
 - 重さ（1920x1080・1コマの描画。ffmpeg の符号化は別）: 葉 3000＋パケット 200 の broadcast で平均 約 7ms・最大 約 25ms、LB＋サーバー6台で平均 約 3ms（cut の間も 12ms 以下）、35 個の送金で 約 3ms、上限の同時 2,000 個で平均 約 70ms（最初の1コマだけ辺の層を描くので 0.04〜0.9 秒）。1 秒ぶんの書き出しは ffmpeg 込みで LB の図が約 0.3 秒、葉 3000 の木が約 0.9 秒（ほかの重い処理と並行すると 2〜3 倍）。生成が終わると描画の作業領域（1080p で約 100MB）を手放す
+
+### 年表・時刻の帯・期間の横棒（timeline）
+
+数値か日時の軸に、印（点＋札）・期間（横棒）・括弧（2点の間の注記）を並べ、それぞれに現れる秒（`at=`）と現れ方（`enter=`）を持たせて透過動画 Object にする（framekit.build。`frames()` と同じ qtrle の .mov）。要素は3つだけで、数字が回る見出しなどは `odometer` を重ねて作る。
+
+```python
+from datetime import datetime
+
+# 1. 時刻の帯に印を打ち、2つの印の間に「約3時間半」の括弧が伸びる
+tl = timeline(18, 24, ticks=1, tick_format="{v}:00")
+tl.mark(19, "19:00\nニコニコ 停止", note="予防のため", at=0.5)
+tl.mark(22.5 + 5 / 60, "22:30過ぎ\n公開", at=1.5)
+tl.mark(23, "23:00 公開の予定", dot="ring", color="muted", text_color="muted", at=2.5)
+tl.bracket(19, 22.5 + 5 / 60, "約3時間半", at=3.5)      # 軸の下（目盛りの字の下）に └──┘
+tl.build().time() <= move(x=0.5, y=0.5, anchor="center")
+
+# 2. 「10月23日〜27日」の軸に、止まっていた期間の横棒が合図で左から伸びる
+d = timeline(datetime(2026, 10, 23), datetime(2026, 10, 28), ticks="day",
+             tick_place="between", grid=True)             # 日の名前は各日の中央
+d.span("2026-10-23 19:30", "2026-10-25 09:25", "ドコモ", row=0, note="25日 9:25", at=1.0)
+d.span("2026-10-23 20:10", "2026-10-26 18:00", "ソフトバンク", row=1, note="26日 18:00", at=2.0)
+d.span("2026-10-23 20:10", "2026-10-25 12:00", "緊急地震速報・津波警報も", row=1, side="below",
+       thickness=0.35, color="accent", text_color="accent", at=3.0)   # 太い棒の中の細い棒
+
+# 3. 2024年 →（途中を省く）→ 2026年の年表。札が順に立ち、赤い帯が伸び、上で数字が回る
+y = timeline("2024-03-01", "2026-11-15", arrow=True,
+             ticks=[("2024-06-01", "2024年"), ("2026-08-01", "2026年8月"), ("2026-10-01", "10月")],
+             breaks=[("2024-09-01", "2026-07-15")])
+y.span("2024-06-01", "2026-08-11", color="dim", at=0.3, dur=1.2)     # 灰色の帯は隙間を跨ぐ
+y.mark("2024-06-01", "2024年 兆し", side="below", card=True, enter="rise", at=0.2)
+y.mark("2026-08-11", "8月11日 報告", side="below", card=True, enter="rise", at=1.6)
+y.span("2026-08-11", "2026-10-21", color="accent", at=3.0, dur=1.5)
+y.mark("2026-10-21", "10月21日 修正版", side="below", card=True, color="accent", at=4.5)
+fig = y.build()
+fig.time()
+W, H = fig.figure.size
+cx = (y.x("2026-08-11") + y.x("2026-10-21")) / 2          # 帯の中央（キャンバスの px）
+weeks = odometer(0, 10, duration=1.5, size=56, color="#e0241b", border=3, anchor="center")
+weeks @ 3.0
+weeks.time(3.0) <= move(x=cx / W, y=(fig.figure.axis_y - 60) / H, anchor="center")
+
+# 4. 年表に札が年の順に右から滑り込む
+h = timeline(2000, 2027, ticks=5, tick_format="{v}年", arrow=True)
+for k, (year, title, note) in enumerate([(2005, "事件A", "説明"), (2012, "事件B", "説明"),
+                                         (2026, "PHP2Shell", "2026年10月")]):
+    h.mark(year, title, note=note, side="below", card=True, enter="slide", at=0.5 + 0.8 * k,
+           color="accent" if k == 2 else "line")
+```
+
+- `timeline(start, end, *, ticks=None, tick_format=None, tick_place='tick'|'between', breaks=(), arrow=False, grid=False, size=None, padding=40, axis_y=None, bar=40, label_size=44, tick_size=32, font=None, weight=None, colors=None)`。軸の値は数値か日時（`datetime`・`date`・ISO の文字列 `'2026-10-23 19:30'`。タイムゾーンの有無は start に揃える）
+- 目盛り: `ticks=None` は自動（8 個まで）。数値の軸は間隔、日時の軸は `'year'` / `'month'` / `'day'` / `'hour'` / `'minute'` か `('hour', 3)`。値のリスト・`(値, 字)` のリストも可（`[]` で目盛りなし）。`tick_format` は `str.format`（数値は `{v}`、日時は `{year}` `{month}` `{day}` `{hour}` `{minute}` `{second}` `{wd}`＝曜日）。`breaks=[(a, b)]` の区間は 40px の隙間と斜めの2本線になり、中の目盛りは描かない
+- 要素（`at` は Object の先頭からの秒。どれも self を返す）:
+  - `mark(v, label=None, *, note=None, at=0, dur=0.5, enter='fade'|'rise'|'slide'|'cut', side='above'|'below', color='fg', text_color='fg', dot='fill'|'ring'|'none', card=False)`: 点と、柱でつないだ札。note は muted の小さい字（軸から見て label の外側。板つきの札では下）
+  - `span(a, b, label=None, *, note=None, at=0, dur=0.8, enter='grow'|'fade'|'cut', row=None, side='above', color='line', text_color='fg', thickness=1.0)`: 期間の横棒。`row=None` は軸の上の帯（太さ 14px。札は帯の中央の上か下に、伸び終わりに出る）、`row=0, 1, …` は軸の下の段（太さ `bar`。label は棒の左端の上、note は棒の右に伸び終わりに出る）
+  - `bracket(a, b, label=None, *, at=0, dur=0.6, enter='grow'|'fade'|'cut', side='below', color='fg', text_color='fg')`: 2点の間の括弧と注記
+- 配置: 縦は上から「軸の上の札 → 軸 → 目盛りの字 → 段の横棒 → 軸の下の札」で、全体をキャンバスの縦の中央に置く（`axis_y` で固定もできる）。札は全部の要素込みで build のときに決め、後から出る札で前の札は動かない。札どうしが重なる・柱がほかの札を貫く所は外側の段へずらし、札の箱がほかの印の柱に掛かるならその印より外に置く（後から呼んだ印でも、先の札の下へ入る）。互いの柱に掛かる2枚は柱の側へ寄せる。同じ値の札のように避けられないときは警告する。目盛りの字を横切る柱は字の所で切れる。段の字どうしの重なり・字とほかの棒の重なり・note のはみ出し・縦に収まらない図は ValueError
+- 戻り値の `obj.figure`: `x(v)`（軸の値 → キャンバスの px。build の前でも `tl.x(v)` で引ける）・`axis_y`・`rows`（段ごとの棒の上端・下端）・`items`（呼んだ順の `{kind, at, end, box}`）・`ticks`・`size`・`duration`。`build(duration=None)` の既定は最後の要素が現れ終わる秒 + 1 秒
+- 文字は黒の縁取り 3px つきで `p.audit()` へ申告する（既定の 44px / 32px で warning は出ない）
+- 鍵: 軸・目盛り・要素の列・寸法・使う色・字の絵の署名と版 `_TIMELINE_VER`。配置の結果は鍵に入らない。効かない値（字の無い印の side、段の無いときの grid）は入れない
+- 重さ（1920x1080）: 動いているコマは全面の写しと変換で 1 コマ平均 約 20〜30ms（最大 約 50ms）、動いていないコマは前のコマを返す（0.01ms 未満）。時刻の帯（印 3 つと括弧）の 6 秒の図の生成は ffmpeg 込みで約 2 秒
 
 ### タイムライン構成
 
@@ -1739,7 +1839,7 @@ p.audit(strict=True)              # warningが1件でもあればRuntimeError（
 | `outside-duration` | warning | 表示区間が動画の総尺と交差せず、一度も映らない |
 | `font-missing-glyph` | warning | 使うフォント（指定が無ければ自動選択されたもの）に日本語のグリフが無く、豆腐（□）になる |
 | `audio-overlap-no-duck` | warning | BGM 役（`duck_under` か `loop` を持つ音声）と、それがダックしていない音声が1秒以上続けて重なる。組の件数と先頭3組を示す。ナレーション同士・ナレーションと効果音のような前景同士や BGM 役同士は数えず、BGM 役が1つも無いときは全ての組を調べる。`sfx()` は各発音区間で判定する |
-| `bgm-loop` | info | `loop()` を使っている（つなぎ目が気付かれやすい） |
+| `bgm-loop` | info | `crossfade` なしの `loop()` を使っている（つなぎ目が気付かれやすい。`loop(crossfade=…)` なら出さない） |
 | `bgm-too-short` | warning | `duck_under` を持つ BGM の実尺が表示区間より短く、途中で無音になる |
 | `no-normalize-audio` | info | 音声があるのに `normalize_audio()` が未設定 |
 | `quality-hint-ignored` | info | `~` 品質ヒントを付けたが、その op に軽い代替処理が無い（通常と同じ処理になる） |
@@ -2059,6 +2159,8 @@ ScriptVEdit/
 │   ├── fx_textmove.py   文字列の組み替え（text_transition / odometer）
 │   ├── fx_flow.py       点と線の図の上を流れるパケット（flow_graph / flow_tree）
 │   ├── fx_globe.py      点で描いた地球と世界地図（globe。正射影・正距円筒・弧・昼夜）
+│   ├── fx_annotate.py   画像の矩形に時刻つきの囲み・下線・暗くする・寄り（annotate。スクリーンショットの引用）
+│   ├── fx_timeline.py   年表・時刻の帯・期間の横棒（timeline。印・期間・括弧・省く区間）
 │   ├── text.py audio.py web.py      テキスト・karaoke / オーディオ（voice・narrate・sfx・beat_sync 等） / web Object・テンプレート
 │   ├── morph.py morph_cli.py  モーフィング・パーティクル生成 / その CLI 入口
 │   ├── morph_flight.py  粒子の輸送モーフ（fly_to の本体）

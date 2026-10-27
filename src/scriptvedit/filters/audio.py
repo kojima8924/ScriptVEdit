@@ -78,6 +78,64 @@ def _sidechain_hold_filter(threshold, attack, release, hold):
     return f"aeval='{expr}':c=same"
 
 
+# loop(crossfade=…) の周のつなぎを組むサンプリング周波数。つなぎの区間はサンプル数で
+# 書くので、素材の周波数を probe せずに済むよう先に揃える（混ぜる前の
+# _MIX_AUDIO_FORMAT と同じ 48kHz なので、後段で周波数がもう一度変わることは無い）。
+_LOOP_XF_RATE = 48000
+
+
+def _loop_xf_samples(seconds):
+    """秒を _LOOP_XF_RATE のサンプル数へ（四捨五入）"""
+    return int(_builtins.round(float(seconds) * _LOOP_XF_RATE))
+
+
+def _loop_crossfade_graph(in_label, tag, head, body_end, crossfade):
+    """loop(crossfade=…) の周をクロスフェードでつなぐ音声の部分グラフを組む。
+
+    使う区間 S = 素材[head, body_end)（長さ L）を、次の周が crossfade（X）秒前から
+    等パワー（qsin）で重なるように無限に繰り返す。周期は P = L − X。
+    出力は「最初の周の前半 A = S[0, P)」の後に「定常の1周期 Q」を aloop で
+    無限に続けたもの（後段の atrim / 表示尺のトリムで尺が決まる）:
+      Q = fadein(A) + apad(fadeout(S[P, L)))
+    Q の頭 X 秒は「前の周の終わり S[P, L) の fade out」と「次の周の頭 S[0, X) の
+    fade in」の和で、それ以降は S[X, P)。A の最後のサンプルは S[P−1]、Q の最初は
+    S[P]×1 + S[0]×0 なので、A→Q・Q→Q のどちらの境目でも波形が途切れない。
+    1周ずつ asplit / adelay で並べて amix する形より、aloop が抱えるのが1周期
+    （P サンプル）だけで済み、周の数が尺に依らない（グラフの形が素材・尺で変わらない）。
+
+    戻り値: (filter_complex の部品のリスト, 出力ラベル)。部品は ";" で並べる。
+    区間は全て _LOOP_XF_RATE のサンプル数で書く（秒の丸めで周がずれない）。
+    呼び出し側で L > 2X（P > X）を検証しておくこと。
+    """
+    h = _loop_xf_samples(head)
+    e = _loop_xf_samples(body_end)
+    x = _loop_xf_samples(crossfade)
+    p = e - h - x
+    if x <= 0 or p <= x:
+        raise ValueError(
+            f"loop(crossfade={crossfade}): 使う区間（{head}〜{body_end} 秒）が"
+            f"クロスフェードの2倍より短い")
+    t = f"lx{tag}"
+    span = (f"atrim=start_sample={h}:end_sample={e}" if h
+            else f"atrim=end_sample={e}")
+    out = f"[{t}]"
+    parts = [
+        # 48kHz へ揃えてから時刻をサンプル番号に振り直し、使う区間だけを取り出す
+        f"{in_label}aresample={_LOOP_XF_RATE},asetpts=N/SR/TB,{span},"
+        f"asetpts=N/SR/TB,asplit[{t}m][{t}e]",
+        # 周の終わり S[P, L): fade out して1周期の長さまで無音で延ばす
+        f"[{t}e]atrim=start_sample={p},asetpts=N/SR/TB,"
+        f"afade=t=out:ns={x}:curve=qsin,apad=whole_len={p}[{t}t]",
+        # 周の前半 A = S[0, P): 最初の周にはそのまま、定常の周には fade in して使う
+        f"[{t}m]atrim=end_sample={p},asplit[{t}f][{t}c]",
+        f"[{t}c]afade=t=in:ns={x}:curve=qsin[{t}h]",
+        f"[{t}h][{t}t]amix=inputs=2:normalize=0:duration=first,"
+        f"aloop=loop=-1:size={p}[{t}r]",
+        f"[{t}f][{t}r]concat=n=2:v=0:a=1,asetpts=N/SR/TB{out}",
+    ]
+    return parts, out
+
+
 def _atempo_chain_rates(rate):
     """atempoの有効範囲(0.5〜100)を超えるレートを複数段に分解する。
     範囲内はそのまま1段で返す（既存出力との互換維持）。"""
