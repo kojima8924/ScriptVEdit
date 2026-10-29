@@ -120,8 +120,12 @@ __all__ = [
     "slots",
     # 画像（スクリーンショット）の矩形に時刻つきの囲み・下線・暗くする・寄り
     "annotate",
+    # ロゴなどの画像に光の帯が一度走る（ライトスイープ）
+    "glint",
     # 年表・時刻の帯・期間の横棒
     "timeline",
+    # データのグラフ（線・階段・面・ローソク足・棒）
+    "chart",
     # 図形ビルダー
     "circle", "rect", "arrow", "label", "spotlight",
     # プラグイン機構
@@ -265,8 +269,14 @@ from scriptvedit.fx_slots import (  # noqa: F401
 from scriptvedit.fx_annotate import (  # noqa: F401
     annotate
 )
+from scriptvedit.fx_glint import (  # noqa: F401
+    glint
+)
 from scriptvedit.fx_timeline import (  # noqa: F401
     timeline
+)
+from scriptvedit.fx_chart import (  # noqa: F401
+    chart
 )
 from scriptvedit.plugins import (  # noqa: F401
     PluginError, effect_plugin, load_plugin, load_plugins, plugin_manifest, unregister_plugin

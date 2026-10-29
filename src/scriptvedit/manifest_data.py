@@ -53,7 +53,9 @@ _MANIFEST_CATEGORY_MEMBERS = {
     "ネットワーク図": ["flow_graph", "flow_tree"],
     "データ構造の図": ["slots"],
     "画像の注記": ["annotate"],
+    "ロゴの演出": ["glint"],
     "年表・時刻の帯": ["timeline"],
+    "データのグラフ": ["chart"],
 }
 _MANIFEST_CATEGORIES = {}
 for _cat, _members in _MANIFEST_CATEGORY_MEMBERS.items():
@@ -770,6 +772,54 @@ _MANIFEST_PARAM_META = {
     ("timeline", "weight"): {"type": "any", "default": None, "desc": "字の太さ（可変フォントの wght）"},
     ("timeline", "colors"): {"type": "any", "default": None,
                              "desc": "図の色の差し替え {名前: 色}（fg / accent / muted / line / dim / panel）"},
+    # データのグラフ（fx_chart.py）。choices は fx_chart の _MODES と同じ（tests/test_fx_chart.py が
+    # 突き合わせる）。系列と注記（series / rule / mark / span / zoom）の引数は notes
+    ("chart", "x"): {"type": "any", "default": None,
+                     "desc": "横の範囲 (左端, 右端)。None は系列・印・帯から自動。値は数値・日時（datetime・date・"
+                             "ISO の文字列）・時刻（'HH:MM'）のどれか（全部同じ種類）"},
+    ("chart", "y"): {"type": "any", "default": None,
+                     "desc": "縦の範囲 (下端, 上端)。None は値と基準線を含むきりのよい範囲（棒は 0 を含む）"},
+    ("chart", "mode"): {"type": "choice", "default": "main", "choices": ["main", "background"],
+                        "desc": "main=主役（軸・目盛り・札あり）/ background=背景（字なし・不透明度 0.35・"
+                                "太めの線をぼかし、毎秒 drift px で左へ流れる。字幕の後ろに置く）"},
+    ("chart", "x_ticks"): {"type": "any", "default": None,
+                           "desc": "横の目盛り。None は字が重ならない間隔を自動で選ぶ（8 個まで。棒の x は 16）。"
+                                   "数値の軸は間隔、日時・時刻の軸は単位 'minute' / 'hour' / 'day' / 'month' / "
+                                   "'year' か (単位, 数)。値のリスト・(値, 字) のリストも可（[] で無し）"},
+    ("chart", "y_ticks"): {"type": "any", "default": None,
+                           "desc": "縦の目盛り。None は自動（4〜7 本。字の札の高さの 1.6 倍より詰めない）。間隔か値のリスト"},
+    ("chart", "x_format"): {"type": "string", "default": None,
+                            "desc": "横の目盛りの字の書式（str.format）。数値は {v}、日時は {year} {month} {day} "
+                                    "{hour} {minute} {second} {wd}、時刻は {hour} {minute} {second}"},
+    ("chart", "y_format"): {"type": "string", "default": None,
+                            "desc": "縦の目盛りの字の書式（{v}。例 '{v}万円'・'{v:.0f}%'）。tag=True / values=True "
+                                    "の札にも使う。None は値のけたの数（3 けたごとにカンマ）"},
+    ("chart", "size"): {"type": "any", "default": None,
+                        "desc": "キャンバス (幅, 高さ) px。省略時は Project の解像度"},
+    ("chart", "padding"): {"type": "number", "default": 40, "min": 0, "desc": "余白 px"},
+    ("chart", "label_size"): {"type": "number", "default": 36, "min": 8, "max": 400,
+                              "desc": "印・帯の札と今の値の札（tag）、棒の値の字の大きさ px"},
+    ("chart", "tick_size"): {"type": "number", "default": 32, "min": 8, "max": 400,
+                             "desc": "目盛り・基準線の札・線の点の値の字の大きさ px"},
+    ("chart", "opacity"): {"type": "number", "default": None, "min": 0, "max": 1,
+                           "desc": "全体の不透明度（None は main で 1、background で 0.35）"},
+    ("chart", "drift"): {"type": "number", "default": None, "min": 0, "max": 2000, "unit": "px/秒",
+                         "desc": "背景が左へ流れる速さ（None は background で 14、main では使えない）"},
+    ("chart", "font"): {"type": "string", "default": None, "desc": "字のフォントファイルパス"},
+    ("chart", "weight"): {"type": "any", "default": None, "desc": "字の太さ（可変フォントの wght）"},
+    ("chart", "colors"): {"type": "any", "default": None,
+                          "desc": "図の色の差し替え {名前: 色}（fg / accent / muted / line / dim / panel）"},
+    # ロゴの光（fx_glint.py）。choices は fx_glint の _MATTES と同じ（tests/test_fx_glint.py が
+    # 突き合わせる）。sweep / enter / exit の引数は notes
+    ("glint", "matte"): {"type": "choice", "default": "auto",
+                         "choices": ["auto", "alpha", "plate", "key"],
+                         "desc": "地の扱い。auto=透明な画素があれば alpha・無ければ plate / alpha=画像のアルファのまま / "
+                                 "plate=不透過の画像を角丸の板として出し地の色には光を当てない / "
+                                 "key=縁につながる地の色を透明にする"},
+    ("glint", "size"): {"type": "any", "default": None,
+                        "desc": "画像を収める枠 (幅, 高さ) px（縦横比を保って中央へ。None は画像の大きさ）"},
+    ("glint", "radius"): {"type": "number", "default": 12, "min": 0, "max": 400,
+                          "desc": "matte='plate' の角の丸み px（画面の px）"},
     # transition は Object のみ受ける（実装は文字列パスを TypeError で拒否）
     ("transition", "obj_a"): {"type": "object", "required": True,
                               "desc": "前半の Object（Transform/Effect 未適用の素材）"},
@@ -1116,6 +1166,35 @@ _MANIFEST_NOTES = {
         "寸法・色・字の絵の署名・_TIMELINE_VER（配置の結果は入らない。dry_run は描かない）",
         "numpy・opencv-python・Pillow が要る（構築のときにも。目盛りの字の寸法を測る）",
     ],
+    "chart": [
+        "c = chart(...) → 系列と注記を足す → c.build() で動画 Object。表示は c.build().time()"
+        "（引数なしは図の尺ぶん）。at はこの図の先頭からの秒",
+        "c.series(data, kind='line'|'step'|'area'|'candle'|'bar', *, at=0, dur=2.0, color='fg', down=None, "
+        "width=None, tag=None, glow=False, values=None): data は [(x, y), …]（candle は "
+        "[(x, 始値, 高値, 安値, 終値), …]）。x は増える順。y が None の所は欠けた区間で線をつながない"
+        "（step は None の x まで前の値を保つ）。線は at から dur 秒で左から右へ x に比例して伸び、"
+        "candle / bar は線の先が通った所から 1 本ずつ立ち上がる",
+        "tag: 線の先に付いてくる今の値の札（'{v:.1f}万円' か True）。札は線の先の右、枠の右の余白まで。"
+        "基準線の札・値の札・ほかの札と重なるときは上下へずらし、ずらしは前後 0.2 秒でならす。"
+        "glow=True で線の先に控えめな光。values: 点ごと・棒ごとの値の札（線が通ると現れ、棒は数えあがる）",
+        "c.rule(y, label=None, *, at=0, dur=0.6, color='muted', dash=True): 水平の基準線（札は右端の上）",
+        "c.mark(x, label=None, *, at=None, dur=0.5, color='line', text_color='fg', dash=False): 出来事の印"
+        "（縦の線と図の上の札）。c.span(a, b, label=None, *, at=None, dur=0.5, color='line'): 区間の帯"
+        "（薄い塗りと斜線）。at=None は最初の系列の線の先が x（帯は a）に着く秒。札は x の順に低い段から"
+        "置き、重なる・線が下の段の札を貫く所は上の段へずらす",
+        "c.zoom(y, *, at, dur=1.0): 縦の範囲を (下端, 上端) へなめらかに変える（None で最初の範囲へ）。"
+        "目盛りは前の範囲のものが前半で消え、次の範囲のものが後半で現れる。zoom どうしの時間の重なりは ValueError",
+        "c.t_at(x) / obj.figure.t_at(x): 線の先が x に着く秒（字幕・効果音の時刻合わせ）。"
+        "obj.figure: x(v)・y(v)（キャンバスの px。y は最初の範囲）・plot（枠）・size・duration・mode",
+        "mode='background': 字を出さず、不透明度 0.35・太めの線を半分の解像度で描いてぼかし、毎秒 drift px で"
+        "左へ流れる（横に長く描いて見える窓をずらす）。流れるので毎コマ絵が変わり、qtrle の生成物は大きくなる"
+        "（drift=0 で止める）。系列の dur は図の尺に近くすると線の先が窓から出ない",
+        "日足の土日のような「時刻の無い所」も x に比例して間が空く。詰めたいときは x を通し番号にして "
+        "x_ticks=[(番号, '12/8'), …] で字を付ける",
+        "生成物は framekit.build → __cache__/artifacts/frames/<鍵>.mov。鍵は系列の値・注記・寸法・使う色・"
+        "書式・字の絵の署名・_CHART_VER（配置の結果は入らない。dry_run は描かない）",
+        "numpy・opencv-python・Pillow が要る（構築のときにも。目盛りの字の寸法を測る）",
+    ],
     "frames": [
         "draw のコードは鍵に入らない。同じ key なら draw を呼ばずに前回の動画を使うので、"
         "描き方や元データを変えたら key を変える（版番号や元データを key に入れる）",
@@ -1155,6 +1234,20 @@ _MANIFEST_NOTES = {
         "寄りでは印と暗くする穴が画像の座標についていく。矩形が見えている範囲の外へ出た印は描かない",
         "印が出そろって止まっている区間は前のコマを使い回すので、time() で長く出しても軽い",
         "文字の札・矢印・ぼかしは持たない（札は text_image を重ねる）",
+        "numpy・opencv-python・Pillow が要る（framekit と同じ。描画のときに遅延 import）",
+    ],
+    "glint": [
+        "戻り値は組み立て役。sweep(t, dur=0.9, angle=20, width=0.22, strength=0.45, color='white', "
+        "easing='ease_in_out_sine') / enter(t, dur=0.5, scale=0.96) / exit(t, dur=0.4, scale=1.0) を積んで "
+        "build() で透過動画 Object にする（obj.figure.box・obj.figure.matte が付く）",
+        "光は画像の不透明な画素の上だけに、スクリーンで掛ける（cp + L·光の色·(a − cp)）。透明な画素は透明のまま、"
+        "白い画素は白のまま、255 を超えない（白の多いロゴでは光がほとんど見えない）",
+        "帯は画像の中身の外から外まで dur 秒で左から右へ通る。angle は傾き（度。正で /、負で \\）、width は"
+        "帯の幅（道のりに対する割合）。何回も通すときは sweep を続けて積む",
+        "不透過の画像の既定は plate（角を丸めた板。地の色の画素は光らない）。白地の黒い字を暗いカードへ"
+        "抜くと読めなくなるため。明るいカードに直に置くなら matte='key'",
+        "enter / exit の拡大縮小は framekit.warp_patch（端数位置・縮小は INTER_AREA）。等倍の間は"
+        "同じ画素を使い回し、光も出入りも無いコマは前のコマを返す",
         "numpy・opencv-python・Pillow が要る（framekit と同じ。描画のときに遅延 import）",
     ],
     "text_image": [
@@ -1493,6 +1586,10 @@ _MANIFEST_EXAMPLES = {
                  "a.dim((640, 520, 812, 560), t=2.0)          # まわりを暗く\n"
                  "a.zoom((400, 300, 1300, 806), t=3.0)        # 寄る（印もついていく）\n"
                  "a.build().time(6) <= move(x=0.5, y=0.5, anchor='center')"),
+    "glint": ("g = glint('logos/acme.png', size=(640, 240))   # 枠に収めて中央。白地の JPEG は角丸の板\n"
+              "g.enter(t=0.0)                                   # 0.5 秒で現れる（96% から等倍へ）\n"
+              "g.sweep(t=0.7)                                   # 0.7 秒から光が一度走る\n"
+              "g.build().time(4) <= move(x=0.5, y=0.4, anchor='center')"),
     "timeline": ("tl = timeline(18, 24, ticks=1, tick_format='{v}:00')       # 時刻の帯\n"
                  "tl.mark(19, '19:00\\nニコニコ 停止', note='予防のため', at=0.5)\n"
                  "tl.mark(22.5, '22:30過ぎ\\n公開', at=1.5)\n"
@@ -1500,6 +1597,14 @@ _MANIFEST_EXAMPLES = {
                  "tl.build().time() <= move(x=0.5, y=0.5, anchor='center')\n"
                  "d = timeline('2026-10-23', '2026-10-28', ticks='day', tick_place='between', grid=True)\n"
                  "d.span('2026-10-23 19:30', '2026-10-25 09:25', 'ドコモ', row=0, note='25日 9:25', at=1)"),
+    "chart": ("c = chart(y_format='{v}万')                       # 1日の値動き（x は 'HH:MM'）\n"
+              "c.series(rows, kind='step', at=0.5, dur=6, tag='{v:.1f}万円', glow=True)\n"
+              "c.rule(61, '公開価格 61万円')                      # 水平の基準線（破線）\n"
+              "c.mark('9:27', '9:27 誤発注', color='accent', text_color='accent')   # 線の先が着くと出る\n"
+              "c.span('9:31', '9:45', '売買停止')\n"
+              "c.zoom((55, 66), at=3.0)                          # 縦に寄る\n"
+              "c.build().time() <= move(x=0.5, y=0.5, anchor='center')\n"
+              "bg = chart(mode='background'); bg.series(rows, dur=20)   # 字幕の後ろで薄く流れる"),
     "globe": ("g = globe(projection='plate', size=(1400, 700))   # 陸は同梱の地球・中心は自動\n"
               "g.points(sites)                                # 出典を書くか「模式図」と明記する\n"
               "g.arc((37.8, -122.4), (35.7, 139.7), t=1.0)    # 太平洋を渡る弧も1本につながる\n"

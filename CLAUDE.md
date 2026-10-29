@@ -58,7 +58,7 @@ plugin / project_method / transform。
 
 - `usage` … 概念・main スクリプト雛形・レイヤー雛形・DSL・Expr・**プラグイン雛形**・CLI
 - `constraints` … 守らないと壊れる制約（severity: error/warning/info）
-- `effects`(42) / `transforms`(8) / `audio_effects`(7) / `factories`(46) /
+- `effects`(42) / `transforms`(8) / `audio_effects`(7) / `factories`(48) /
   `objects`(19) / `object_methods`(9) / `project_methods`(14) / `expr`(102) / `plugins`(3)
   （件数は変動する。正は `describe` の実測で、整合は tests/test_issue17_docs.py が検証する）
 
@@ -848,8 +848,8 @@ ffp.json（撤廃済み）の罠は「古い永続値が実測より優先され
 
 ### 図解アニメ（`framekit.py` とその上の図）
 
-`regex_view` / `slots` / `text_transition` / `odometer` / `flow_graph` / `flow_tree` / `globe` / `annotate` /
-`timeline` は、
+`regex_view` / `slots` / `text_transition` / `odometer` / `flow_graph` / `flow_tree` / `globe` / `annotate` / `glint` /
+`timeline` / `chart` は、
 Python で描いたコマを `framekit.build`（中身は `frames()`）へ渡して透過の .mov を1本作り、
 Object を1個返す。鍵・描画・時刻・文字・金型テストの規則は `framekit.py` の1か所に置く
 （内部モジュール。`from scriptvedit import *` には入らない）。
@@ -908,7 +908,9 @@ Object を1個返す。鍵・描画・時刻・文字・金型テストの規則
 | flow_graph / flow_tree | `fx_flow.py` | `_FLOW_VER` | `tests/golden/flow/` |
 | globe | `fx_globe.py` | `_GLOBE_VER` | `tests/golden/globe/` |
 | annotate（画像の矩形に囲み・下線・暗くする・寄り） | `fx_annotate.py` | `_ANNOTATE_VER` | `tests/golden/annotate/` |
+| glint（ロゴなどの画像に光の帯が一度走る） | `fx_glint.py` | `_GLINT_VER` | `tests/golden/glint/` |
 | timeline | `fx_timeline.py` | `_TIMELINE_VER` | `tests/golden/timeline/` |
+| chart（データのグラフ: 線・階段・面・ローソク足・棒） | `fx_chart.py` | `_CHART_VER` | `tests/golden/chart/` |
 | fly_to（終端フレーム Effect。framekit は使わない。§5「bakeable / live」） | `morph_flight.py` | `cache.py` の `_FLIGHT_VER` | `tests/golden/flyto/` |
 
 `regex_trace` / `regex_count` / `regex_view` の規則:
@@ -998,6 +1000,29 @@ Object を1個返す。鍵・描画・時刻・文字・金型テストの規則
 - 鍵: 画像の内容指紋（`files=`）・枠・余白・切り出し・frame（描くときだけ太さも）・印（積んだ順）・
   dim と zoom（時刻順に並べ替える。積む順は鍵に入らない）。描き方を変えたら `_ANNOTATE_VER` を上げる。
 
+`glint`（`fx_glint.py`。企業ロゴなどのライトスイープ）の規則:
+
+- API は小さく保つ: `sweep` / `enter` / `exit` と `build` だけ（annotate と同じ組み立て役の形）。
+  何回も光らせるのは sweep を積む。カードの板・影・札は持たない（別の Object を重ねる）。
+- Effect にせず framekit の上のファクトリにした: 画素ごとの帯を ffmpeg で描くと geq になり遅い（§4.13）。
+  「地の色の画素には当てない」「縁の地の色を抜く」は画像の中身を読んで決める処理でもある。
+- **光はスクリーンで掛ける**（事前乗算で `cp + L·光の色·(a − cp)`）。加算にしない: 透明な画素
+  （a=0）は透明のまま、白は白のまま、255 を超えない（白の多いロゴでは光がほとんど見えないのは仕様）。
+  受け皿 `q = 重み·(a − cp)` は画素の値に線形なので、絵と同じ warp で写してから掛けても縁で
+  食い違わない（cv2.resize の INTER_AREA は 4 チャンネルまでなので、絵と q を別々に写す）。
+- 地の扱い（`matte`）: 'auto' は透明な画素（α < 128）が 0.5% 以上なら 'alpha'、無ければ 'plate'。
+  **不透過の画像の既定を 'plate'（角丸の板）にしたのは、白地の黒い字を暗いカードへ抜くと
+  読めなくなるため**（見本で確認）。plate の光の重みは「縁の色の中央値（地の色）からの差」の
+  smoothstep。'key' の縁は「地の色といちばん近い内側の色の混ざり」へ射影して抜く（color-to-alpha
+  だけだと縁の色が鮮やかすぎ、暗いカードで縁が暗く縁取られた）。鍵には解決した matte を入れる
+  （'auto' と同じ値の明示は同じ鍵）。radius は plate のときだけ鍵に入る。
+- 帯の道のりは「光を当てる画素の外接矩形」の角の射影（透明な余白を通る時間を作らない）。帯の外は
+  0 なので通り始めと通り終わりに光がぱっと出ない。光は帯が触れる列だけ計算する（1080p で約 15ms）。
+- 拡大縮小（enter / exit の scale）は `fk.warp_patch`。一番縮めた倍率が 1 未満なら 2^-n へ面積平均で
+  先に縮めて持つ。等倍の絵は1回だけ写し、光も出入りも無いコマは前のコマを返す。
+- sweep を積む順は鍵に入らない（光どうしもスクリーンで重ねるので順に依らない）。描き方を変えたら
+  `_GLINT_VER` を上げて `tests/golden/glint/` を作り直す。
+
 `timeline`（`fx_timeline.py`。年表・時刻の帯・期間の横棒）の規則:
 
 - API は小さく保つ（ユーザーの方針）。要素は `mark` / `span` / `bracket` の3つだけで、数字が回る
@@ -1010,6 +1035,28 @@ Object を1個返す。鍵・描画・時刻・文字・金型テストの規則
   呼んだ印の札が先の札の下へ入れず、柱が札を貫いた。時刻の帯の 23:00 の札）。互いの柱に掛かる
   2枚は柱の側へ寄せてほどく。同じ値の札のように避けられないときだけ警告する。
 - 目盛りの字を横切る柱は切る（`_stem_pieces`）。動いていないコマは前のコマを返す（`_Renderer.frame`）。
+
+`chart`（`fx_chart.py`。データのグラフ: 線・階段・面・ローソク足・棒）の規則:
+
+- API は小さく保つ: 要素は `series` / `rule` / `mark` / `span` / `zoom` の5つ（mark / span は timeline と
+  同じ考え方。数字が回る見出しなどは odometer を `obj.figure.x` / `y` の位置へ重ねる）。
+- 線の先は x に比例して進む（`t_at(x)`）。mark / span の `at=None` は「最初の系列の線の先が着く秒」で、
+  build のときに決める（鍵には None のまま入る。系列の値と at・dur が鍵にあるので同一出力なら同一鍵）。
+- **線は塊（16 点）ごとの被覆率の層を最大値で足す**（`_line_draw` / `_poly_cov`）。描き終えた塊は層に
+  残し、毎コマは伸びている塊だけを描き足す。塊の切り方は描いた履歴に依らないので、順に描いたコマと
+  そのコマだけを描いたコマが画素まで同じ（`test_sequential_and_fresh_frames_match…` が見張る）。
+  面の塗りは列ごとの縦の被覆率（polygon は頂点が多いと遅い）。
+- uint8 への変換は「格子・軸・目盛りと出終わった帯・基準線の層」の変換を使い回し、上に描いた範囲
+  （細い線は触れた画素だけ）を変換して上書きする（`_to_u8`。to_rgba8 は画素ごとの変換なので
+  全体を変換したのと同じ画素）。上に描くものを足すときは `_d`（範囲を控える）を忘れないこと。
+  控え忘れた所は前の層の画素のまま残る。
+- 今の値の札（tag）の上下のずらしは、全コマぶんを先に決めて前後 0.2 秒でならす（`_tag_track`。
+  コマごとに選び直すとぱたぱた入れ替わる）。ならす値に枠への切り詰めを入れない（寄りで線の先が枠の
+  外へ出たとき、前のコマの札まで引きずられた）。
+- 背景の型（mode='background'）は字を出さず、半分の解像度で描いてぼかし、横に長いキャンバスを
+  毎秒 drift px で整数の画素ずつずらして切り出す。流れる間は毎コマ絵が変わるので生成物は大きい。
+- 配置の手順（目盛りの間引き・札の段・札のずらし）も鍵に入らないので、変えたら `_CHART_VER` を上げて
+  `tests/golden/chart/` を作り直す。
 
 ### 検査系（viz.py / p.inspect()）は本体の規則を再実装しない
 

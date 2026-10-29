@@ -15,7 +15,7 @@
 - **AI が読める機能マニフェスト** — `python -m scriptvedit describe` で全機能のシグネチャ・引数レンジを JSON / Markdown 出力（→「ケイパビリティ・マニフェスト」節）
 - **図解アニメ** — 正規表現の照合の後戻り（`regex_view`）・番号つきの箱の列（`slots`）・文字列の組み替え（`text_transition` / `odometer`）・
   点と線の上を流れるパケット（`flow_graph` / `flow_tree`）・点で描いた地球（`globe`）・スクリーンショットの矩形に
-  時刻つきで足す囲み・下線・暗くする・寄り（`annotate`）・年表と時刻の帯（`timeline`）を、コマごとに Python で描いた透過動画の
+  時刻つきで足す囲み・下線・暗くする・寄り（`annotate`）・ロゴに光の帯が一度走る演出（`glint`）・年表と時刻の帯（`timeline`）・データのグラフ（`chart`。線・階段・面・ローソク足・棒）を、コマごとに Python で描いた透過動画の
   Object として1行で置ける。共通部品 `scriptvedit.framekit` で自作の図も描ける（→「図を描く部品（framekit）」節）
 
 素材は画像・動画・音声のほか、HTML（Playwright 経由）・LaTeX 数式（KaTeX 同梱・オフライン）・TTS 音声も
@@ -38,7 +38,7 @@ FFmpeg 8 の機能を使うため、初回実行時にメジャーバージョ�
 - numpy + scipy（`beat_sync` 使用時。scipy はビート検出に必須）
 - numpy + PIL（`scriptvedit.testkit` の SSIM検証。scipy は任意で高速化）
 - numpy + opencv-python + Pillow（図解アニメ `regex_view` / `slots` / `text_transition` / `odometer` /
-  `flow_graph` / `flow_tree` / `globe` / `annotate` / `timeline` と、その部品 `scriptvedit.framekit`。`pip install "scriptvedit[figures]"`）
+  `flow_graph` / `flow_tree` / `globe` / `annotate` / `glint` / `timeline` / `chart` と、その部品 `scriptvedit.framekit`。`pip install "scriptvedit[figures]"`）
 - numpy + scipy + opencv-python + Pillow + tqdm（`morph_to` / `explode_to` / `assemble_from` / `fly_to`。`pip install "scriptvedit[morph]"`）
 - Pillow（`storyboard` 使用時）
 - TTS（`voice` / `narrate` 使用時。`scriptvedit.tts` 経由。いずれか1つ）
@@ -1486,6 +1486,28 @@ a.build().time(6) <= move(x=0.5, y=0.5, anchor="center")
 - `build()` の尺の既定は最後の印・寄りが終わるまで。`time()` で長く出すと最後のコマが残る。止まっている区間は前のコマを使い回すので軽い（1600×900 で、下線が伸びるコマ 約 35ms・寄りのコマ 約 150ms。1 秒の寄りの生成に約 5 秒。2 回目からはキャッシュ）
 - 鍵は画像の**内容指紋**（パスは入らない）と、枠・切り出し・印と寄りの並び。文字の札・矢印・ぼかしは持たない（札は `text_image` を重ね、氏名などは撮るときにぼかす）
 
+### ロゴに光の帯が一度走る（glint）
+
+企業のロゴなどを基本情報のカードと一緒に出すときの、控えめなライトスイープ。画像の不透明な画素の上だけを、
+斜めの細い光の帯が一度通り過ぎる。出入り（フェードと少しの拡大）も付けられる（framekit.build。`frames()` と同じ qtrle の .mov）。
+
+```python
+g = glint("logos/acme.png", size=(640, 240))   # 枠に収めて中央（拡大もする）。白地の JPEG は角丸の板
+g.enter(t=0.0)                                  # 0.5 秒で現れる（96% から等倍へ）
+g.sweep(t=0.7)                                  # 0.7 秒から光が一度走る
+g.sweep(t=3.0, angle=-20, strength=0.3)         # もう一度（何回でも積める）
+g.exit(4.2)                                     # 0.4 秒で消える
+g.build().time(5) <= move(x=0.5, y=0.4, anchor="center")
+```
+
+- `glint(image, size=None, matte="auto", radius=12)`: `size` は画像を収める枠（縦横比を保って中央へ。省くと画像の大きさのまま）で、キャンバスもこの大きさ。`obj.figure.box` が等倍のときに画像が来る範囲
+- 光: `sweep(t, dur=0.9, angle=20, width=0.22, strength=0.45, color="white", easing="ease_in_out_sine")`。帯は画像の中身の外から外まで `dur` 秒で左から右へ通る。`angle` は傾き（度。正で「/」、負で「\」）、`width` は帯の幅（道のりに対する割合）、`strength` は帯の中心の明るさ
+- **光はスクリーンで掛ける**（加算ではない）: 透明な画素は透明のまま、白い画素は白のまま、255 を超えない。暗い色ほどよく明るくなり、ロゴの色と形は読めるまま。白の多いロゴでは光はほとんど見えない
+- 地の扱い `matte`: `"alpha"`（画像のアルファのまま）・`"plate"`（不透過の画像を角を丸めた板として出し、地の色の画素には光を当てない）・`"key"`（縁につながる地の色を透明にする。地の色が一様でない画像は ValueError）。既定の `"auto"` は透明な画素があれば alpha、無ければ plate。**白地のロゴを暗いカードへ抜くと黒い字が読めなくなるので、不透過の画像の既定は plate**。明るいカードに直に置くなら `matte="key"`
+- 出入り: `enter(t, dur=0.5, scale=0.96, easing="ease_out_cubic")`（t より前は透明）・`exit(t, dur=0.4, scale=1.0, easing="ease_in_cubic")`（後は透明）。拡大縮小は端数位置で、縮小は面積平均（ちらつかない）
+- 重さ（1コマ。1920×1080 の枠に収めた 3600×1040 の画像）: 光の通るコマ 約 15ms・出入りのコマ 約 17〜27ms・止まっているコマは前のコマの使い回しでほぼ 0。640×185 の枠なら光の通るコマで 約 2〜4ms
+- 鍵は画像の**内容指紋**と、枠・地の扱い（`"auto"` は解決した値）・光と出入りの並び（sweep を積む順は入らない）
+
 ### 後戻り型の正規表現の照合を描く（regex_trace / regex_count / regex_view）
 
 正規表現の後戻り（ReDoS）を、**実際に記録した手順から**描く。手で数えたコマ列は要らない。
@@ -1675,6 +1697,64 @@ for k, (year, title, note) in enumerate([(2005, "事件A", "説明"), (2012, "�
 - 文字は黒の縁取り 3px つきで `p.audit()` へ申告する（既定の 44px / 32px で warning は出ない）
 - 鍵: 軸・目盛り・要素の列・寸法・使う色・字の絵の署名と版 `_TIMELINE_VER`。配置の結果は鍵に入らない。効かない値（字の無い印の side、段の無いときの grid）は入れない
 - 重さ（1920x1080）: 動いているコマは全面の写しと変換で 1 コマ平均 約 20〜30ms（最大 約 50ms）、動いていないコマは前のコマを返す（0.01ms 未満）。時刻の帯（印 3 つと括弧）の 6 秒の図の生成は ffmpeg 込みで約 2 秒
+
+### データのグラフ（chart）
+
+値の列を時刻に合わせて左から描き、線の先に今の値の札を付け、基準線・出来事の印・区間の帯・縦の寄りを秒で書いて透過動画 Object にする（framekit.build。`frames()` と同じ qtrle の .mov）。種類は線（`line`）・階段（`step`。約定のように値が次の点で飛ぶ）・面（`area`）・ローソク足（`candle`）・棒（`bar`）。見え方は主役（`mode="main"`。軸・目盛り・札あり）と背景（`mode="background"`。字幕の後ろで薄く流れる）の2つ。
+
+```python
+from datetime import date
+
+# 1. 1日の値動き（x は 'HH:MM'。None の所は線をつながない）。以下の値は形だけの仮のもの
+rows = [("9:00", 67.2), ("9:26", 64.2), ("9:27", 61.0), ("9:28", 57.2), ("9:30", 57.2),
+        ("9:31", None),                                  # 売買停止（9:45 まで線を切る）
+        ("9:45", 57.2), ("11:00", 68.3), ("11:01", None),  # 昼休み
+        ("12:30", 69.0), ("15:00", 76.4)]
+c = chart(y_format="{v}万")
+c.series(rows, kind="step", at=0.5, dur=6, tag="{v:.1f}万円", glow=True)  # 線の先に今の値の札
+c.rule(61, "公開価格 61万円")                              # 水平の基準線（破線。札は右端の上）
+c.rule(57.2, "ストップ安 57.2万円", color="accent")
+c.rule(77.2, "ストップ高 77.2万円")
+c.mark("9:27", "9:27 誤発注", color="accent", text_color="accent")   # 線の先が 9:27 に着くと出る
+c.span("9:31", "9:45", "売買停止")                         # 区間の帯（薄い塗りと斜線）
+c.zoom((55, 70), at=3.0)                                   # 縦に寄る（なめらかに）
+c.zoom(None, at=5.5)                                       # 元の範囲へ戻す
+fig = c.build()
+fig.time() <= move(x=0.5, y=0.5, anchor="center")
+sfx("効果音.mp3", at=c.t_at("9:27"))                       # 線の先が 9:27 に着く秒
+
+# 2. 同じ値動きを字幕の後ろで薄く流す（字なし・ぼかし・毎秒 14px で左へ）
+bg = chart(mode="background")
+bg.series(rows, kind="step", dur=20)
+bg.build(duration=20).time()
+
+# 3. 日足のローソク足と、ある日付の印（x は date）
+d = chart(y_format="{v}万")
+d.series(candles, kind="candle", dur=3, tag="{v:.1f}万円")   # [(date, 始値, 高値, 安値, 終値), …]
+d.mark(date(2005, 12, 8), "12/8", color="accent", text_color="accent", dash=True)
+
+# 4. 件数の推移（点の少ない線は点と値の札）と、年ごとの棒（値が数えあがる）
+n = chart(x_format="{v}年")
+n.series([(2019, 113), (2020, 160), (2021, 205), (2022, 248), (2023, 321)], values="{v}件")
+b = chart(x_format="{v}年")
+b.series([(2021, 113), (2022, 160), (2023, 321)], kind="bar", values="{v:,}件")
+```
+
+- `chart(*, x=None, y=None, mode='main'|'background', x_ticks=None, y_ticks=None, x_format=None, y_format=None, size=None, padding=40, label_size=36, tick_size=32, opacity=None, drift=None, font=None, weight=None, colors=None)`。x の値は数値・日時（`datetime`・`date`・ISO の文字列）・時刻（`'HH:MM'`）のどれか（全部同じ種類。タイムゾーンの有無も揃える）。範囲は省くと値と基準線を含むきりのよい範囲（棒は 0 を含む）
+- 要素（`at` は Object の先頭からの秒。どれも self を返す）:
+  - `series(data, kind='line', *, at=0, dur=2.0, color='fg', down=None, width=None, tag=None, glow=False, values=None)`: data は `[(x, y), …]`（candle は `[(x, 始値, 高値, 安値, 終値), …]`）。線は `at` から `dur` 秒で x に比例して伸び、candle / bar は線の先が通った所から 1 本ずつ立ち上がる。`down` は陰線・負の棒の色。`tag` は今の値の札（`'{v:.1f}万円'` か True）、`values` は点ごと・棒ごとの値の札（点の少ない線と棒向け。線の無い側に置き、重なる札は描かない）。点が 24 個以下の線は点を描き、左右を少し空ける
+  - `rule(y, label=None, *, at=0, dur=0.6, color='muted', dash=True)`: 水平の基準線
+  - `mark(x, label=None, *, at=None, dur=0.5, color='line', text_color='fg', dash=False)`: 出来事の印（縦の線と、枠の上の札）
+  - `span(a, b, label=None, *, at=None, dur=0.5, color='line')`: 区間の帯
+  - `zoom(y, *, at, dur=1.0)`: 縦の範囲を `(下端, 上端)` へなめらかに変える（`None` で最初の範囲へ）。目盛りは前の範囲のものが前半で消え、次の範囲のものが後半で現れる
+  - mark / span の `at=None` は、最初の系列の線の先がそこへ着く秒（`c.t_at(x)` で同じ秒を引ける）
+- 配置: 縦の目盛りの字は枠の左、横の目盛りの字は枠の下（字が重ならない間隔を自動で選ぶ）。印と帯の札は枠の上の段に x の順に低い段から置き、重なる所・印の線が下の段の札を貫く所は上の段へずらす。今の値の札は線の先の右に付いてきて、枠の右に札の幅の余白を取る（最後の値の札が枠の外に収まる）。基準線の札・値の札・ほかの系列の札と重なるときは上下へずらし、ずらしは前後 0.2 秒でならす（離れたら細い線でつなぐ）
+- 見え方: 黒い背景に白〜灰、強調は accent の1色（`colors=` で差し替え）。線 4px（面は 3px と上から下へ薄れる塗り）、格子は横だけ、軸は下だけ。字は黒の縁取り 3px、今の値の札は下地つき。背景の型は字を出さず、不透明度 0.35・太めの線を半分の解像度で描いてぼかし、横に長く描いた図を毎秒 `drift` px（既定 14）で左へずらして切り出す。流れる間は毎コマ絵が変わるので生成物は大きい（`drift=0` で止める）。系列の `dur` を図の尺に近くすると線の先が窓から出ない
+- 日足の土日のような「値の無い時刻」も x に比例して間が空く。詰めたいときは x を通し番号にして `x_ticks=[(番号, "12/8"), …]` で字を付ける
+- 戻り値の `obj.figure`: `x(v)` / `y(v)`（値 → キャンバスの px。y は最初の範囲）・`t_at(x)`・`plot`（枠の `(x0, y0, x1, y1)`）・`size`・`duration`・`mode`。`build(duration=None)` の既定は最後の要素が描き終わる秒 + 1 秒
+- 文字は `p.audit()` へ申告する（既定の 36px / 32px で warning は出ない）
+- 鍵: 系列の値・注記・寸法・使う色・書式・字の絵の署名と版 `_CHART_VER`。配置の結果は鍵に入らない。効かない値（背景の型の書式・字の大きさ、使わない色）は入れない
+- 重さ（1920x1080・1 コマの描画）: 線が伸びているコマで平均 約 30〜40ms（格子・目盛りと出終わった基準線の層を使い回し、上に描いた所だけを変換する）、寄りの途中は 約 80〜100ms、動いていないコマは前のコマを返す
 
 ### タイムライン構成
 
@@ -2160,7 +2240,9 @@ ScriptVEdit/
 │   ├── fx_flow.py       点と線の図の上を流れるパケット（flow_graph / flow_tree）
 │   ├── fx_globe.py      点で描いた地球と世界地図（globe。正射影・正距円筒・弧・昼夜）
 │   ├── fx_annotate.py   画像の矩形に時刻つきの囲み・下線・暗くする・寄り（annotate。スクリーンショットの引用）
+│   ├── fx_glint.py      ロゴなどの画像に光の帯が一度走る（glint。ライトスイープ・角丸の板・出入り）
 │   ├── fx_timeline.py   年表・時刻の帯・期間の横棒（timeline。印・期間・括弧・省く区間）
+│   ├── fx_chart.py      データのグラフ（chart。線・階段・面・ローソク足・棒、基準線・出来事の印・区間の帯・寄り）
 │   ├── text.py audio.py web.py      テキスト・karaoke / オーディオ（voice・narrate・sfx・beat_sync 等） / web Object・テンプレート
 │   ├── morph.py morph_cli.py  モーフィング・パーティクル生成 / その CLI 入口
 │   ├── morph_flight.py  粒子の輸送モーフ（fly_to の本体）
