@@ -4,6 +4,10 @@
 - 一体レンダとの一致（画素・コマ数・音声の PCM・チャプター。ffmpeg があるときだけ）
 - dry_run の形（main = mux / cache = 音声レグ + 測定）と cold / warm の一致
 - 作業ディレクトリの名前が出力パスに依らないこと
+- 区間の取り込み: 音声つきの区間で映像が遅れない（-copyts）、格子に乗らない尺の区間を
+  つないでも各コマの pts が一体レンダと同じ（concat リストの duration）
+- 音声レグのキャッシュ（__cache__/artifacts/audio_leg/）: 2回目は音声も測定もレンダしない・
+  0 バイトの残骸は使わない・素材で鍵が変わる・dry_run は cold / warm で同じ
 - render_key: cold / warm の一致・素材の1バイトで変わる・出力パスで変わらない・
   無関係な設定で変わらない
 エラーケース（コマ数・寸法の不一致、映像 Object、非 h264、区間が無い）は
@@ -202,7 +206,9 @@ def test_segments_dry_run_shape(tmp_path):
     res = p.render(str(tmp_path / "out.mp4"), dry_run=True, video_segments=segs)
     assert set(res) == {"main", "cache"}
     main = res["main"]
-    # main は concat demuxer の -c copy と音声・チャプターの mux
+    # main は concat demuxer の -c copy と音声・チャプターの mux。-copyts は区間の音声
+    # （AAC の priming）に入力の開始時刻を引きずられないため
+    assert "-copyts" in main and main.index("-copyts") < main.index("-i")
     assert main[main.index("-f") + 1] == "concat"
     assert main[main.index("-c") + 1] == "copy"
     assert "-map_chapters" in main
@@ -210,8 +216,8 @@ def test_segments_dry_run_shape(tmp_path):
     list_path = main[main.index("-i") + 1]
     assert os.path.basename(list_path) == "concat.txt"
     assert os.path.dirname(list_path).startswith(_SEGMENTS_WORK_DIR)
-    # cache は音声レグ（全編1本・-vn）とラウドネス測定
-    audio_paths = [k for k in res["cache"] if k.endswith("audio.m4a")]
+    # cache は音声レグ（全編1本・-vn。__cache__ の内容鍵のパス）とラウドネス測定
+    audio_paths = [k for k in res["cache"] if k.endswith(".m4a")]
     assert len(audio_paths) == 1
     ac = res["cache"][audio_paths[0]]
     assert "-vn" in ac and ac[ac.index("-c:a") + 1] == "aac"
@@ -386,3 +392,270 @@ def test_render_key_same_before_and_after_real_render(tmp_path):
     assert cmds["cache"], "cache 側のコマンドが無い（チェックポイントが計画されていない）"
     assert all(os.path.exists(k) for k in cmds["cache"]), "実レンダ後も生成物が無い"
     assert build().render_key(out) == cold
+
+
+# --- 区間の取り込み: 音声トラックの詰め物・編集リストの丸め ---
+
+def _make_testsrc(tmp_path, name, n_frames, *, size, fps):
+    """テスト用の映像素材（testsrc2 の h264。音声なし）"""
+    path = str(tmp_path / name)
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", f"testsrc2=s={size}:r={fps}", "-frames:v", str(n_frames),
+         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", path],
+        check=True, timeout=120)
+    return path
+
+
+def _video_pts(path):
+    """映像のパケットの pts（秒。表示順に並べる）"""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+        capture_output=True, text=True, timeout=120, check=True)
+    return sorted(float(x) for x in out.stdout.split())
+
+
+def _video_start(path):
+    s = _probe_json(path, "-select_streams", "v:0",
+                    "-show_entries", "stream=start_time")["streams"][0]
+    return float(s["start_time"])
+
+
+def _cut_frames(src, dst, k0, k1, fps, *, audio, preset="veryfast"):
+    """一体レンダの出力からコマ [k0, k1) を切り出す（再エンコード）。
+
+    audio=True なら同じ範囲の音声も AAC で入れる（区間の mp4 が音声つきの場合）。
+    preset を既定の medium にすると、640x360 以上で mp4 の編集リストの尺がミリ秒へ
+    切り捨てられる（FFmpeg 8.0 実測: 37 コマ・30fps = 1.233333 秒 → 1.233008 秒）。
+    """
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", src,
+           "-vf", f"trim=start_frame={k0}:end_frame={k1},setpts=PTS-STARTPTS",
+           "-frames:v", str(k1 - k0),
+           "-c:v", "libx264", "-preset", preset, "-crf", "12", "-pix_fmt", "yuv420p"]
+    if audio:
+        cmd += ["-af", f"atrim=start={k0 / fps}:end={k1 / fps},asetpts=PTS-STARTPTS",
+                "-c:a", "aac", "-b:a", "160k"]
+    else:
+        cmd += ["-an"]
+    cmd.append(dst)
+    subprocess.run(cmd, check=True, timeout=120)
+    return dst
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg/ffprobe が無い環境ではスキップ")
+def test_segments_with_audio_tracks_do_not_delay_video(tmp_path):
+    """音声つきの区間を渡しても映像が遅れない（AAC の頭の詰め物の分の 0.021 秒）
+
+    区間の音声は使わない（音声は Project の音声グラフから）。concat の入力の開始時刻が
+    区間の音声（priming で -0.021333 秒から）に引きずられると、ffmpeg が入力全体を
+    +0.021 秒ずらし、映像だけが遅れた。
+    """
+    pytest.importorskip("numpy", reason="numpy が無い環境（tools extras）")
+    pytest.importorskip("PIL", reason="Pillow が無い環境（tools extras）")
+    _require_font()
+    from scriptvedit import testkit
+
+    wav = _make_tone(tmp_path)
+    ref = str(tmp_path / "ref.mp4")
+    _build_full_project(tmp_path, wav).render(ref)
+    segs = [_cut_frames(ref, str(tmp_path / f"av{i}.mp4"), 10 * i, 10 * i + 10, 10,
+                        audio=True) for i in range(3)]
+    # 前提: 区間は音声つき
+    assert all(len(_probe_json(s, "-select_streams", "a",
+                               "-show_entries", "stream=index")["streams"]) == 1
+               for s in segs)
+
+    out = str(tmp_path / "joined.mp4")
+    _build_audio_project(tmp_path, wav).render(out, video_segments=segs)
+    assert _video_start(out) == pytest.approx(0.0, abs=1e-6)
+    assert _video_pts(out) == pytest.approx(_video_pts(ref), abs=1e-5)
+    for at in (0.0, 0.9, 1.0, 1.1, 2.0, 2.9):
+        score = testkit.ssim(testkit.extract_frame(ref, at),
+                             testkit.extract_frame(out, at))
+        assert score > 0.99, f"t={at}s のフレームが一致しません (SSIM={score:.4f})"
+    # 音声は Project の音声グラフのもの（区間の音声ではない）
+    assert _pcm_md5(out) == _pcm_md5(ref)
+
+
+def _build_offgrid_video_project(tmp_path, src, fps):
+    body = ("from scriptvedit import *\n"
+            f"v = Object({src!r})\n"
+            "v.time(3.666667)\n")
+    p = sv.Project()
+    p.configure(width=640, height=360, fps=fps, background_color="#101820")
+    p.layer(_write_layer(tmp_path, "l_v.py", body), priority=0)
+    return p
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg/ffprobe が無い環境ではスキップ")
+def test_segments_off_grid_lengths_keep_frame_times(tmp_path):
+    """格子に乗らない尺の区間を4本つないでも、全体のコマ数と各コマの pts が一体レンダと一致する
+
+    mp4 の movie timescale は既定 1000 で、区間の編集リストの尺がミリ秒へ切り捨てられる
+    （37 コマ・30fps = 1.233333 秒 → 1.233008 秒）。concat demuxer は区間の尺で次の区間の
+    開始を決めるので、後ろの区間ほど 0.3ms ずつ前へずれていた。
+    """
+    fps = 30
+    src = _make_testsrc(tmp_path, "src.mp4", 110, size="640x360", fps=fps)
+    ref = str(tmp_path / "ref.mp4")
+    _build_offgrid_video_project(tmp_path, src, fps).render(ref)
+    assert _frame_count(ref) == 110
+    cuts = [0, 37, 73, 92, 110]   # 37 / 36 / 19 / 18 コマ（1.233333 秒などを含む）
+    segs = [_cut_frames(ref, str(tmp_path / f"g{i}.mp4"), cuts[i], cuts[i + 1], fps,
+                        audio=False, preset="medium") for i in range(len(cuts) - 1)]
+
+    p = sv.Project()
+    p.configure(width=640, height=360, fps=fps, duration=3.666667)
+    out = str(tmp_path / "joined.mp4")
+    p.render(out, video_segments=segs)
+    assert _frame_count(out) == 110
+    pts = _video_pts(out)
+    assert pts == pytest.approx([k / fps for k in range(110)], abs=1e-5)
+    assert pts == pytest.approx(_video_pts(ref), abs=1e-5)
+    # 結合した mp4 の映像の尺もコマ数 / fps ちょうど（movie timescale 1000 の切り捨てが無い）
+    vdur = float(_probe_json(out, "-select_streams", "v:0",
+                             "-show_entries", "stream=duration")["streams"][0]["duration"])
+    assert vdur == pytest.approx(110 / fps, abs=1e-5)
+
+
+# --- 音声レグのキャッシュ ---
+
+def _audio_leg_path(res):
+    paths = [k for k in res["cache"] if k.endswith(".m4a")]
+    assert len(paths) == 1, res["cache"]
+    return paths[0]
+
+
+def _record_ffmpeg(monkeypatch):
+    """segments / loudness が実行する ffmpeg のコマンドを控える（実行はそのまま行う）"""
+    import scriptvedit.ffmpeg as ffm
+    import scriptvedit.loudness as ld
+    import scriptvedit.segments as seg
+    calls = []
+    real = ffm._run_ffmpeg
+
+    def spy(cmd, *a, **k):
+        calls.append([str(x) for x in cmd])
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ffm, "_run_ffmpeg", spy)
+    monkeypatch.setattr(seg, "_run_ffmpeg", spy)
+    monkeypatch.setattr(ld, "_run_ffmpeg", spy)
+    return calls
+
+
+def _is_audio_leg_cmd(cmd):
+    return "-vn" in cmd and cmd[-1].endswith(".m4a")
+
+
+def _is_measure_cmd(cmd):
+    return any("loudnorm=print_format=json" in a for a in cmd)
+
+
+def test_segments_audio_leg_lives_in_cache(tmp_path):
+    """音声レグは __cache__ の内容鍵のパス（作業ディレクトリではない）。出力パス・区間に依らない"""
+    segs = _touch_segments(tmp_path)
+    r1 = _build_dummy_audio_project(tmp_path).render(
+        str(tmp_path / "a.mp4"), dry_run=True, video_segments=segs)
+    leg = _audio_leg_path(r1)
+    assert os.path.normpath(leg).startswith(os.path.normpath(
+        os.path.join("__cache__", "artifacts")))
+    assert not os.path.normpath(leg).startswith(os.path.normpath(_SEGMENTS_WORK_DIR))
+    # 区間や出力パスが違っても音声グラフが同じなら同じ音声レグ
+    r2 = _build_dummy_audio_project(tmp_path).render(
+        str(tmp_path / "b.mp4"), dry_run=True, video_segments=segs[:1])
+    assert _audio_leg_path(r2) == leg
+    # linear の目標値と limiter=False の true_peak は増幅量にだけ効く（コマンドでは表記）
+    # ので、鍵に入る
+    def linear_key(**kw):
+        p = _build_dummy_audio_project(tmp_path)
+        p.normalize_audio(mode="linear", **kw)
+        return _audio_leg_path(p.render(str(tmp_path / "a.mp4"), dry_run=True,
+                                        video_segments=segs))
+
+    keys = [linear_key(), linear_key(target=-16),
+            linear_key(limiter=False), linear_key(limiter=False, true_peak=-3)]
+    assert len(set(keys)) == len(keys) and leg not in keys
+    assert linear_key() == keys[0]
+
+
+def test_segments_dry_run_same_with_cached_audio_leg(tmp_path):
+    """音声レグのキャッシュがあっても dry_run は変わらない（キャッシュが空のときの計画）"""
+    segs = _touch_segments(tmp_path)
+    out = str(tmp_path / "out.mp4")
+    cold = _build_dummy_audio_project(tmp_path, linear=True).render(
+        out, dry_run=True, video_segments=segs)
+    leg = _audio_leg_path(cold)
+    os.makedirs(os.path.dirname(leg), exist_ok=True)
+    with open(leg, "wb") as f:
+        f.write(b"not empty")
+    try:
+        warm = _build_dummy_audio_project(tmp_path, linear=True).render(
+            out, dry_run=True, video_segments=segs)
+    finally:
+        os.remove(leg)
+    assert cold == warm
+    assert _render_cmds_signature(cold) == _render_cmds_signature(warm)
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg/ffprobe が無い環境ではスキップ")
+def test_segments_audio_leg_is_reused(tmp_path, monkeypatch):
+    """2回目は音声レンダ（と linear の測定）を実行しない。0 バイトの残骸は命中扱いに
+    しない。素材を変えれば作り直す"""
+    fps = 10
+    segs = [_make_testsrc(tmp_path, f"s{i}.mp4", 15, size="160x90", fps=fps)
+            for i in range(2)]
+    wav = _make_tone(tmp_path)
+
+    def build():
+        p = _configure(sv.Project())
+        p.normalize_audio(mode="linear")
+        p.layer(_write_layer(tmp_path, "l_audio.py", _audio_body(wav)), priority=0)
+        return p
+
+    out = str(tmp_path / "out.mp4")
+    planned = build().render(out, dry_run=True, video_segments=segs)
+    leg = _audio_leg_path(planned)
+    measure = next(k for k in planned["cache"] if k.endswith(".json"))
+    for path in (leg, measure):
+        if os.path.exists(path):
+            os.remove(path)
+    calls = _record_ffmpeg(monkeypatch)
+    build().render(out, video_segments=segs)
+    assert sum(_is_audio_leg_cmd(c) for c in calls) == 1
+    assert sum(_is_measure_cmd(c) for c in calls) == 1
+    assert os.path.getsize(leg) > 0
+    pcm1 = _pcm_md5(out)
+
+    # 2回目: 音声レンダも測定も走らない（測定 JSON を消しても測り直さない）
+    os.remove(measure)
+    calls.clear()
+    build().render(out, video_segments=segs)
+    assert not any(_is_audio_leg_cmd(c) for c in calls), calls
+    assert not any(_is_measure_cmd(c) for c in calls), calls
+    assert _pcm_md5(out) == pcm1
+
+    # 0 バイトの残骸は命中扱いにしない
+    with open(leg, "wb"):
+        pass
+    calls.clear()
+    build().render(out, video_segments=segs)
+    assert sum(_is_audio_leg_cmd(c) for c in calls) == 1
+    assert os.path.getsize(leg) > 0
+    assert _pcm_md5(out) == pcm1
+
+    # 素材を変えれば別の鍵で作り直す
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "sine=frequency=660:duration=3", "-ar", "48000", wav],
+        check=True, timeout=60)
+    leg2 = _audio_leg_path(build().render(out, dry_run=True, video_segments=segs))
+    assert leg2 != leg
+    if os.path.exists(leg2):   # 前回のテスト実行の残り（同じ内容の素材は同じ鍵）
+        os.remove(leg2)
+    calls.clear()
+    build().render(out, video_segments=segs)
+    assert sum(_is_audio_leg_cmd(c) for c in calls) == 1
+    assert os.path.getsize(leg2) > 0
+    assert _pcm_md5(out) != pcm1

@@ -8,6 +8,7 @@
 - 非対応形式/部分レンダとの併用時のフォールバック
 - 実ffmpegでの結合スモーク（ffmpeg/ffprobe があるときのみ）
 """
+import hashlib
 import json
 import os
 import shutil
@@ -134,6 +135,47 @@ def test_chunk_bounds_off_grid_duration_matches_sequential_count():
     n_total, bounds = Project._parallel_chunk_bounds(271.666667, 30, 4)
     assert n_total == 8150
     assert bounds[0] == 0 and bounds[-1] == 8150
+
+
+def test_concat_list_durations_are_exact_frame_times(tmp_path):
+    """concat リストの duration は「µs へ丸めた累積の開始時刻」の差（誤差が積もらない）"""
+    from scriptvedit.parallel import _write_concat_list
+    list_path = str(tmp_path / "l.txt")
+    counts = [37, 36, 37] * 100
+    _write_concat_list(list_path, [f"c{i}.mp4" for i in range(len(counts))], counts, 30)
+    with open(list_path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    assert lines[:4] == ["file 'c0.mp4'", "duration 1.233333",
+                         "file 'c1.mp4'", "duration 1.200000"]
+    total_us = sum(round(float(x.split()[1]) * 1000000)
+                   for x in lines if x.startswith("duration "))
+    assert total_us == round(sum(counts) * 1000000 / 30)
+    # NTSC の fps も有理数で数える（29.97 の float は 2997/100）
+    _write_concat_list(list_path, ["a.mp4", "b'q.mp4"], [1001, 1], 30000 / 1001)
+    with open(list_path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    assert lines == ["file 'a.mp4'", "duration 33.400033",
+                     "file 'b'\\''q.mp4'", "duration 0.033367"]
+
+
+@pytest.mark.parametrize("fps, expected", [
+    (30, 15360), (25, 12800), (60, 15360), (24, 12288), (30000 / 1001, 30000), (10, 10240),
+])
+def test_mux_movie_timescale_matches_video_track(fps, expected):
+    """mux の movie timescale は ffmpeg が 1/fps の映像に選ぶトラックの時間単位"""
+    from scriptvedit.parallel import _mux_movie_timescale
+    assert _mux_movie_timescale(fps) == expected
+
+
+def test_concat_mux_cmd_options(tmp_path):
+    """mux は -copyts と -avoid_negative_ts disabled。movie timescale は mp4 / mov だけ"""
+    from scriptvedit.parallel import _build_concat_mux_cmd
+    mp4 = _build_concat_mux_cmd("l.txt", "a.m4a", None, "o.mp4", 30)
+    assert mp4.index("-copyts") < mp4.index("-i")
+    assert mp4[mp4.index("-avoid_negative_ts") + 1] == "disabled"
+    assert mp4[mp4.index("-movie_timescale") + 1] == "15360"
+    mkv = _build_concat_mux_cmd("l.txt", "a.m4a", None, "o.mkv", 30)
+    assert "-movie_timescale" not in mkv and "-copyts" in mkv
 
 
 # --- 後方互換 ---
@@ -490,3 +532,96 @@ def test_parallel_falls_back_when_too_few_frames(tmp_path, capsys):
     p.fps = 10
     assert _parallel_chunk_count(p, 4, str(tmp_path / "o.mp4")) == 1
     assert "従来レンダ" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg/ffprobe が無い環境ではスキップ")
+def test_parallel_off_grid_chunks_keep_frame_times(tmp_path):
+    """格子に乗らない尺のチャンクをつないでも、各コマの pts が逐次レンダと一致する
+
+    チャンクの mp4 は movie timescale 既定 1000 で、編集リストの尺がミリ秒へ切り捨てられる
+    ことがある（37 コマ・30fps = 1.233333 秒 → 1.233008 秒。切り捨てるかは x264 の判断で
+    絵に依り、この素材は FFmpeg 8.0 で先頭のチャンクが切り捨てられる）。concat demuxer が
+    その尺で次のチャンクの開始を決めていたので、後ろのチャンクが 0.3ms ずつ前へずれた。
+    """
+    fps = 30
+    src = str(tmp_path / "src.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", f"testsrc2=s=640x360:r={fps}", "-frames:v", "110",
+         "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", src],
+        check=True, timeout=120)
+    body = ("from scriptvedit import *\n"
+            f"v = Object({src!r})\n"
+            "v.time(3.666667)\n")
+
+    def build():
+        p = sv.Project()
+        p.configure(width=640, height=360, fps=fps, background_color="#203040")
+        p.layer(_write_layer(tmp_path, "l_offgrid_v.py", body), priority=0)
+        return p
+
+    def pts(path):
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60, check=True)
+        return sorted(float(x) for x in out.stdout.split())
+
+    seq = str(tmp_path / "seq.mp4")
+    par = str(tmp_path / "par.mp4")
+    build().render(seq)
+    build().render(par, parallel=3)   # 37 / 36 / 37 コマ
+    expected = [k / fps for k in range(110)]
+    assert pts(seq) == pytest.approx(expected, abs=1e-5)
+    assert pts(par) == pytest.approx(expected, abs=1e-5)
+    # 結合した mp4 の映像の尺もコマ数 / fps ちょうど（mux の movie timescale）
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=duration", "-of", "csv=p=0", par],
+        capture_output=True, text=True, timeout=60, check=True)
+    assert float(out.stdout.strip()) == pytest.approx(110 / fps, abs=1e-5)
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg/ffprobe が無い環境ではスキップ")
+@pytest.mark.parametrize("ext", ["mp4", "mkv"])
+def test_parallel_audio_stream_timing_matches_sequential(tmp_path, ext):
+    """音声つきの並列レンダで、映像・音声の開始時刻と音声の PCM が逐次レンダと同じ
+
+    mux の -copyts で音声レグの priming（-0.021 秒）がそのまま届く。Matroska の既定の
+    avoid_negative_ts は全体を +0.021 秒ずらすので disabled にしてある。
+    """
+    wav = str(tmp_path / "tone.wav")
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=2", "-ar", "48000", wav],
+        check=True, timeout=60)
+    body = ("from scriptvedit import *\n"
+            f"tone = Object({wav!r})\n"
+            "tone.time(2)\n")
+
+    def build():
+        p = sv.Project()
+        p.configure(width=160, height=90, fps=30, background_color="#203040")
+        p.layer(_write_layer(tmp_path, "l_tone.py", body), priority=0)
+        return p
+
+    def starts(path):
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,start_time",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60, check=True)
+        return sorted(out.stdout.split())
+
+    def pcm(path):
+        out = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", path, "-vn", "-f", "s16le",
+             "-ac", "2", "-ar", "48000", "-"],
+            capture_output=True, timeout=60, check=True)
+        return hashlib.md5(out.stdout).hexdigest()
+
+    seq = str(tmp_path / f"seq.{ext}")
+    par = str(tmp_path / f"par.{ext}")
+    build().render(seq)
+    build().render(par, parallel=3)
+    assert starts(par) == starts(seq)
+    assert pcm(par) == pcm(seq)

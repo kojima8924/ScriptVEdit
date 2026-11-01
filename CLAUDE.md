@@ -182,7 +182,7 @@ pad（SEGVバリア, §4.1）が付かないコマンドになる。**formula + 
 | compute / from_project / xfade 生成物 | `objects.py` の `compute` / `from_project`、`media.py` の `_finalize_generated_object` |
 | ラウドネス測定（`normalize_audio(mode="linear")`） | `loudness.py` の `_collect_loudness_cmds`（測定結果 JSON の有無は見ない） |
 | `stills()` / `frames()` の動画（図解アニメの `framekit.build` も） | `stillseq.py` の `_finalize_hold_object`（dry_run 分岐が存在チェックより前。`frames()` の `draw` は dry_run では呼ばない） |
-| 区間結合（`render(video_segments=)`）の音声レグ | `segments.py` の `_collect_segments_cmds`（音声レグ・concat リストは `__cache__/work/segments_<鍵>/` の決定的な名前。鍵は区間の署名と音声グラフから。作業ディレクトリの有無は見ない） |
+| 区間結合（`render(video_segments=)`）の音声レグ | `segments.py` の `_collect_segments_cmds`（音声レグは `__cache__/artifacts/audio_leg/<鍵>.m4a`、concat リストは `__cache__/work/segments_<鍵>/` の決定的な名前。音声レグのキャッシュ・作業ディレクトリの有無は見ない） |
 
 compute / from_project / xfade の経路だけが存在チェックを dry_run 分岐より**前**に置いており、それが
 「実レンダ後に test18 / test24 / test57 / test74 が落ちる」罠の正体だった
@@ -1078,13 +1078,44 @@ segments → parallel の一方向で、逆向きにしない）。
 - 音声は並列レンダと同じ音声レグ（`_build_ffmpeg_cmd` の音声専用経路）で、
   `normalize_audio(mode="linear")` の増幅も `_ensure_linear_gain` 経由の同じ値。測定パスは
   cache 側に載る。チャプターは mux 時に付与。出力は `_unique_tmp_path` → `os.replace`。
-- dry_run は `{"main": mux, "cache": {音声レグ: コマンド, 測定 JSON: 測定コマンド}}`。
-  音声レグと concat リストは `__cache__/work/segments_<鍵>/`（鍵は区間の `_src_signature` と
-  音声グラフから。**出力パスに依らない**ので render_key も出力パスで変わらない）。作業
-  ディレクトリは mux の後に消す。
+- **区間・チャンクの取り込みの3つの手当て**（`parallel.py` の `_write_concat_list` /
+  `_build_concat_mux_cmd`。並列レンダのチャンクの結合と共通。外さないこと）:
+  - **concat リストの各ファイルに `duration`（コマ数 / fps）を書く**。書かないと concat demuxer は
+    各 mp4 の編集リストの尺で次のファイルの開始を決める。ffmpeg の mp4 は movie timescale が
+    既定 1000 で、編集リストの尺がミリ秒へ切り捨てられることがある（FFmpeg 8.0 実測: 37 コマ・
+    30fps = 1.233333 秒 → 1.233008 秒。切り捨てるかは x264 の判断で絵に依る）ので、後ろの
+    ファイルが 0.3ms ずつ前へずれた（区間結合でも、並列レンダのチャンクでも実際に起きていた）。
+    duration は µs へ丸めた累積の開始時刻の差で書く（誤差が積もらない）。区間結合はコマ数を
+    probe した値、並列レンダは境界から取る。
+  - **mux は `-copyts` と `-avoid_negative_ts disabled`**。ffmpeg は入力ごとに「入力の開始時刻」
+    （全ストリームの最小）を引くので、音声つきの区間を concat すると AAC の priming（-0.021333 秒）に
+    引きずられて映像が +0.021 秒遅れた（-map しない音声でも効く）。-copyts だけだと Matroska の既定が
+    全体を +0.021 秒ずらすので disabled も付ける（mkv も1本レンダと同じ「映像 0・音声 -0.021」）。
+  - **mp4 / mov の出力は `-movie_timescale`**（`_mux_movie_timescale`: fps の分子を 10000 以上まで
+    倍にした値＝ffmpeg が 1/fps の映像トラックに選ぶ時間単位）。既定 1000 だと結合した mp4 の
+    映像の尺がミリ秒へ切り捨てられる。fps だけで決まる（dry_run と実レンダで同じ）。
+    1本レンダ（`_encode_args`）には付けていない（スナップショットが全部変わるため）。
+- **音声レグは `__cache__/artifacts/audio_leg/<鍵>.m4a` にキャッシュする**（`_ensure_audio_leg`。
+  `_run_ffmpeg_to_cache` で原子的に書き、`_audio_leg_ok` が 0 バイト・音声ストリームの無い残骸を
+  命中扱いにしない。再生成に全編の音声レンダが要るので命中ガードを置いてよい側。§5
+  「キャッシュ書き込みは原子的に」）。鍵（`_audio_leg_key`）は音声レグのコマンドの `-i` の直後を
+  `_src_signature` にし、出力を除いたもの（render_key と同じ作法）。増幅量は dry_run と同じ表記
+  `<MEASURED_GAIN>dB` のまま入れ、linear の `target` / `true_peak` / `limiter` を足す（増幅量は
+  これらと測定値で決まり、測定値は音声グラフと素材で決まる。limiter=False の true_peak は増幅の
+  上限にだけ効き、コマンドには現れない）。表記のまま組むために、実レンダでも `Project._gain_placeholder_render`
+  を立てた間だけ `_build_ffmpeg_cmd` が表記を許す（組んだコマンドは実行しない）。
+  **命中したら測定パスも走らせない**（増幅量が要らない）。外れたときだけ `_ensure_linear_gain` →
+  実際の増幅量でコマンドを組んで書く。並列レンダの音声レグはキャッシュしない（チャンクと
+  同時に走るので待ち時間にならない）。
+- dry_run は `{"main": mux, "cache": {音声レグ: コマンド, 測定 JSON: 測定コマンド}}`
+  （音声レグ・測定 JSON の有無は見ない）。concat リストは `__cache__/work/segments_<鍵>/`
+  （鍵は区間の `_src_signature` と音声レグの鍵から。**出力パスに依らない**ので render_key も
+  出力パスで変わらない）。作業ディレクトリは mux の後に消す（音声レグは残す）。
 - 回帰は `tests/test_segments.py`（一体レンダの出力を3本に切って結合し、画素・コマ数・
-  音声の PCM・チャプターの一致。dry_run の形と cold / warm）、エラーは `tests/test_errors.py` の
-  `check_segments_*`。
+  音声の PCM・チャプターの一致。音声つきの区間で映像が遅れない・格子に乗らない尺の4区間で
+  各コマの pts と尺が一致・音声レグのキャッシュの命中 / 残骸 / 鍵・dry_run の形と cold / warm）と
+  `tests/test_parallel_render.py`（格子に乗らない尺のチャンクの pts と尺・mp4 / mkv の音声の開始
+  時刻・concat リストの duration）、エラーは `tests/test_errors.py` の `check_segments_*`。
 
 `p.render_key(output_path)` は `render(dry_run=True)` の main と cache の全コマンドを、`-i` の
 直後の入力は `_src_signature`（lavfi は除く）、出力パス（main の最後の引数と cache 側のキー）は

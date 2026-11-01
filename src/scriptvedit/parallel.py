@@ -9,8 +9,11 @@
 チャンク外フレームが重いフィルタへ流れないようにする（＝ここが高速化の本体）。
 音声は loudnorm/duck_under が全尺依存のため分割せず、全編1本を並列レンダして
 concat(-c copy)結果へmuxする。チャプター(FFMETADATA)もmux時に付与する。
-音声レグと mux の組み立て（_build_audio_leg_cmd / _build_concat_mux_cmd）は、
-書き出し済みの区間を結合する segments.py（render(video_segments=)）も使う。
+音声レグと mux の組み立て（_build_audio_leg_cmd / _write_concat_list /
+_build_concat_mux_cmd）は、書き出し済みの区間を結合する segments.py
+（render(video_segments=)）も使う。concat リストには各ファイルの尺（コマ数 / fps）を
+書き、mux は -copyts・-avoid_negative_ts disabled・-movie_timescale（mp4 / mov）で
+組む（理由は各関数の docstring）。
 
 audit.py と同じ方式で、Project インスタンスを第1引数に受ける自由関数を
 提供する（Project は import しない＝循環 import を起こさない）。
@@ -18,15 +21,17 @@ audit.py と同じ方式で、Project インスタンスを第1引数に受け�
 
 import os
 import builtins as _builtins
+import math as _math
 import time as _time
 import shutil as _shutil
 import concurrent.futures as _futures
+from fractions import Fraction
 
 from scriptvedit.chapters import _chapters_metadata_path, _write_chapters_metadata
 from scriptvedit.ffmpeg import _atomic_write_text, _run_ffmpeg, _unique_tmp_path
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_input_args, _build_video_overlay_parts, _output_frame_count, _unwrap_raw_stream_ref, _visible_window, _t_enable_from, _t_ceil
+from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_input_args, _build_video_overlay_parts, _fps_fraction, _output_frame_count, _unwrap_raw_stream_ref, _visible_window, _t_enable_from, _t_ceil
 from scriptvedit.objects import Object
 
 
@@ -148,17 +153,17 @@ def _render_parallel(project, output_path, n, timeout):
         for name in sorted(times):
             print(f"  {name}: {times[name]:.2f}s")
 
-        # concatリスト（クォート内の ' はエスケープ。区切りは/でOS差を吸収）
+        # concatリスト（各チャンクの尺はコマ数 / fps。_write_concat_list）
         list_path = os.path.join(work_dir, "concat.txt")
-        _atomic_write_text(list_path, "".join(
-            "file '{}'\n".format(p.replace("\\", "/").replace("'", "'\\''"))
-            for p in chunk_paths))
+        _write_concat_list(
+            list_path, chunk_paths,
+            [bounds[i + 1] - bounds[i] for i in range(n_eff)], fps)
         meta_path = None
         if project._markers:
             meta_path = _chapters_metadata_path(project)
             _write_chapters_metadata(project, meta_path)
         mux_cmd = _build_concat_mux_cmd(
-            list_path, audio_path, meta_path, final_path)
+            list_path, audio_path, meta_path, final_path, fps)
         tmp_path = _unique_tmp_path(final_path)
         run_cmd = list(mux_cmd)
         run_cmd[-1] = tmp_path
@@ -289,13 +294,75 @@ def _build_audio_leg_cmd(project, audio_path):
         project._audio_only_render = False
 
 
-def _build_concat_mux_cmd(list_path, audio_path, meta_path, out_path):
+def _concat_us(k, fps_frac):
+    """コマ k の開始時刻（µs の整数。半分は切り上げる四捨五入）"""
+    return _math.floor(Fraction(k) * 1000000 / fps_frac + Fraction(1, 2))
+
+
+def _write_concat_list(list_path, paths, frame_counts, fps):
+    """concat demuxer のリストを書く（各ファイルに duration = コマ数 / fps を添える）。
+
+    duration を書かないと、concat demuxer は各ファイルの尺（mp4 の編集リスト）で次の
+    ファイルの開始時刻を決める。ffmpeg の mp4 は movie timescale が既定 1000 で、
+    編集リストの尺がミリ秒へ切り捨てられることがある（FFmpeg 8.0 実測: 37 コマ・30fps =
+    1.233333 秒 → 1.233008 秒。切り捨てるかは x264 の判断で絵に依る）ので、後ろの
+    ファイルほど 0.3ms ずつ前へずれ、全体の尺も1本レンダと食い違った。
+    duration は「µs へ丸めた累積の開始時刻」の差で書く（1本ずつ丸めた尺を足すと
+    誤差が積もる。stillseq.py の ffconcat と同じ作法）。concat demuxer は µs で読み、
+    ストリームの時間単位へ四捨五入するので、誤差は 0.5µs 以内で積もらない。
+    クォート内の ' はエスケープし、区切りは / で OS 差を吸収する。
+    """
+    fps_frac = _fps_fraction(fps)
+    lines = []
+    k = 0
+    for path, n in zip(paths, frame_counts):
+        us = _concat_us(k + n, fps_frac) - _concat_us(k, fps_frac)
+        k += n
+        lines.append("file '{}'\n".format(
+            path.replace("\\", "/").replace("'", "'\\''")))
+        lines.append(f"duration {us // 1000000}.{us % 1000000:06d}\n")
+    _atomic_write_text(list_path, "".join(lines))
+
+
+def _mux_movie_timescale(fps):
+    """mp4 / mov の movie timescale（mvhd・編集リストの時間単位）。
+
+    ffmpeg の既定は 1000 で、出力の編集リストの尺がミリ秒へ切り捨てられることがある
+    （コマの時刻は正しいまま、映像の尺だけ 3.666667 秒 → 3.666016 秒）。映像トラックの
+    時間単位と同じ値（fps の分子を 10000 以上になるまで倍にする。ffmpeg の mov muxer が
+    1/fps の映像に選ぶ値。30fps → 15360、25fps → 12800、30000/1001 → 30000）にすれば、
+    コマ数 / fps の尺がちょうど書ける。fps だけで決まる（dry_run と実レンダで同じ）。
+    """
+    scale = _fps_fraction(fps).numerator
+    while scale < 10000:
+        scale *= 2
+    return scale
+
+
+def _build_concat_mux_cmd(list_path, audio_path, meta_path, out_path, fps):
     """チャンクconcat + 音声mux + チャプター付与の最終コマンドを構築する。
 
     映像・音声とも再エンコードなし（-c copy）。各チャンクはIDRフレーム
     始まりのMP4なのでconcat demuxerで無劣化結合できる。
+
+    ``-copyts`` を付ける: ffmpeg は既定で入力ごとに「入力の開始時刻」（全ストリームの
+    最小）を引いて 0 起点にする。concat の入力に音声つきの mp4（区間結合に渡された
+    区間）があると、AAC の頭の詰め物（priming）で音声が -0.021333 秒から始まるので、
+    -map しない音声に引きずられて映像が +0.021 秒遅れた（concat demuxer 自身は映像を
+    0 から出している）。-copyts なら映像は 0 から、音声レグも符号化したときの時刻
+    （priming 込み）のまま入り、1本レンダと同じ時刻になる（デコードした音声の
+    PCM は -copyts の有無で同じ）。
+
+    ``-avoid_negative_ts disabled`` も要る: -copyts では音声の priming（負の時刻）と
+    映像の B フレームの負の dts がそのまま muxer へ届き、Matroska（.mkv）の既定は
+    全ストリームを +0.021 秒ずらした（映像の開始が 0.021 秒になる）。disabled なら
+    mkv も1本レンダと同じ「映像 0・音声 -0.021」になり、mp4 / mov は編集リストで
+    従来どおり（FFmpeg 8.0 実測。make_zero / make_non_negative は全部を 0.067 秒ずらす）。
+
+    出力が mp4 / mov なら ``-movie_timescale``（_mux_movie_timescale）も付け、結合した
+    映像の尺をコマ数 / fps ちょうどにする（Matroska には無いオプションなので付けない）。
     """
-    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path]
+    cmd = ["ffmpeg", "-y", "-copyts", "-f", "concat", "-safe", "0", "-i", list_path]
     next_idx = 1
     a_idx = None
     m_idx = None
@@ -309,7 +376,9 @@ def _build_concat_mux_cmd(list_path, audio_path, meta_path, out_path):
     cmd.extend(["-map", "0:v"])
     if a_idx is not None:
         cmd.extend(["-map", f"{a_idx}:a"])
-    cmd.extend(["-c", "copy"])
+    cmd.extend(["-c", "copy", "-avoid_negative_ts", "disabled"])
+    if os.path.splitext(out_path)[1].lower() in (".mp4", ".mov", ".m4v"):
+        cmd.extend(["-movie_timescale", str(_mux_movie_timescale(fps))])
     if m_idx is not None:
         cmd.extend(["-map_metadata", str(m_idx),
                     "-map_chapters", str(m_idx)])

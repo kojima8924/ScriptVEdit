@@ -137,6 +137,10 @@ class Project:
         # linear の増幅量 (dB)。実レンダで測定してから本レンダ・音声レグを組む。
         # None のまま main を組むのは dry_run だけ（増幅量は表記で置く）
         self._linear_gain_db = None
+        # 実レンダでも増幅量を表記（<MEASURED_GAIN>dB）で組んでよい間だけ True。
+        # 区間結合の音声レグの鍵を、測定する前に dry_run と同じ形のコマンドで作るため
+        # （segments.py の _audio_leg_key_cmd）。組んだコマンドは実行しない
+        self._gain_placeholder_render = False
         self._pending_compute_cmds = {}  # dry_run 中の compute 生成コマンド
         self._plan_structure = None     # Plan pass のレイヤー構造署名
         self._generated = 0             # レンダ開始時の生成カウンタ基準値
@@ -2193,7 +2197,7 @@ class Project:
                     # dry_run は測定しないので表記（volume=<MEASURED_GAIN>dB）で置く
                     gain = self._linear_gain_db
                     if gain is None:
-                        if not self._dry_run:
+                        if not (self._dry_run or self._gain_placeholder_render):
                             raise RuntimeError(
                                 "normalize_audio(mode='linear'): 増幅量を測定する前に"
                                 "本レンダのコマンドを組もうとしました（内部エラー。"
