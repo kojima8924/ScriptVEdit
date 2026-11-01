@@ -284,6 +284,22 @@ def _tpad_first_frame(start, fps):
     return _math.floor(us * _fps_fraction(fps) + Fraction(1, 2))
 
 
+def _output_frame_count(duration, fps):
+    """出力の ``-t str(duration)`` で ffmpeg が書き出すコマ数（1本レンダの枚数）。
+
+    ffmpeg は -t を µs の整数で読み（小数7桁目以降は切り捨て）、出力の枚数を
+    「µs の尺 × fps」を av_rescale_q（半分は切り上げる四捨五入）で丸めた数にする
+    （FFmpeg 8 実測、30fps: -t 1.016667 → 31 枚、1.036667 → 31 枚、1.05 → 32 枚、
+    1.049999 → 31 枚、271.666667 → 8150 枚）。背景の lavfi は d= の尺まで
+    ceil(尺 × fps) 枚を出すが、-t がそれより先に切るので枚数はこの値で決まる。
+    ceil(尺 × fps) ではない: 271.666667 × 30 = 8150.00001 を切り上げると 8151 枚で、
+    1本レンダより1枚多い（時間分割並列レンダで実際に踏んだ）。
+    _tpad_first_frame と同じ有理数の計算で、fps だけで決まる（素材を probe しない）。
+    """
+    us = _math.floor(Fraction(str(duration)) * 1000000)
+    return _math.floor(Fraction(us, 1000000) * _fps_fraction(fps) + Fraction(1, 2))
+
+
 def _video_tail_hold(obj):
     """映像が Object 自身の尺より先に終わる分（秒）。この分は最後のフレームを保持する。
 

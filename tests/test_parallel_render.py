@@ -116,6 +116,26 @@ def test_chunk_bounds_n1_is_whole():
     assert (n_total, bounds) == (50, [0, 50])
 
 
+@pytest.mark.parametrize("duration, expected", [
+    (1.016667, 31),
+    (1.036667, 31),
+    (1.05, 32),
+    (1.049999, 31),
+    (271.666667, 8150),
+])
+def test_output_frame_count_matches_ffmpeg_t_rounding(duration, expected):
+    """出力の -t の枚数（µs に切り捨てた尺 × fps の四捨五入。FFmpeg 8 実測値）"""
+    from scriptvedit.filters.video import _output_frame_count
+    assert _output_frame_count(duration, 30) == expected
+
+
+def test_chunk_bounds_off_grid_duration_matches_sequential_count():
+    # 271.666667 × 30 = 8150.00001。ceil で数えると 8151 で1本レンダより1枚多かった
+    n_total, bounds = Project._parallel_chunk_bounds(271.666667, 30, 4)
+    assert n_total == 8150
+    assert bounds[0] == 0 and bounds[-1] == 8150
+
+
 # --- 後方互換 ---
 
 def test_parallel_none_and_1_use_sequential_path(tmp_path, monkeypatch):
@@ -274,6 +294,44 @@ def test_parallel_real_render_frame_count(tmp_path):
         return int(out.stdout.strip())
 
     assert frames(seq) == frames(par) == 50
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe が無い環境ではスキップ")
+def test_parallel_real_render_frame_count_off_grid_duration(tmp_path):
+    """総尺が格子に乗らない Project でも、逐次と並列のフレーム数が一致すること
+
+    3.666667 秒 × 30fps = 110.00001 コマ。1本レンダは -t の丸めで 110 枚を書き出す。
+    総コマ数を ceil で数えていた頃は並列だけ 111 枚になった。
+    """
+    _require_font()
+
+    def build():
+        p = sv.Project()
+        p.configure(width=160, height=90, fps=30, background_color="#203040")
+        body = ("from scriptvedit import *\n"
+                "a = text('AAA', size=20, color='white')\n"
+                "a.time(3.666667)\n")
+        p.layer(_write_layer(tmp_path, "l_offgrid.py", body), priority=10)
+        return p
+
+    seq = str(tmp_path / "seq.mp4")
+    par = str(tmp_path / "par.mp4")
+    build().render(seq)
+    p_par = build()
+    p_par.render(par, parallel=4)
+    # 総尺が格子から外れている（この前提が崩れるとテストの意味が無くなる）
+    assert p_par.duration == pytest.approx(3.666667)
+
+    def frames(path):
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v",
+             "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60)
+        return int(out.stdout.strip())
+
+    assert frames(seq) == frames(par) == 110
 
 
 # --- 実ffmpegでの画素一致・チャプター・失敗系（監査項目24） ---

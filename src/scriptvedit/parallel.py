@@ -17,7 +17,6 @@ audit.py と同じ方式で、Project インスタンスを第1引数に受け�
 """
 
 import os
-import math as _math
 import builtins as _builtins
 import time as _time
 import shutil as _shutil
@@ -27,7 +26,7 @@ from scriptvedit.chapters import _chapters_metadata_path, _write_chapters_metada
 from scriptvedit.ffmpeg import _atomic_write_text, _run_ffmpeg, _unique_tmp_path
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
-from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_input_args, _build_video_overlay_parts, _unwrap_raw_stream_ref, _visible_window, _t_enable_from, _t_ceil
+from scriptvedit.filters.video import _DRAFT_SCALE_FILTER, _build_input_args, _build_video_overlay_parts, _output_frame_count, _unwrap_raw_stream_ref, _visible_window, _t_enable_from, _t_ceil
 from scriptvedit.objects import Object
 
 
@@ -63,11 +62,15 @@ def _parallel_chunk_bounds(duration, fps, n):
 
     境界は k/fps に正確に一致させる（チャンク開始時刻がフレーム格子に
     載っていないと、concat結合時にフレームの重複/欠落が起きるため）。
-    総フレーム数は「pts < duration のフレーム数」= ceil(duration*fps)
-    （浮動小数の丸め誤差はepsで吸収）。nが総フレーム数を超える場合は
-    縮退させ、全チャンクが1フレーム以上になることを保証する。
+    総フレーム数は **1本レンダが `-t str(duration)` で書き出す枚数**
+    （`_output_frame_count`: µs に切り捨てた尺 × fps の四捨五入）に揃える。
+    ceil(duration*fps) で数えると、総尺が格子に乗らないとき（271.666667 秒・30fps →
+    8150.00001）に並列の方が1枚多くなり、1本レンダと出力のコマ数が食い違った。
+    区間結合（segments.py）の「区間のコマ数の合計」もこの値を使う。
+    nが総フレーム数を超える場合は縮退させ、全チャンクが1フレーム以上になることを
+    保証する。
     """
-    n_total = _builtins.max(1, int(_math.ceil(duration * fps - 1e-6)))
+    n_total = _builtins.max(1, _output_frame_count(duration, fps))
     n_eff = _builtins.max(1, _builtins.min(int(n), n_total))
     # round(i*n_total/n_eff): 刻み幅>=1 なので単調増加が保証される
     return n_total, [_builtins.round(i * n_total / n_eff)

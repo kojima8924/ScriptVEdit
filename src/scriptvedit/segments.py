@@ -15,8 +15,9 @@ parallel.py のものをそのまま使う（segments → parallel の一方向�
     音声 Object と marker だけの Project で使う。
   - 各区間は実在する素材扱い（dry_run でも無ければ FileNotFoundError）。
   - 実レンダでは各区間を probe し、寸法・pix_fmt・codec が区間どうしで一致すること、
-    fps が Project の fps と一致すること、コマ数の合計が ceil(総尺 × fps)
-    （parallel._parallel_chunk_bounds と同じ数え方。総尺は Project の尺＝音声側の尺）
+    fps が Project の fps と一致すること、コマ数の合計が「1本レンダが -t 総尺 で書き出す
+    枚数」（µs に切り捨てた総尺 × fps の四捨五入。parallel._parallel_chunk_bounds と同じ
+    数え方＝filters.video._output_frame_count。総尺は Project の尺＝音声側の尺）
     であることを確かめる（違えば ValueError）。dry_run は probe しない。
   - 音声は parallel.py と同じ _build_audio_leg_cmd（_build_ffmpeg_cmd の音声専用経路）で、
     normalize_audio(mode="linear") の増幅も _ensure_linear_gain 経由の同じ値。
@@ -110,7 +111,7 @@ def _check_segments_objects(project):
 
 
 def _segments_frame_total(project):
-    """区間のコマ数の合計がこの値でなければならない（= ceil(総尺 × fps)。並列レンダと同じ数え方）"""
+    """区間のコマ数の合計がこの値でなければならない（1本レンダが -t 総尺 で書き出す枚数。並列レンダと同じ数え方）"""
     return _parallel_chunk_bounds(project.duration, project.fps, 1)[0]
 
 

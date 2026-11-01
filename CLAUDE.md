@@ -1070,7 +1070,8 @@ segments → parallel の一方向で、逆向きにしない）。
   marker だけを置く。出力は h264 の `.mp4` だけ、start / end・draft・alpha・parallel とは併用不可。
   区間は実在する素材扱い（dry_run でも無ければ FileNotFoundError）。
 - **実レンダで区間を probe し、寸法・pix_fmt・codec が区間どうしで一致、fps が Project と一致、
-  コマ数の合計が `ceil(総尺 × fps)`**（`parallel._parallel_chunk_bounds` と同じ数え方。
+  コマ数の合計が1本レンダの出力と同じ枚数**（`filters/video.py` の `_output_frame_count`:
+  µs に切り捨てた総尺 × fps の四捨五入。`parallel._parallel_chunk_bounds` と同じ数え方。
   総尺は音声側の尺）でなければ ValueError。`-c copy` で結合するので再エンコードせず、
   区間は同じ設定で書き出されている必要がある（SPS が違うと mp4 の avcC が先頭のものになる）。
   dry_run は probe しない。
