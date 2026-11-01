@@ -473,9 +473,16 @@ def _build_video_overlay_parts(obj, input_idx, current_base, dur, visible_window
     # 可視区間の外のフレームを早期破棄（PTSは絶対時刻のまま維持）
     if visible_window is not None:
         t_from, t_to = visible_window
+        # float をそのまま書くと、2/fps 秒の余白を引いた微小な端数が
+        # 3.333333333382926e-07 のような指数表記になり、ffmpeg が trim の値として
+        # 読めず落ちる（開始が 2 フレーム目ちょうどの Object で実測）。指数表記に
+        # なる 1e-4 未満だけ 1µs 格子へ切り捨てて固定小数で書く（窓を広げる向きなので
+        # 早期破棄の正しさは変わらない。それ以外は従来どおりの表記）。
         trim_params = []
+        if t_from is not None and t_from < 1e-4:
+            t_from = _t_floor(t_from)
         if t_from is not None and t_from > 0:
-            trim_params.append(f"start={t_from}")
+            trim_params.append(f"start={t_from:.6f}" if t_from < 1e-4 else f"start={t_from}")
         if t_to is not None:
             trim_params.append(f"end={t_to}")
         if trim_params:

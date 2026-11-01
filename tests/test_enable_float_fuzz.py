@@ -155,6 +155,26 @@ def test_enable_and_tpad_have_no_float_fuzz(monkeypatch):
     assert "stop_mode" not in parts[0]
 
 
+def test_visible_window_trim_has_no_exponent(monkeypatch):
+    """開始が 2 フレーム目ちょうど付近だと、余白 2/fps を引いた trim の開始が
+    3.3e-07 のような指数表記になり ffmpeg が読めなかった。1µs 格子へ切り捨てて書く"""
+    monkeypatch.setattr(video_mod, "_get_base_dimensions", lambda obj: (64, 36))
+    p = sv.Project()
+    p.configure(width=320, height=180, fps=30)
+    for start, want in ((0.066667, None), (2 / 30 + 5.5e-05, "trim=start=0.000054:")):
+        o = sv.Object("clip.mp4")
+        o.start_time = start
+        o.duration = 1.0
+        parts, _ = _build_video_overlay_parts(
+            o, 1, "[0:v]", 1000, visible_window=video_mod._visible_window(o, 30))
+        joined = "".join(parts)
+        assert "e-0" not in joined, joined
+        if want is None:
+            assert "trim=start=" not in joined  # 1µs 未満は 0 に切り捨てて書かない
+        else:
+            assert want in joined, joined
+
+
 # --- (c) 実レンダ ------------------------------------------------------------
 
 _W, _H, _FPS = 64, 36, 30
@@ -269,3 +289,13 @@ def test_video_tail_hold_is_zero_when_streams_match(tmp_path):
     # time(d) で素材より短く切れば、映像が尽きる前に終わるので保持しない
     o2.duration = 0.4
     assert _video_tail_hold(o2) == 0.0
+
+
+def test_object_two_frames_in_renders(tmp_path):
+    """開始が 2 フレーム目の直後（0.066667 秒）の Object が実レンダで落ちない"""
+    _need_ffmpeg()
+    _make_clip(tmp_path / "a.mp4", 1, 200)
+    lum = _render_chain(tmp_path, [
+        f"(Object(r'{tmp_path / 'a.mp4'}') @ 0.066667).time(1)",
+    ], 30)
+    assert lum[0] < 60 and lum[3] > 150, lum[:6]
