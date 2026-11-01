@@ -36,7 +36,7 @@ Python の DSL で動画を構成し、ffmpeg でレンダリングするライ�
   （または `narrate()`）。describe の constraints（`object_registered_at_creation`）にも載せてある。
 - **priority が同じ Object は登録順に重なる**（`sorted(key=priority)` が安定ソートなので、
   `p.layer()` を呼んだ順・レイヤー内は作った順で、後が上）。
-- パッケージ本体は `src/scriptvedit/`（59モジュール）。`pip install -e .` で
+- パッケージ本体は `src/scriptvedit/`（61モジュール）。`pip install -e .` で
   どのディレクトリからでも `from scriptvedit import *`。
 
 ## 2. 最初に読むもの（最重要）
@@ -59,7 +59,7 @@ plugin / project_method / transform。
 - `usage` … 概念・main スクリプト雛形・レイヤー雛形・DSL・Expr・**プラグイン雛形**・CLI
 - `constraints` … 守らないと壊れる制約（severity: error/warning/info）
 - `effects`(42) / `transforms`(8) / `audio_effects`(7) / `factories`(48) /
-  `objects`(19) / `object_methods`(9) / `project_methods`(14) / `expr`(102) / `plugins`(3)
+  `objects`(19) / `object_methods`(9) / `project_methods`(15) / `expr`(102) / `plugins`(3)
   （件数は変動する。正は `describe` の実測で、整合は tests/test_issue17_docs.py が検証する）
 
 各 Effect エントリには `bakeable` フィールドがあり、キャッシュに焼けるかが分かる。
@@ -171,7 +171,7 @@ pad（SEGVバリア, §4.1）が付かないコマンドになる。**formula + 
 「いま何が未生成か」ではない。だから `__cache__` に何があっても出力コマンドは同じで、
 **実レンダの後にキャッシュを消さずスナップショットを回してよい**。
 
-この契約を守っているのは次の6つの収集経路。**新しい中間生成物を足すときも必ず揃えること**
+この契約を守っているのは次の7つの収集経路。**新しい中間生成物を足すときも必ず揃えること**
 （1つでも「存在すればコマンドを出さない」を入れると、実レンダの有無でスナップショットが落ちる）:
 
 | 経路 | 場所 |
@@ -182,6 +182,7 @@ pad（SEGVバリア, §4.1）が付かないコマンドになる。**formula + 
 | compute / from_project / xfade 生成物 | `objects.py` の `compute` / `from_project`、`media.py` の `_finalize_generated_object` |
 | ラウドネス測定（`normalize_audio(mode="linear")`） | `loudness.py` の `_collect_loudness_cmds`（測定結果 JSON の有無は見ない） |
 | `stills()` / `frames()` の動画（図解アニメの `framekit.build` も） | `stillseq.py` の `_finalize_hold_object`（dry_run 分岐が存在チェックより前。`frames()` の `draw` は dry_run では呼ばない） |
+| 区間結合（`render(video_segments=)`）の音声レグ | `segments.py` の `_collect_segments_cmds`（音声レグ・concat リストは `__cache__/work/segments_<鍵>/` の決定的な名前。鍵は区間の署名と音声グラフから。作業ディレクトリの有無は見ない） |
 
 compute / from_project / xfade の経路だけが存在チェックを dry_run 分岐より**前**に置いており、それが
 「実レンダ後に test18 / test24 / test57 / test74 が落ちる」罠の正体だった
@@ -1057,6 +1058,40 @@ Object を1個返す。鍵・描画・時刻・文字・金型テストの規則
   毎秒 drift px で整数の画素ずつずらして切り出す。流れる間は毎コマ絵が変わるので生成物は大きい。
 - 配置の手順（目盛りの間引き・札の段・札のずらし）も鍵に入らないので、変えたら `_CHART_VER` を上げて
   `tests/golden/chart/` を作り直す。
+
+### 区間結合（`render(video_segments=)`）とレンダの内容鍵（`render_key()`）
+
+長い動画を「映像は区間ごとに別の Project で書き出し、音声は1本の Project でまとめる」ときの
+最終段が `segments.py`（`project` を第1引数に取る自由関数。parallel.py の
+`_build_audio_leg_cmd` / `_build_concat_mux_cmd` をそのまま使う。import は
+segments → parallel の一方向で、逆向きにしない）。
+
+- **映像 Object があれば ValueError**。映像は区間の mp4 がすべてで、Project には音声 Object と
+  marker だけを置く。出力は h264 の `.mp4` だけ、start / end・draft・alpha・parallel とは併用不可。
+  区間は実在する素材扱い（dry_run でも無ければ FileNotFoundError）。
+- **実レンダで区間を probe し、寸法・pix_fmt・codec が区間どうしで一致、fps が Project と一致、
+  コマ数の合計が `ceil(総尺 × fps)`**（`parallel._parallel_chunk_bounds` と同じ数え方。
+  総尺は音声側の尺）でなければ ValueError。`-c copy` で結合するので再エンコードせず、
+  区間は同じ設定で書き出されている必要がある（SPS が違うと mp4 の avcC が先頭のものになる）。
+  dry_run は probe しない。
+- 音声は並列レンダと同じ音声レグ（`_build_ffmpeg_cmd` の音声専用経路）で、
+  `normalize_audio(mode="linear")` の増幅も `_ensure_linear_gain` 経由の同じ値。測定パスは
+  cache 側に載る。チャプターは mux 時に付与。出力は `_unique_tmp_path` → `os.replace`。
+- dry_run は `{"main": mux, "cache": {音声レグ: コマンド, 測定 JSON: 測定コマンド}}`。
+  音声レグと concat リストは `__cache__/work/segments_<鍵>/`（鍵は区間の `_src_signature` と
+  音声グラフから。**出力パスに依らない**ので render_key も出力パスで変わらない）。作業
+  ディレクトリは mux の後に消す。
+- 回帰は `tests/test_segments.py`（一体レンダの出力を3本に切って結合し、画素・コマ数・
+  音声の PCM・チャプターの一致。dry_run の形と cold / warm）、エラーは `tests/test_errors.py` の
+  `check_segments_*`。
+
+`p.render_key(output_path)` は `render(dry_run=True)` の main と cache の全コマンドを、`-i` の
+直後の入力は `_src_signature`（lavfi は除く）、出力パス（main の最後の引数と cache 側のキー）は
+除外して文字列のまま並べ、`_sig_key` で 16 桁にしたもの（`cache.py` の `_render_cmds_signature`。
+純関数）。cold / warm で同じ、同一出力なら同一鍵、出力パスでは変わらない。
+**フィルタ文字列に埋まったパス（drawtext の fontfile・textfile、mask の movie= など）は
+書き換えない**（エスケープ規則がフィルタごとに違い安全に取り出せない）ので、フォントや
+リポジトリの置き場所が違う別マシンでは同じ Project でも鍵が変わる（docstring に明記）。
 
 ### 検査系（viz.py / p.inspect()）は本体の規則を再実装しない
 

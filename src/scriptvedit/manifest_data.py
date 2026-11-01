@@ -127,7 +127,11 @@ _MANIFEST_DETAILS = {
         "dry_run=True の戻り値は必ず {'main': [...], 'cache': {...}} の dict。\n"
         "start/end で時間範囲を切り出し、draft=True で低品質高速プレビュー、\n"
         "alpha=True で透過 webm（from_project のサブレンダに使う）、\n"
-        "strict=True で audit() の warning を RuntimeError にする。"),
+        "strict=True で audit() の warning を RuntimeError にする。\n"
+        "video_segments=[...] は書き出し済みの映像区間（h264 .mp4）を -c copy で結合し、"
+        "音声は Project のグラフで全編1本にして mux する（出力は .mp4 だけ。"
+        "映像 Object があれば ValueError。コマ数の合計は ceil(総尺×fps) に合わせる）。\n"
+        "レンダの内容鍵は render_key()（dry_run のコマンド列から。cold / warm で同じ）。"),
 }
 
 # __all__ にある非callableの公開定数（describe の callable 判定から漏れていた）
@@ -938,6 +942,11 @@ _MANIFEST_PARAM_META = {
     ("Project.configure", "draft_web_fps"): {
         "type": "number", "default": None, "min": 1,
         "desc": "draft レンダ時の web クリップの fps 上限"},
+    ("Project.render", "video_segments"): {
+        "type": "list", "default": None,
+        "desc": "書き出し済みの映像区間（h264 .mp4 のパスの列）。-c copy で結合し、"
+                "音声は Project のグラフで1本にして mux する。音声 Object と marker だけの"
+                " Project で使う（映像 Object があれば ValueError）"},
     ("Project.marker", "time"): {
         "type": "any", "required": True,
         "desc": "秒（数値）かアンカー名の文字列（例 'q2.start'）。アンカー名はレンダ時に解決"},
@@ -1845,6 +1854,19 @@ _MANIFEST_CONSTRAINTS = [
         "text": "render() の timeout は既定値 None（無制限）。制限が必要な場合だけ"
                 "秒数を明示する。単一出力は一時パスから原子的に確定し、明示"
                 "タイムアウトまたはCtrl+Cによる中断時は書きかけを削除する。",
+    },
+    {
+        "id": "video_segments_audio_only_project",
+        "topic": "出力",
+        "severity": "error",
+        "applies_to": ["Project.render"],
+        "text": "render(video_segments=[...]) は映像を区間の mp4 から取るので、Project に"
+                "映像を持つ Object（image / video / text / web / 生成物）があると ValueError。"
+                "音声 Object と marker だけを置く。出力は h264 の .mp4 だけで、"
+                "start/end・draft・alpha・parallel と併用できない。区間は寸法・pix_fmt・"
+                "codec が揃い、fps が Project と同じで、コマ数の合計が ceil(総尺×fps)"
+                "（総尺は音声側の尺）でなければ ValueError（実レンダ時に probe。"
+                "dry_run は区間の実在だけ見る）。",
     },
     {
         "id": "web_preview_optimized",

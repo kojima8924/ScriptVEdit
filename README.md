@@ -2165,10 +2165,11 @@ d = testkit.frame_diff("a.png", "b.png", out_png="diff.png")     # mean_abs/max_
 ```python
 p.render(output_path, *, dry_run=False, timeout=None,
          start=None, end=None, draft=False, alpha=False, strict=False,
-         parallel=None)
+         parallel=None, video_segments=None)
 ```
 
-`parallel=N` は時間分割並列レンダ（→「時間分割並列レンダ」節）。
+`parallel=N` は時間分割並列レンダ（→「時間分割並列レンダ」節）。`video_segments=[...]` は
+書き出し済みの映像区間の結合（→「書き出し済みの映像区間を結合する」節）。
 
 `start`/`end` は部分レンダの時間窓（秒。フィルタの t 基準を保持）。Web/Canvas Objectは
 交差するフレームだけをscreenshotする。状態依存`renderFrame()`との互換性のため窓より前も
@@ -2205,21 +2206,68 @@ result = p.render("output.mp4", dry_run=True)
 レイヤーを実行し直すか」を決めるため、`dry_run` の出力もキャッシュの状態で変わる
 （`"use"` はキャッシュが無ければ `dry_run` でも `FileNotFoundError`）。
 
+### 書き出し済みの映像区間を結合する（render(video_segments=[...])）
+
+長い動画を「映像は区間ごとに別の Project で書き出し、音声は1本の Project でまとめる」ときの
+最終段。区間（h264 の `.mp4`。音声なしでよい）を concat demuxer で `-c copy` し、音声は
+Project の音声グラフで全編1本にレンダして mux する（時間分割並列レンダの「チャンク + 音声レグ +
+mux」と同じ3段）。チャプター（`marker`）も mux 時に付く。
+
+```python
+p = Project()
+p.configure(width=1920, height=1080, fps=30)
+p.layer("audio.py")                 # 音声 Object（声・BGM・効果音）と marker だけ
+p.normalize_audio(mode="linear")
+p.render("final.mp4", video_segments=["part1.mp4", "part2.mp4", "part3.mp4"])
+```
+
+- **Project に映像を持つ Object（image / video / text / web / 生成物）があれば ValueError。**
+  映像は区間の mp4 がすべてなので、映像は区間を書き出す側の Project に置く
+- 出力は h264 の `.mp4` だけ。`start` / `end`・`draft`・`alpha`・`parallel` とは併用できない
+- 区間は実在する素材扱い（`dry_run` でも無ければ `FileNotFoundError`）。実レンダでは各区間を
+  probe し、寸法・pix_fmt・codec が区間どうしで一致し、fps が Project と同じで、**コマ数の合計が
+  `ceil(総尺 × fps)`**（総尺は音声側の尺）でなければ `ValueError`。再エンコードしないので、
+  区間は同じ設定（同じ configure の Project）で書き出すこと
+- `normalize_audio(mode="linear")` の増幅量は通常のレンダと同じ測定・同じ値
+- `dry_run` は `{"main": mux コマンド, "cache": {音声レグ: コマンド, 測定 JSON: 測定コマンド}}`。
+  音声レグと concat リストは `__cache__/work/segments_<鍵>/` に置き、mux の後に消す
+
+### レンダの内容鍵（render_key）
+
+```python
+key = p.render_key("final.mp4")     # 16桁。出力が同じになるレンダは同じ鍵
+```
+
+`render(dry_run=True)` の main と cache の全コマンドから、`-i` の直後の入力を内容指紋
+（`__cache__` の生成物はパス署名）に置き換え、出力パスを除いて畳んだもの。
+「書き出し済みの mp4 が、いまの Project から出るものと同じか」をレンダせずに確かめる
+（鍵をファイル名や控えに持ち、変わったときだけレンダし直す）。
+
+- cold / warm で同じ（`dry_run` の契約に乗る。例外も同じで、レイヤーキャッシュの
+  `cache="auto"` / `"use"` はキャッシュの状態で変わる）
+- 素材の1バイト・配置・Effect・fps・出力形式（拡張子）・`draft` で変わり、出力パス
+  （置き場所・ファイル名）では変わらない
+- **フィルタ文字列にパスを埋める op**（`text()` のフォントファイル・textfile、`mask` /
+  `mask_wipe` の画像、字幕の ASS など）を含む Project では、鍵がそのパスに依存する。
+  textfile や ASS は `__cache__` の内容ハッシュ名なので内容が同じなら同じだが、フォントや
+  リポジトリの置き場所が違う別マシンでは同じ Project でも鍵が変わる。同じマシンで使うこと
+
 ## 開発者向け情報
 
 ライブラリを「使う」だけなら読まなくてよい。リポジトリ自体を触る人向け。
 
 ### ディレクトリ構成
 
-本体は `src/scriptvedit/` の59モジュール（合計約4.7万行）のパッケージ。
+本体は `src/scriptvedit/` の61モジュール（合計約4.7万行）のパッケージ。
 
 ```
 ScriptVEdit/
-├── src/scriptvedit/     パッケージ本体（59モジュール）
+├── src/scriptvedit/     パッケージ本体（61モジュール）
 │   ├── project.py       Project / render / ffmpegコマンド構築
 │   ├── checkpoint.py    チェックポイント計画・ベイク（project から抽出した自由関数）
 │   ├── layercache.py    レイヤーキャッシュの鮮度判定・生成・再生
 │   ├── parallel.py preview.py  時間分割並列レンダ / thumbnail・storyboard
+│   ├── segments.py      書き出し済みの映像区間の結合（render(video_segments=)）
 │   ├── chapters.py params.py   マーカー・チャプター出力 / テンプレート変数
 │   ├── objects.py       Object / Transform / Effect / group・tile（Group）
 │   ├── timeline.py      anchor / pause / scene（`>>` の連結とアンカーの重複検査も）

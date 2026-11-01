@@ -19,7 +19,7 @@ from scriptvedit.context import (
 
 # --- scriptvedit 内モジュール（循環しないので先頭で import する）---
 from scriptvedit.audio import _duck_targets, _measure_loop_decay, _probe_audio_length
-from scriptvedit.cache import _FFP_MEMO, _fold_time_effects, _is_cache_artifact_path, _is_pending_cache_path, _resolve_layer_cache_quality, _web_cache_path
+from scriptvedit.cache import _FFP_MEMO, _fold_time_effects, _is_cache_artifact_path, _is_pending_cache_path, _render_cmds_signature, _resolve_layer_cache_quality, _web_cache_path
 from scriptvedit.expr import Expr, _UValue, max, min
 from scriptvedit.ffmpeg import FFmpegError, _atomic_write_text, _decoder_input_args, _ffmpeg_available_encoders, _normalize_ffmpeg_cmd, _run_ffmpeg, _run_ffmpeg_to_cache, _unique_tmp_path
 from scriptvedit.filters.audio import _MIX_AUDIO_FORMAT, _SIDECHAIN_FORMAT, _SIDECHAIN_MIX_FORMAT, _build_audio_effect_filters, _build_audio_pre_filters, _loop_crossfade_graph, _sidechain_hold_filter
@@ -40,6 +40,7 @@ from scriptvedit.chapters import _chapters_metadata_path, _check_marker_anchors,
 from scriptvedit.preview import storyboard as _storyboard_impl, thumbnail as _thumbnail_impl
 from scriptvedit.parallel import _parallel_chunk_bounds, _parallel_chunk_count, _render_parallel
 from scriptvedit.loudness import _LINEAR_GAIN_PLACEHOLDER, _LOUDNESS_MEASURE_FILTER, _collect_loudness_cmds, _ensure_linear_gain, _format_gain_db, _processing_peak
+from scriptvedit.segments import _check_segments_objects, _check_segments_request, _collect_segments_cmds, _render_with_segments
 from scriptvedit.checkpoint import (
     _build_morph_webm_cmd, _collect_checkpoint_cmds, _morph_frame_count,
     _step_context, _terminal_frame_plan,
@@ -999,7 +1000,7 @@ class Project:
 
     def render(self, output_path, *, dry_run=False, timeout=None,
                start=None, end=None, draft=False, alpha=False, strict=False,
-               parallel=None):
+               parallel=None, video_segments=None):
         # 以前はここに _ACTIVE_QUALITY の退避/復元だけを行う薄いラッパがあったが、
         # そのグローバルは書き込み専用（読み出しが存在しない＝効かないつまみ）
         # だったため撤去し、実装をこのメソッドへ統合した（監査 項目15a）。
@@ -1012,6 +1013,13 @@ class Project:
                 f"render: parallel は1以上の整数で指定してください: {parallel!r}")
         output_path = os.fsdecode(output_path)
         self._begin_render_pass(dry_run=dry_run, draft=draft, alpha=alpha)
+        # video_segments: 書き出し済みの映像区間を結合して本レンダにする（segments.py）。
+        # 出力形式・併用不可のオプション・区間の実在はレイヤーを実行する前に検査する
+        segment_paths = None
+        if video_segments is not None:
+            segment_paths = _check_segments_request(
+                self, output_path, video_segments, start=start, end=end,
+                draft=draft, alpha=alpha, parallel=parallel)
         # 奇数解像度の事前拒否: yuv420p系（h264/webm）はクロマサブサンプリングの
         # 制約で偶数寸法が必須。受理するとチェックポイント等の重い処理の後に
         # libx264 が "width not divisible by 2" で失敗するため、レンダ開始前に
@@ -1076,6 +1084,19 @@ class Project:
         # 部分レンダ窓と交差しないWeb Objectは入力自体が不要。未生成cacheを
         # 要求しないよう、plan/render構造検証とauditの後でレンダ対象から外す。
         self._prune_window_invisible_web_objects()
+
+        if segment_paths is not None:
+            # 映像は区間の mp4 がすべて（映像 Object があれば ValueError）。
+            # チェックポイント・web・数式は映像 Object が無いので生成物も無い
+            _check_segments_objects(self)
+            if dry_run:
+                res = _collect_segments_cmds(self, output_path, segment_paths)
+                return {"main": _normalize_ffmpeg_cmd(res["main"]),
+                        "cache": _normalize_extra_cmds(res["cache"])}
+            _render_with_segments(self, output_path, segment_paths, timeout)
+            print(f"\n完了: {output_path}")
+            self._print_render_warnings()
+            return None
 
         if dry_run:
             all_extra = self._collect_all_extra_cmds(output_path)
@@ -1169,6 +1190,39 @@ class Project:
               f"キャッシュ ヒット{cache_hits} ミス{cache_misses} / "
               f"生成した中間ファイル {generated}件")
         self._print_render_warnings()
+
+    def render_key(self, output_path, *, draft=False):
+        """このレンダの内容鍵（16桁）。出力が同じになるレンダは同じ鍵になる。
+
+        render(dry_run=True) が返す main と cache の全コマンドを、``-i`` の直後の入力は
+        _src_signature（素材は内容指紋・__cache__ の生成物はパス署名。lavfi は除く）、
+        出力パス（main の最後の引数と cache 側のキー）は除外し、残りを文字列のまま
+        並べて cache.py の _sig_key で畳んだもの（_render_cmds_signature）。
+        書き出し済みの mp4 が「いまの Project から出るものと同じか」を、レンダせずに
+        確かめる用途（鍵をファイル名や控えに持ち、変わったときだけレンダし直す）。
+
+        契約:
+          - cold / warm で同じ（dry_run の契約に乗る。__cache__ の中身に依らない）。
+            例外も dry_run と同じで、レイヤーキャッシュの cache='auto' / 'use' は
+            キャッシュの状態で変わる。
+          - 同一出力なら同一鍵。素材の1バイトの違い・配置・Effect・fps・出力形式
+            （拡張子）・draft で変わり、出力パス（置き場所・ファイル名）では変わらない。
+          - フィルタ文字列にパスを埋める op を含む Project では、鍵がそのパスに依存する
+            （drawtext の fontfile（フォントの絶対パス）・textfile・字幕の ASS、
+            mask / mask_wipe の movie=、audio_viz 等）。textfile や ASS は __cache__ の
+            内容ハッシュ名なので内容が同じなら同じだが、フォントの置き場所や
+            リポジトリの置き場所が違う別マシンでは同じ Project でも鍵が変わる。
+            フィルタ文字列の中のパスは書き換えない（エスケープ規則がフィルタごとに
+            違い、安全に取り出せない）。同じマシンで使うこと。
+          - normalize_audio(mode="linear") の増幅量は dry_run と同じ表記
+            （<MEASURED_GAIN>dB）のまま鍵に入る（測定値そのものは入らない。測定の
+            入力が同じなら測定値も同じ）。
+
+        video_segments のレンダには使わない（区間の mp4 の鍵は、区間を書き出す側の
+        Project で取る）。
+        """
+        return _render_cmds_signature(
+            self.render(output_path, dry_run=True, draft=draft))
 
     def _print_render_warnings(self):
         """レンダ中に出た警告を出力末尾へまとめて再掲する（監査 項目8）。

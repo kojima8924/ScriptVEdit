@@ -295,6 +295,41 @@ def _src_bucket(path):
         return hashlib.sha256(_norm_src_path(path).encode()).hexdigest()[:8]
 
 
+def _render_cmds_signature(cmds):
+    """render(dry_run=True) の戻り値 {"main": [...], "cache": {出力: [...]}} から内容鍵（16桁）を作る。
+
+    Project.render_key の本体（純関数）。各コマンドは
+      - ``-i`` の直後の引数を _src_signature に置き換える（素材は内容指紋、__cache__ の
+        生成物はパス署名。``-f lavfi -i 式`` の式はパスではないのでそのまま）、
+      - 出力パスを除く（main は最後の引数。cache 側はキーと、コマンド中でキーと同じ
+        引数（ラウドネス測定のように出力が "-" のものはそのまま残る））
+    として、残りを文字列のまま並べる。cache 側は辞書の並び（収集順）のまま。
+    鍵に生パスを混ぜない方針（CLAUDE.md §5）の例外は、フィルタ文字列の中に埋まった
+    パス（fontfile / textfile / movie= 等）で、これは書き換えない（render_key の docstring）。
+    """
+    def _args(cmd, drop_last, output):
+        parts = []
+        args = [str(a) for a in cmd]
+        if drop_last and args:
+            args = args[:-1]
+        for i, arg in enumerate(args):
+            if output is not None and arg == output:
+                parts.append("<out>")
+            elif (i >= 1 and args[i - 1] == "-i"
+                    and not (i >= 2 and args[i - 2] == "lavfi")):
+                parts.append(f"in:{_src_signature(arg)}")
+            else:
+                parts.append(arg)
+        return parts
+
+    sigs = ["render", "main:"]
+    sigs.extend(_args(cmds["main"], True, None))
+    for out_path, cmd in cmds["cache"].items():
+        sigs.append("cache:")
+        sigs.extend(_args(cmd, False, str(out_path)))
+    return _sig_key(sigs)
+
+
 def _norm_src_path(path):
     """パス文字列を正規化（cwd配下なら相対化・区切りは / ）"""
     try:

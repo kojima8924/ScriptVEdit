@@ -6571,6 +6571,164 @@ ALL_TESTS += [
 ]
 
 
+def _segments_tmp_dir():
+    """render(video_segments=) の check_* 用の一時ディレクトリ（tests 内・プロセス単位）"""
+    d = _tmp_file("_tmp_segments")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _segments_audio_project(duration=2):
+    """実ファイル不要の音声 Object だけの Project（160x90・10fps）"""
+    p = Project()
+    p.configure(width=160, height=90, fps=10)
+    layer = os.path.join(_segments_tmp_dir(), "audio_layer.py")
+    with open(layer, "w", encoding="utf-8", newline="\r\n") as f:
+        f.write("from scriptvedit import *\n"
+                "o = Object('dummy.wav')\n"
+                "o._has_audio = True\n"
+                f"o.time({duration})\n")
+    p.layer(layer, priority=0)
+    return p
+
+
+def _segments_make_clip(name, frames, size="160x90", fps=10):
+    """lavfi の単色で小さな h264 区間を作る（ffmpeg が無ければ skip）"""
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("ffmpeg/ffprobe が無い環境")
+    path = os.path.join(_segments_tmp_dir(), name)
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", f"color=c=gray:s={size}:r={fps}", "-frames:v", str(frames),
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", path], check=True, timeout=60)
+    return path
+
+
+def check_segments_frame_count_mismatch():
+    """video_segments: 区間のコマ数の合計 != ceil(総尺×fps) → ValueError（実レンダ時）"""
+    try:
+        segs = [_segments_make_clip("fc_a.mp4", 10), _segments_make_clip("fc_b.mp4", 9)]
+        p = _segments_audio_project(duration=2)  # 20 コマのはずが 19
+        out = os.path.join(_segments_tmp_dir(), "fc_out.mp4")
+        ok, msg = _expect_raise(lambda: p.render(out, video_segments=segs), ValueError,
+                                ("コマ数", "19", "20"))
+        if not ok:
+            return False, msg
+        if os.path.exists(out):
+            return False, "コマ数が合わないのに出力が作られた"
+        return True, msg.splitlines()[0]
+    finally:
+        shutil.rmtree(_segments_tmp_dir(), ignore_errors=True)
+        activate(None)
+
+
+def check_segments_dimension_mismatch():
+    """video_segments: 区間どうしの寸法が違う → ValueError（-c copy で結合できない）"""
+    try:
+        segs = [_segments_make_clip("dm_a.mp4", 10),
+                _segments_make_clip("dm_b.mp4", 10, size="320x180")]
+        p = _segments_audio_project(duration=2)
+        out = os.path.join(_segments_tmp_dir(), "dm_out.mp4")
+        return _expect_raise(lambda: p.render(out, video_segments=segs), ValueError,
+                             ("width", "揃っていません"))
+    finally:
+        shutil.rmtree(_segments_tmp_dir(), ignore_errors=True)
+        activate(None)
+
+
+def check_segments_fps_mismatch():
+    """video_segments: 区間の fps が Project の fps と違う → ValueError"""
+    try:
+        segs = [_segments_make_clip("fps_a.mp4", 20, fps=20)]
+        p = _segments_audio_project(duration=2)  # 10fps の 20 コマと同数だが fps が違う
+        out = os.path.join(_segments_tmp_dir(), "fps_out.mp4")
+        return _expect_raise(lambda: p.render(out, video_segments=segs), ValueError,
+                             ("fps",))
+    finally:
+        shutil.rmtree(_segments_tmp_dir(), ignore_errors=True)
+        activate(None)
+
+
+def check_segments_rejects_video_objects():
+    """video_segments: 映像を持つ Object（text 等）がある Project → ValueError（dry_run でも）"""
+    try:
+        seg = os.path.join(_segments_tmp_dir(), "vo.mp4")
+        with open(seg, "wb"):
+            pass
+        p = _segments_audio_project()
+        layer = os.path.join(_segments_tmp_dir(), "video_layer.py")
+        with open(layer, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write("from scriptvedit import *\ntext('a').time(1)\n")
+        p.layer(layer, priority=1)
+        return _expect_raise(
+            lambda: p.render(os.path.join(_segments_tmp_dir(), "vo_out.mp4"),
+                             dry_run=True, video_segments=[seg]),
+            ValueError, ("映像を持つ Object", "音声 Object と marker"))
+    finally:
+        shutil.rmtree(_segments_tmp_dir(), ignore_errors=True)
+        activate(None)
+
+
+def check_segments_rejects_non_h264_and_options():
+    """video_segments: 出力が .mp4 以外、start/end・draft・alpha・parallel との併用 → ValueError"""
+    try:
+        seg = os.path.join(_segments_tmp_dir(), "opt.mp4")
+        with open(seg, "wb"):
+            pass
+        d = _segments_tmp_dir()
+        cases = [
+            (dict(), os.path.join(d, "o.webm"), ("h264", ".mp4")),
+            (dict(), os.path.join(d, "o.gif"), ("h264", ".mp4")),
+            (dict(start=0, end=1), os.path.join(d, "o.mp4"), ("start / end",)),
+            (dict(draft=True), os.path.join(d, "o.mp4"), ("draft",)),
+            (dict(alpha=True), os.path.join(d, "o.mp4"), ("alpha",)),
+            (dict(parallel=2), os.path.join(d, "o.mp4"), ("parallel",)),
+        ]
+        for kwargs, out, words in cases:
+            p = _segments_audio_project()
+            ok, msg = _expect_raise(
+                lambda: p.render(out, dry_run=True, video_segments=[seg], **kwargs),
+                ValueError, words)
+            if not ok:
+                return False, f"{kwargs} {out}: {msg}"
+        # 区間の指定が文字列1つ・空 → ValueError
+        for bad in (seg, []):
+            p = _segments_audio_project()
+            ok, msg = _expect_raise(
+                lambda: p.render(os.path.join(d, "o.mp4"), dry_run=True, video_segments=bad),
+                ValueError, ("区間",))
+            if not ok:
+                return False, f"{bad!r}: {msg}"
+        return True, "非 .mp4 の出力と併用不可のオプションを全部拒否"
+    finally:
+        shutil.rmtree(_segments_tmp_dir(), ignore_errors=True)
+        activate(None)
+
+
+def check_segments_missing_file():
+    """video_segments: 区間の動画が無い → FileNotFoundError（dry_run でも。素材と同じ扱い）"""
+    try:
+        p = _segments_audio_project()
+        missing = os.path.join(_segments_tmp_dir(), "no_such_segment.mp4")
+        return _expect_raise(
+            lambda: p.render(os.path.join(_segments_tmp_dir(), "o.mp4"),
+                             dry_run=True, video_segments=[missing]),
+            FileNotFoundError, ("区間", "no_such_segment.mp4"))
+    finally:
+        shutil.rmtree(_segments_tmp_dir(), ignore_errors=True)
+        activate(None)
+
+
+ALL_TESTS += [
+    ("video_segments コマ数の不一致", check_segments_frame_count_mismatch),
+    ("video_segments 寸法の不一致", check_segments_dimension_mismatch),
+    ("video_segments fps の不一致", check_segments_fps_mismatch),
+    ("video_segments 映像 Object の拒否", check_segments_rejects_video_objects),
+    ("video_segments 非h264/併用不可オプションの拒否", check_segments_rejects_non_h264_and_options),
+    ("video_segments 区間が無い", check_segments_missing_file),
+]
+
+
 @pytest.mark.parametrize("name,check", ALL_TESTS, ids=[n for n, _ in ALL_TESTS])
 def test_error_case(name, check):
     """各エラーケースを pytest 経由で検証する（失敗時はメッセージを表示）

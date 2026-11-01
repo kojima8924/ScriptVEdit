@@ -9,6 +9,8 @@
 チャンク外フレームが重いフィルタへ流れないようにする（＝ここが高速化の本体）。
 音声は loudnorm/duck_under が全尺依存のため分割せず、全編1本を並列レンダして
 concat(-c copy)結果へmuxする。チャプター(FFMETADATA)もmux時に付与する。
+音声レグと mux の組み立て（_build_audio_leg_cmd / _build_concat_mux_cmd）は、
+書き出し済みの区間を結合する segments.py（render(video_segments=)）も使う。
 
 audit.py と同じ方式で、Project インスタンスを第1引数に受ける自由関数を
 提供する（Project は import しない＝循環 import を起こさない）。
