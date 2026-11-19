@@ -13,6 +13,7 @@
 - **時間分割並列レンダ** — 総尺をフレーム境界で N 分割し、別プロセスで並列レンダして無劣化 concat。
   実測（2分56秒・87オブジェクトの実プロジェクトを20コアPCで計測）で**逐次 1012 秒 → 並列8 で 106 秒**（→「時間分割並列レンダ」節）
 - **AI が読める機能マニフェスト** — `python -m scriptvedit describe` で全機能のシグネチャ・引数レンジを JSON / Markdown 出力（→「ケイパビリティ・マニフェスト」節）
+- **Blender 切り絵アニメーション** — `puppet_clip()` で画像パーツの親子リグと秒単位のキーを JSON から動かし、透過動画として合成する。通常機能への bpy 依存は追加しない（[使用方法](docs/blender_puppet.md)）
 - **図解アニメ** — 正規表現の照合の後戻り（`regex_view`）・番号つきの箱の列（`slots`）・文字列の組み替え（`text_transition` / `odometer`）・
   点と線の上を流れるパケット（`flow_graph` / `flow_tree`）・点で描いた地球（`globe`）・スクリーンショットの矩形に
   時刻つきで足す囲み・下線・暗くする・寄り（`annotate`）・ロゴに光の帯が一度走る演出（`glint`）・年表と時刻の帯（`timeline`）・データのグラフ（`chart`。線・階段・面・ローソク足・棒）を、コマごとに Python で描いた透過動画の
@@ -20,6 +21,10 @@
 
 素材は画像・動画・音声のほか、HTML（Playwright 経由）・LaTeX 数式（KaTeX 同梱・オフライン）・TTS 音声も
 同じ Object として扱える。出力は mp4 / gif / webp / 連番PNG / 透過webm。
+
+ライセンスはコアと外部CLIのホストラッパーが MIT。
+同梱の Blender 内部ワーカー `src/scriptvedit/blender_runtime.py` のみ GPL-3.0-or-later
+（[範囲と配布物](docs/blender_puppet.md#ライセンスの範囲)）。
 
 ## 必要なもの
 
@@ -41,6 +46,7 @@ FFmpeg 8 の機能を使うため、初回実行時にメジャーバージョ�
   `flow_graph` / `flow_tree` / `globe` / `annotate` / `glint` / `timeline` / `chart` と、その部品 `scriptvedit.framekit`。`pip install "scriptvedit[figures]"`）
 - numpy + scipy + opencv-python + Pillow + tqdm（`morph_to` / `explode_to` / `assemble_from` / `fly_to`。`pip install "scriptvedit[morph]"`）
 - Pillow（`storyboard` 使用時）
+- 外部の Blender 実行ファイル（`puppet_clip` 使用時のみ。pip extras の対象外。Blender 4.3.2 の CPU レンダで検証済み）
 - TTS（`voice` / `narrate` 使用時。`scriptvedit.tts` 経由。いずれか1つ）
   - VOICEVOX エンジン（`backend="voicevox"`。オフライン・キャラボイス。別途起動が必要）
   - edge-tts（`backend="edge"`。`pip install edge-tts` または `pip install scriptvedit[tts]`。導入が楽だがオンライン必須）

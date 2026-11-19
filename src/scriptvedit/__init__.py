@@ -49,7 +49,7 @@ __all__ = [
     "perspective_warp", "lens", "ken_burns", "drop_shadow", "outline", "tint",
     "slideshow", "transition", "video_sequence",
     # 絵の列を1本の動画（入力1本）にする
-    "stills", "frames",
+    "stills", "frames", "puppet_clip",
     # 合成・コンポジション
     "mask", "mask_wipe", "opacity", "blend_mode", "rounded", "pip",
     "blur_background_fill", "progress_bar",
@@ -238,6 +238,9 @@ from scriptvedit.media import (  # noqa: F401
 )
 from scriptvedit.stillseq import (  # noqa: F401
     frames, stills
+)
+from scriptvedit.blender import (  # noqa: F401
+    puppet_clip
 )
 from scriptvedit.web import (  # noqa: F401
     arrow, bubble, circle, diagram, label, rect, slide, spotlight, subtitle, subtitle_box

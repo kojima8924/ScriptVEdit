@@ -43,7 +43,7 @@ _MANIFEST_CATEGORY_MEMBERS = {
     "オーディオ": ["avolume", "duck_under", "loop", "audio_sequence",
                    "sfx", "audio_viz", "voice", "narrate", "normalize_audio"],
     "シーケンス生成": ["slideshow", "transition", "video_sequence", "slide",
-                       "stills", "frames"],
+                       "stills", "frames", "puppet_clip"],
     "同期・タイムライン": ["anchor", "pause", "scene", "beat_sync", "marker"],
     "グループ": ["group", "tile"],
     "図形ビルダー": ["circle", "rect", "arrow", "label", "spotlight"],
@@ -579,6 +579,12 @@ _MANIFEST_PARAM_META = {
                                  "draw はこの寸法で描く"},
     ("frames", "fps"): {"type": "number", "default": None, "min": 1, "max": 1000,
                         "desc": "省略時は Project の fps"},
+    ("puppet_clip", "duration"): {"type": "number", "default": None, "min": 0,
+                                  "desc": "秒。省略時は motion.duration"},
+    ("puppet_clip", "fps"): {"type": "number", "default": None, "min": 1, "max": 1000,
+                             "desc": "省略時は Project の fps"},
+    ("puppet_clip", "samples"): {"type": "int", "default": 8, "min": 1, "max": 4096},
+    ("puppet_clip", "seed"): {"type": "int", "default": 0, "min": 0, "max": 2147483647},
     # 点で描いた地球と世界地図（fx_globe.py）
     ("globe", "size"): {"type": "any", "default": 900,
                         "desc": "ortho は正方形の一辺 px。plate は (幅, 高さ)（2:1）か幅。64〜4096"},
@@ -1203,6 +1209,13 @@ _MANIFEST_NOTES = {
         "生成物は framekit.build → __cache__/artifacts/frames/<鍵>.mov。鍵は系列の値・注記・寸法・使う色・"
         "書式・字の絵の署名・_CHART_VER（配置の結果は入らない。dry_run は描かない）",
         "numpy・opencv-python・Pillow が要る（構築のときにも。目盛りの字の寸法を測る）",
+    ],
+    "puppet_clip": [
+        "Blender は任意の外部依存。通常の Python に bpy は不要。実生成時だけ起動する",
+        "rig の JSON に画像の親子構造、motion に秒単位のキーを記述する。詳細は docs/blender_puppet.md",
+        "CPU Cycles のバッチ生成 → 可逆 RGBA MOV。time() で伸ばすと最後の絵を保持する",
+        "dry_run は Blender を起動しない。画像の内容・実行ファイル・実装の内容指紋が鍵へ入る",
+        "画像のパーツ分離・隠れた部分の描き足し・口形の準備は素材制作側で行う",
     ],
     "frames": [
         "draw のコードは鍵に入らない。同じ key なら draw を呼ばずに前回の動画を使うので、"

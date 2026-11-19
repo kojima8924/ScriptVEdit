@@ -1,0 +1,53 @@
+{
+  "canvas": [
+    128,
+    128
+  ],
+  "nodes": [
+    {
+      "id": "root",
+      "position": [
+        64,
+        64
+      ]
+    },
+    {
+      "id": "body",
+      "parent": "root",
+      "size": [
+        36,
+        48
+      ],
+      "color": "#3178bd"
+    },
+    {
+      "id": "head",
+      "parent": "root",
+      "position": [
+        0,
+        -34
+      ],
+      "size": [
+        32,
+        30
+      ],
+      "shape": "ellipse",
+      "color": "#ffaa55",
+      "z": 1
+    },
+    {
+      "id": "eye",
+      "parent": "head",
+      "position": [
+        7,
+        -3
+      ],
+      "size": [
+        4,
+        8
+      ],
+      "color": "#203040",
+      "z": 1
+    }
+  ]
+}

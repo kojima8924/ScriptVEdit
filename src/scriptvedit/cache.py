@@ -101,7 +101,7 @@ def _is_pending_cache_path(path):
 
 # 「表示が素材より長いとき最後のコマを保持する」生成物の種類
 # （__cache__/artifacts/<種類>/ のディレクトリ名。stillseq.py の stills() / frames()）。
-_HOLD_ARTIFACT_KINDS = ("stills", "frames")
+_HOLD_ARTIFACT_KINDS = ("stills", "frames", "blender")
 
 
 def _is_hold_artifact_path(path):

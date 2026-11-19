@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "スクリプト（Python DSL）から ffmpeg で動画を組み立てるビデオエディタ"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "MIT (core); GPL-3.0-or-later (bundled Blender worker only)" }
 authors = [{ name = "kojima8924" }]
 # コア（Project/Object/Effect/ffmpeg 呼び出し）は標準ライブラリのみで動作する。
 # 追加機能は extras で導入する。
@@ -58,4 +58,6 @@ scriptvedit = [
     # その出典・利用条件（同梱の素材・データの「全部自作」の唯一の例外。data/NOTICE.md）
     "data/*.png",
     "data/NOTICE.md",
+    # bpy を使う別プロセス用ワーカーのライセンス。コア本体は MIT のまま。
+    "data/licenses/*.txt",
 ]

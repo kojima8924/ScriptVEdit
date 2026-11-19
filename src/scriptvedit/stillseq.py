@@ -66,7 +66,7 @@ from scriptvedit.state import _ARTIFACT_DIR, _ENGINE_VER, _GEN_COUNTER, _GEN_COU
 from scriptvedit.validate import _require_number
 
 # 生成物のディレクトリ名（最後のコマを保持する対象。cache.py と同じ集合を見る）
-_STILLS_KIND, _FRAMES_KIND = _HOLD_ARTIFACT_KINDS
+_STILLS_KIND, _FRAMES_KIND = _HOLD_ARTIFACT_KINDS[:2]
 
 # 生成コマンドの世代。符号化やフィルタの組み方を変えたら上げる（鍵に入る）。
 # 2: stills に -reinit_filter 0（画素形式の混在で絵が消える不具合の修正）。
