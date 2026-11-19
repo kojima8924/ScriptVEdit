@@ -13,6 +13,56 @@ env:
   PYTHONUTF8: "1"
 
 jobs:
+  blender-puppet:
+    # Blender 機能は既存の図解・フォント等の回帰に遮られず、独立して実レンダする。
+    # 通常の全テストゲートも残し、失敗を成功扱いにしない。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Blender と固定版 FFmpeg を導入
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends blender
+          FF_URL="https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-19-12-39/ffmpeg-n8.1.3-36-ge22a4510c9-linux64-gpl-8.1.tar.xz"
+          FF_SHA256="f35327acf7cc44f2ef606101c1321d949ae2bcc88fd02b160c09386d5ba53acf"
+          curl -fsSL -o /tmp/ffmpeg.tar.xz "$FF_URL"
+          echo "$FF_SHA256  /tmp/ffmpeg.tar.xz" | sha256sum -c -
+          mkdir -p /tmp/ffdist
+          tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ffdist --strip-components=1
+          sudo cp /tmp/ffdist/bin/ffmpeg /tmp/ffdist/bin/ffprobe /usr/local/bin/
+          blender --version
+          ffmpeg -version | head -1
+      - name: コアだけをインストールして実レンダを検証
+        run: |
+          python -m pip install -e . pytest
+          python -m pytest tests/test_blender_puppet.py -q -rs --realrender-all
+          python examples/blender_puppet/main.py
+      - name: wheel のワーカーとライセンス境界を検証
+        run: |
+          python -m pip wheel --no-deps -w /tmp/sv-wheel .
+          python - <<'EOF'
+          from pathlib import Path
+          import zipfile
+          wheel = next(Path('/tmp/sv-wheel').glob('*.whl'))
+          with zipfile.ZipFile(wheel) as z:
+              assert 'scriptvedit/blender.py' in z.namelist()
+              assert 'scriptvedit/data/licenses/GPL-3.0.txt' in z.namelist()
+              assert b'SPDX-License-Identifier: GPL-3.0-or-later' in z.read('scriptvedit/blender_runtime.py')
+              meta = z.read(next(p for p in z.namelist() if p.endswith('.dist-info/METADATA')))
+              assert b'MIT (core); GPL-3.0-or-later (bundled Blender worker only)' in meta
+          print('Blender worker / GPL license / package metadata verified')
+          EOF
+      - name: パペットの検証映像を保存
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-puppet-review
+          path: |
+            examples/blender_puppet/output/preview.mp4
+            __cache__/artifacts/blender/*.mov
+
   test:
     strategy:
       fail-fast: false
@@ -139,13 +189,6 @@ jobs:
         # Chromium が要る formula 経路を含むため Linux の1マトリクスだけで実行する。
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: python -m pytest tests/test_real_render.py -q -rs --realrender
-      - name: Blender の CPU ヘッドレス実レンダ
-        if: runner.os == 'Linux' && matrix.python == '3.13'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends blender
-          blender --version
-          python -m pytest tests/test_blender_puppet.py -q -rs --realrender-all
       - name: 実レンダ後のキャッシュを掃除
         # dry_run はキャッシュ状態に依存しない(CLAUDE.md §3)ので必須ではないが、
         # 例外のレイヤーキャッシュ cache='auto'/'use' を使うテストを後続ステップに
