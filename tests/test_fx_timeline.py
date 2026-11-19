@@ -26,6 +26,7 @@ import subprocess
 import time
 import warnings
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -231,9 +232,20 @@ def _check_boxes(obj, tl):
 
 def test_later_mark_goes_under_an_earlier_label():
     """時刻の帯: 23:00 の札は 22:35 の札の下（軸の側）に入り、22:35 の柱を覆わない"""
-    _need_font()
     _proj(1920, 1080)
-    tl = _band_scene()
+    font = str(Path(__file__).parent / "golden" / "textmove" / "svtm_block.ttf")
+    tl = timeline(18, 24, ticks=1, tick_format="{v}:00", font=font)
+    tl.mark(19, "19:00\nStopped", note="Precaution", at=0.3)
+    tl.mark(22.5 + 5 / 60, "22:35\nActual release", at=1.2)
+    tl.mark(23, "23:00 Planned", dot="ring", color="muted", text_color="muted", at=2.0)
+    tl.bracket(19, 22.5 + 5 / 60, "3.5 hours", at=2.8)
+    # この回帰は、中央揃えの2枚が互いの柱を覆う場合を扱う。OS の既定書体だと
+    # 短いほうが相手の柱まで届かず、逆の上下順が正しくなるため、同梱書体で前提を固定する。
+    for mine, other in ((1, 2), (2, 1)):
+        item = tl._items[mine]
+        width, _height = tl._box_size(tl._label_stack(item, False), False)
+        left = tl._clamp_x(tl.x(item["v"]), width)
+        assert left < tl.x(tl._items[other]["v"]) < left + width
     obj = tl.build()
     items = obj.figure.items
     b_2235, b_23 = items[1]["box"], items[2]["box"]

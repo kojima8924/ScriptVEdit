@@ -12,7 +12,7 @@
     "-i",
     "color=c=black:s=1280x720:d=3:r=30",
     "-i",
-    "__cache__/artifacts/flight/db4c83d5/477388341ba499ba.mkv",
+    "__cache__/artifacts/flight/db4c83d5/3c24fa00e74f798b.mkv",
     "-filter_complex",
     "[1:v]trim=end=3.066666666666667[obj1];[0:v][obj1]overlay=trunc(0.1*W)-(w-412)/2:trunc(0.1*H)-(h-356)/2:eof_action=pass:enable='between(t/,0/,3)'[v1]",
     "-map",
@@ -27,7 +27,7 @@
     "test130.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/flight/db4c83d5/477388341ba499ba.mkv": [
+    "__cache__/artifacts/flight/db4c83d5/3c24fa00e74f798b.mkv": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -49,7 +49,7 @@
       "bgra",
       "-frames:v",
       "91",
-      "__cache__/artifacts/flight/db4c83d5/477388341ba499ba.mkv"
+      "__cache__/artifacts/flight/db4c83d5/3c24fa00e74f798b.mkv"
     ]
   }
 }

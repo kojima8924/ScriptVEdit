@@ -263,6 +263,54 @@ def test_sliced_ot_movement_is_close_to_hungarian(tmp_path, offset):
         assert rnd > best * 1.15
 
 
+def _scalar_sliced_ot_flow(src, dst, seed, iterations, directions):
+    """独立した Python のスカラー計算。BLAS・配列のソート・float32 を使わない。"""
+    n = len(src)
+    center_src = [sum(float(p[k]) for p in src) / n for k in (0, 1)]
+    center_dst = [sum(float(p[k]) for p in dst) / n for k in (0, 1)]
+    z = [[float(p[k]) - center_src[k] for k in (0, 1)] for p in src]
+    y = [[float(p[k]) - center_dst[k] for k in (0, 1)] for p in dst]
+    rng = np.random.default_rng(seed)
+    for _ in range(iterations):
+        rotation = float(rng.uniform(0.0, math.pi / directions))
+        delta = [[0.0, 0.0] for _ in src]
+        for k in range(directions):
+            angle = k * (math.pi / directions) + rotation
+            dx, dy = math.cos(angle), math.sin(angle)
+            projected = [dx * p[0] + dy * p[1] for p in z]
+            target = sorted(dx * p[0] + dy * p[1] for p in y)
+            # 同値なら粒の番号が小さいほうから組む。
+            order = sorted(range(n), key=lambda i: (projected[i], i))
+            for rank, i in enumerate(order):
+                displacement = target[rank] - projected[i]
+                delta[i][0] += dx * displacement
+                delta[i][1] += dy * displacement
+        z = [[p[k] + 2.0 / directions * d[k] for k in (0, 1)]
+             for p, d in zip(z, delta)]
+    return np.array([[p[k] + center_dst[k] for k in (0, 1)] for p in z])
+
+
+@pytest.mark.parametrize("directions", [1, 7, 64])
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_sliced_ot_matches_scalar_reference_with_ties(directions, duplicate):
+    """同じ位置と近い位置の粒も、固定した順の倍精度スカラー輸送と一致する。
+
+    旧 float32 / BLAS は演算順で射影の同値判定が変わり、中間の絵と余白まで変わった。
+    金型の許容値を広げる代わりに、独立した参照実装で輸送自体を確かめる。
+    """
+    mf = _mf()
+    src = np.array([[i % 6 + (i // 6) * 0.000003, i // 6] for i in range(36)],
+                   dtype=np.float64)
+    if duplicate:
+        src[1] = src[0]                         # 同値の射影の順も確かめる
+    dst = np.array([[i / 3.1 + 70, math.sin(i) * 2.3 - 17] for i in range(36)])
+    expected = _scalar_sliced_ot_flow(src, dst, seed=17, iterations=8,
+                                      directions=directions)
+    actual = mf._sliced_ot_flow(src, dst, np.random.default_rng(17),
+                                iterations=8, directions=directions)
+    assert np.max(np.abs(actual - expected)) < 2e-10
+
+
 def test_particles_stay_inside_the_canvas_in_every_frame(tmp_path):
     """全コマで、粒（半径 + 縁）がキャンバスの内側にある（大きな arc / swirl でも）"""
     mf = _mf()
@@ -733,11 +781,11 @@ def test_manifest_lists_fly_to_with_real_defaults_and_choices():
 
 _GOLDEN_FRAMES = (("dissolve_in", 2), ("flight", 10), ("dissolve_out", 19))
 
-# 金型の判定の閾値（_golden_diff の3つの値）。粒の入れ替わりの雑音と描き方の変更の
-# 実測（流れの出力に σ=0.01px の雑音 → ぼかしの差 0.69 / 色 0.02 / α 0.16%。
-# 粒を 5% 暗く → 色 2.0〜4.3、止まる幅 0.12→0.2 → ぼかしの差 4.6・α 4%、
-# 粒の半径 +0.25 → ぼかしの差 5.1・α 4.6%、色に α が2回掛かる旧版 → ぼかしの差 5.5・色 19）。
-# test_golden_check_catches_render_changes がこの線引きを確かめる
+# 金型の判定の閾値（_golden_diff の3つの値）。丸めの雑音は許容し、形・色・α の
+# 変化は検出する。Hilbert 順位への 0.01px の揺らぎは、倍精度の丸め誤差よりはるかに
+# 大きく、実際に粒の行き先を変えるため、許容する雑音の例には使わない。
+# test_golden_check_catches_render_changes は float64 の 64 ULP の雑音を通し、
+# 0.01px の輸送結果の揺らぎ・色・α・止まる幅・粒の半径・出発の揺らぎの変更を落とす。
 _GOLDEN_TOL = {"blur": 1.0, "color": 1.0, "alpha": 0.01}
 
 
@@ -844,8 +892,7 @@ def test_golden_frames(tmp_path, request):
 
 
 def test_golden_check_catches_render_changes(tmp_path, monkeypatch):
-    """金型の判定の線引き: 粒の入れ替わり（流れの出力の微小な雑音）は通し、
-    描き方の変更（色・α の掛け方・止まる幅・粒の大きさ・出発の揺らぎ）は落とす"""
+    """金型の判定の線引き: 倍精度の丸め誤差は通し、軌跡・描き方の変更は落とす。"""
     mf = _mf()
     base = _golden_render(mf, tmp_path)
 
@@ -859,12 +906,18 @@ def test_golden_check_catches_render_changes(tmp_path, monkeypatch):
     flow = mf._sliced_ot_flow
     splat = mf._splat
 
-    def noisy_flow(src, dst, rng, *args, **kwargs):
+    def roundoff_flow(src, dst, rng, *args, **kwargs):
+        z = flow(src, dst, rng, *args, **kwargs)
+        ulp = np.maximum(np.spacing(np.abs(z)), np.finfo(np.float64).eps)
+        return z + np.random.default_rng(99).normal(0.0, 64.0, z.shape) * ulp
+
+    def shifted_flow(src, dst, rng, *args, **kwargs):
         z = flow(src, dst, rng, *args, **kwargs)
         return z + np.random.default_rng(99).normal(0.0, 0.01, z.shape)
 
-    assert not any(caught(_sliced_ot_flow=noisy_flow).values())
+    assert not any(caught(_sliced_ot_flow=roundoff_flow).values())
     changes = {
+        "輸送結果を 0.01px 揺らす（粒の対応が変わる）": dict(_sliced_ot_flow=shifted_flow),
         "粒を 5% 暗く": dict(_splat=lambda p, c, a, r: splat(p, c * 0.95, a, r)),
         "色に α が2回掛かる（旧版）": dict(
             _splat=lambda p, c, a, r: splat(p, c * a[:, None], a, r)),

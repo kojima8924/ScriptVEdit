@@ -73,7 +73,7 @@ _FIGURE_FONT_DEPENDENT_TESTS = frozenset({"test126", "test120", "test121", "test
                                           # text_transition / odometer（同梱フォントで描くが、
                                           # 鍵に Pillow の版が入る）
                                           "test123", "test124", "test125",
-                                          # timeline（札と目盛りの字は既定のフォント）
+                                          # timeline（同梱フォント。鍵に Pillow の版が入る）
                                           "test137"})
 
 

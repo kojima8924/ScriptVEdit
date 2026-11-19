@@ -112,7 +112,10 @@ def _render_parallel(project, output_path, n, timeout):
         audio_path = None
         audio_cmd = None
         if use_audio:
-            audio_path = os.path.join(work_dir, "audio.m4a")
+            # Matroska は AAC の初期遅延を CodecDelay に保存する。M4A 経由では
+            # stream copy 時に initial_padding が失われるため、同じコンテナで運ぶ。
+            audio_ext = ".mka" if os.path.splitext(final_path)[1].lower() == ".mkv" else ".m4a"
+            audio_path = os.path.join(work_dir, "audio" + audio_ext)
             audio_cmd = _build_audio_leg_cmd(project, audio_path)
         print(f"時間分割並列レンダ: {n_eff}チャンク "
               f"(総{n_total}フレーム / {project.duration}s / "
@@ -356,8 +359,10 @@ def _build_concat_mux_cmd(list_path, audio_path, meta_path, out_path, fps):
     ``-avoid_negative_ts disabled`` も要る: -copyts では音声の priming（負の時刻）と
     映像の B フレームの負の dts がそのまま muxer へ届き、Matroska（.mkv）の既定は
     全ストリームを +0.021 秒ずらした（映像の開始が 0.021 秒になる）。disabled なら
-    mkv も1本レンダと同じ「映像 0・音声 -0.021」になり、mp4 / mov は編集リストで
-    従来どおり（FFmpeg 8.0 実測。make_zero / make_non_negative は全部を 0.067 秒ずらす）。
+    mkv も映像の開始は 0 になる。音声の初期遅延は .mka レグの CodecDelay で保持する
+    （FFmpeg 8.1 は AAC にも書く。M4A からの stream copy ではこの情報が落ち、
+    デコードした音声の頭に 1024 サンプル余分に残った）。mp4 / mov は .m4a レグの
+    編集リストを使う。make_zero / make_non_negative は全体をずらすので使わない。
 
     出力が mp4 / mov なら ``-movie_timescale``（_mux_movie_timescale）も付け、結合した
     映像の尺をコマ数 / fps ちょうどにする（Matroska には無いオプションなので付けない）。

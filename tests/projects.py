@@ -497,7 +497,7 @@ _SPECS = [
                 doc="loop(crossfade=, tail=, head=): 周をクロスフェードでつなぐ部分グラフ"
                     "（48kHz のサンプル数で区間を書く・aloop は1周期だけ）+ duck_under",
                 assets=("audio/効果音.mp3",)),
-    ProjectSpec("test137", ["test137_timeline.py"], needs=("font", "morph"),
+    ProjectSpec("test137", ["test137_timeline.py"], needs=("morph",),
                 configure=_cfg(width=1920, height=1080),
                 doc="timeline: 省いた年表（breaks）・板つきの札が立つ・2つの印の間の赤い帯が伸び、"
                     "上に odometer を重ねる（framekit.build の frames 生成物。鍵にフォントの"

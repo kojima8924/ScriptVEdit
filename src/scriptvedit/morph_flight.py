@@ -44,7 +44,8 @@ scriptvedit.morph_flight - 粒子の輸送モーフ（fly_to）のフレーム�
   _terminal_inner_dims（元の箱 = A）と move の anchor の補正がそのまま効く。
   4096px を超えたら ValueError。
 
-重さ（実測。Windows 11・Python 3.10・numpy 2.0・20 スレッドの CPU）:
+重さ（旧 float32 対応の実測。Windows 11・Python 3.10・numpy 2.0・20 スレッドの CPU）:
+  現行の対応は倍精度・固定順へ変更したため、前処理時間はこの旧測定より長くなりうる。
   1080p の ED の形（A = 5行の赤い字 1498x550 → B = 締めの一文 1470x170、粒 1.2万、
   キャンバス 1574x674）で、前処理（標本・対応）0.9〜1.9 秒、1コマ 35〜95 ms
   （粒の描画 約 20 ms・合成 約 7 ms。PNG の書き出しは別スレッドで重ねる。幅は CPU の
@@ -254,24 +255,28 @@ def _sliced_ot_flow(src, dst, rng, iterations=_OT_ITERATIONS,
     返値: 流れ着いた位置（dst の座標系）
     """
     c_dst = dst.mean(axis=0)
-    # (2, N) の float32 で持つ（射影 (K, N) が行優先で並び、行ごとのソートが速い）
-    z = np.ascontiguousarray((src - src.mean(axis=0)).T, dtype=np.float32)
-    y = np.ascontiguousarray((dst - c_dst).T, dtype=np.float32)
+    # float32 の射影は別の位置を同値に丸め、BLAS の積和順の差で粒の対応が変わる。
+    # float64 と明示した演算順で流し、同値の射影は入力順を保って組む。
+    z = np.ascontiguousarray((src - src.mean(axis=0)).T, dtype=np.float64)
+    y = np.ascontiguousarray((dst - c_dst).T, dtype=np.float64)
     base = np.arange(directions) * (np.pi / directions)
-    step = np.float32(2.0 / directions)
+    step = 2.0 / directions
     for _ in range(iterations):
         ang = base + rng.uniform(0.0, np.pi / directions)
-        dirs = np.stack([np.cos(ang), np.sin(ang)], axis=1).astype(np.float32)  # (K, 2)
-        proj = dirs @ z                                         # (K, N)
-        target = np.sort(dirs @ y, axis=1)
-        # 射影が同値になるのは同じ位置の粒どうしだけ（どちらへ組んでも同じ）なので、
-        # 安定ソートでなくてよい（安定ソートは 3 倍遅い）
-        order = np.argsort(proj, axis=1)
+        dirs = np.stack([np.cos(ang), np.sin(ang)], axis=1)  # (K, 2)
+        # 2項の射影も方向の和も BLAS に任せない（OS / CPU ごとの積和順を避ける）。
+        proj = dirs[:, 0, None] * z[0] + dirs[:, 1, None] * z[1]
+        target = np.sort(dirs[:, 0, None] * y[0] + dirs[:, 1, None] * y[1], axis=1)
+        order = np.argsort(proj, axis=1, kind="stable")
         disp = np.empty_like(proj)
         np.put_along_axis(disp, order,
                           target - np.take_along_axis(proj, order, axis=1), axis=1)
-        z += step * (dirs.T @ disp)
-    return z.T.astype(np.float64) + c_dst
+        delta = np.zeros_like(z)
+        for k, direction in enumerate(dirs):
+            delta[0] += direction[0] * disp[k]
+            delta[1] += direction[1] * disp[k]
+        z += step * delta
+    return z.T + c_dst
 
 
 def _hilbert_index(pts, lo, span, bits=_HILBERT_BITS):

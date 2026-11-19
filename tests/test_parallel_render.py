@@ -263,12 +263,13 @@ def test_parallel_chunk_command_structure(tmp_path, monkeypatch):
     assert os.path.exists(out)  # os.replaceで確定済み
 
 
-def test_parallel_audio_leg_and_mux(tmp_path, monkeypatch):
+@pytest.mark.parametrize("ext, leg_ext", [("mp4", "m4a"), ("mkv", "mka")])
+def test_parallel_audio_leg_and_mux(tmp_path, monkeypatch, ext, leg_ext):
     calls = _mock_run(monkeypatch)
-    out = str(tmp_path / "para.mp4")
+    out = str(tmp_path / f"para.{ext}")
     _build_project(tmp_path, with_audio=True).render(out, parallel=2)
 
-    audio_cmds = [c for c in calls if c[-1].endswith("audio.m4a")]
+    audio_cmds = [c for c in calls if c[-1].endswith(f"audio.{leg_ext}")]
     assert len(audio_cmds) == 1
     ac = audio_cmds[0]
     # 音声レグ: 全編1本（-t 6.0）・映像なし・aac 160k
@@ -284,9 +285,9 @@ def test_parallel_audio_leg_and_mux(tmp_path, monkeypatch):
                   and os.path.basename(c[-1]).startswith("chunk_")]
     assert chunk_cmds and all("-an" in c for c in chunk_cmds)
 
-    # mux は映像=concat / 音声=audio.m4a を -c copy で束ねる
+    # mux は映像=concat / 音声レグを -c copy で束ねる（Matroska は CodecDelay を保持）
     mux = next(c for c in calls if "concat" in c)
-    assert any(a.endswith("audio.m4a") for a in mux)
+    assert any(a.endswith(f"audio.{leg_ext}") for a in mux)
     assert "1:a" in mux
     assert mux[mux.index("-c") + 1] == "copy"
 
@@ -584,11 +585,13 @@ def test_parallel_off_grid_chunks_keep_frame_times(tmp_path):
 
 @pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg/ffprobe が無い環境ではスキップ")
 @pytest.mark.parametrize("ext", ["mp4", "mkv"])
-def test_parallel_audio_stream_timing_matches_sequential(tmp_path, ext):
+@pytest.mark.parametrize("sample_rate", [48000, 44100])
+def test_parallel_audio_stream_timing_matches_sequential(tmp_path, ext, sample_rate):
     """音声つきの並列レンダで、映像・音声の開始時刻と音声の PCM が逐次レンダと同じ
 
-    mux の -copyts で音声レグの priming（-0.021 秒）がそのまま届く。Matroska の既定の
-    avoid_negative_ts は全体を +0.021 秒ずらすので disabled にしてある。
+    mux の -copyts で音声レグの priming がそのまま届く。Matroska は .mka レグで
+    CodecDelay も運び、初期遅延の 1024 サンプルを再生しない。サンプルレートを変えても
+    同じ PCM が得られる（固定の秒数で音声をずらす修正ではない）。
     """
     wav = str(tmp_path / "tone.wav")
     subprocess.run(
@@ -602,6 +605,8 @@ def test_parallel_audio_stream_timing_matches_sequential(tmp_path, ext):
     def build():
         p = sv.Project()
         p.configure(width=160, height=90, fps=30, background_color="#203040")
+        if sample_rate != 48000:
+            p.normalize_audio(sample_rate=sample_rate)
         p.layer(_write_layer(tmp_path, "l_tone.py", body), priority=0)
         return p
 

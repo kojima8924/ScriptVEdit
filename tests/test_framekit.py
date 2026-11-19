@@ -279,6 +279,19 @@ def test_need_error_message(monkeypatch):
 
 # --- 文字 --------------------------------------------------------------------------
 
+def _variable_weight_axis(font):
+    """フォントが宣言する範囲を使う（Bahnschrift は 300..700 で、800 は範囲外）。"""
+    return next(axis for axis in ti._fvar_axes(font, 0) if axis[0] == "wght")
+
+
+def _variable_label_case():
+    font = _variable_font()
+    _tag, lo, _default, hi = _variable_weight_axis(font)
+    assert lo < hi
+    return font, dict(content=[("Weight ", {}), ("Bold", {"weight": hi})],
+                      size=44, weight=lo, border=2, border_color="black@0.8")
+
+
 def _label_cases():
     return {
         "jp": lambda: (_jp_font(), dict(
@@ -288,9 +301,7 @@ def _label_cases():
         "latin": lambda: (_latin_font(), dict(
             content="parseInt(0.0000005) = 5", size=36, color="#c8ccd2",
             background="#14161a", background_radius=8, padding=(12, 6))),
-        "variable": lambda: (_variable_font(), dict(
-            content=[("Weight ", {}), ("Bold", {"weight": 800})], size=44, weight=300,
-            border=2, border_color="black@0.8")),
+        "variable": _variable_label_case,
     }
 
 
@@ -338,8 +349,10 @@ def test_font_ref_is_content_addressed(tmp_path):
 
 def test_font_ref_variable_weight_coords():
     vf = _variable_font()
-    r = fk.font_ref("t", vf, weight=700)
-    assert r.coords is not None and 700.0 in r.coords
+    _tag, lo, default, hi = _variable_weight_axis(vf)
+    weight = hi if hi != default else lo
+    r = fk.font_ref("t", vf, weight=weight)
+    assert r.coords is not None and float(weight) in r.coords
 
 
 def _audit_codes(meta):
@@ -857,8 +870,9 @@ def test_build_key_fonts_are_content_addressed(tmp_path):
 
 def test_build_key_variable_font_weight():
     vf = _variable_font()
-    assert (_key_of(fonts=[fk.font_ref("t", vf, weight=700)])[0]
-            != _key_of(fonts=[fk.font_ref("t", vf, weight=400)])[0])
+    _tag, lo, _default, hi = _variable_weight_axis(vf)
+    assert (_key_of(fonts=[fk.font_ref("t", vf, weight=hi)])[0]
+            != _key_of(fonts=[fk.font_ref("t", vf, weight=lo)])[0])
 
 
 def test_build_key_follows_sprite_contents():

@@ -470,7 +470,8 @@ def _particle_cache_path(img_path, particle_op, duration, fps):
 # morph.py 全体の版（_MORPH_RENDER_VER）も鍵に入るので、色の道具（mix_oklab 等）の
 # 変更はそちらで無効化される
 # 2: 粒の色に α が2回掛かって暗くなっていたのを直した・B の左上を静止画と同じ丸めにした
-_FLIGHT_VER = "2"
+# 3: OT の射影を float64・固定した積和順・安定順位にして、BLAS による粒の入れ替わりを抑えた
+_FLIGHT_VER = "3"
 
 
 def _flight_cache_path(src_path, flight_op, duration, fps):

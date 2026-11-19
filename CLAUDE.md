@@ -1090,7 +1090,10 @@ segments → parallel の一方向で、逆向きにしない）。
   - **mux は `-copyts` と `-avoid_negative_ts disabled`**。ffmpeg は入力ごとに「入力の開始時刻」
     （全ストリームの最小）を引くので、音声つきの区間を concat すると AAC の priming（-0.021333 秒）に
     引きずられて映像が +0.021 秒遅れた（-map しない音声でも効く）。-copyts だけだと Matroska の既定が
-    全体を +0.021 秒ずらすので disabled も付ける（mkv も1本レンダと同じ「映像 0・音声 -0.021」）。
+    全体を +0.021 秒ずらすので disabled も付ける。並列の .mkv 出力は音声レグを .mka にして、
+    AAC の初期遅延を CodecDelay として保持する（FFmpeg 8.1 は AAC にも保存する。
+    .m4a 経由の stream copy では initial_padding が失われ、頭に 1024 サンプル余分に残った）。
+    mp4 / mov と区間結合の音声レグは従来どおり .m4a。
   - **mp4 / mov の出力は `-movie_timescale`**（`_mux_movie_timescale`: fps の分子を 10000 以上まで
     倍にした値＝ffmpeg が 1/fps の映像トラックに選ぶ時間単位）。既定 1000 だと結合した mp4 の
     映像の尺がミリ秒へ切り捨てられる。fps だけで決まる（dry_run と実レンダで同じ）。

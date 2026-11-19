@@ -12,7 +12,7 @@
     "-i",
     "color=c=black:s=1280x720:d=3:r=30",
     "-i",
-    "__cache__/artifacts/frames/d45cf144b1acea31.mov",
+    "__cache__/artifacts/frames/b521fd2f8ebdb11a.mov",
     "-filter_complex",
     "[1:v]tpad=stop_duration=0.666667:stop_mode=clone,trim=end=3.066666666666667[obj1];[0:v][obj1]overlay=(W-w)/2:(H-h)/2:eof_action=pass:enable='between(t/,0/,3)'[v1]",
     "-map",
@@ -27,7 +27,7 @@
     "test127.mp4"
   ],
   "cache": {
-    "__cache__/artifacts/frames/d45cf144b1acea31.mov": [
+    "__cache__/artifacts/frames/b521fd2f8ebdb11a.mov": [
       "ffmpeg",
       "-hide_banner",
       "-loglevel",
@@ -54,7 +54,7 @@
       "-g",
       "1000000",
       "-an",
-      "__cache__/artifacts/frames/d45cf144b1acea31.mov"
+      "__cache__/artifacts/frames/b521fd2f8ebdb11a.mov"
     ]
   }
 }

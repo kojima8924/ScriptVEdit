@@ -87,7 +87,8 @@ from scriptvedit.validate import _require_number
 #   2: 縁の被覆率を箱フィルタの面積に（斜めの縁の揺れを除く）、blit の縮小を INTER_AREA に
 #      一本化（0.5 倍の前後で補間が切り替わらない）、0 長の破線を点として描く、
 #      butt の端を重なった点の後の実線分に掛ける
-_FRAMEKIT_VER = "2"
+#   3: OpenCV の float 0 除算に依存せず、透明な画素の RGB を 0 にする
+_FRAMEKIT_VER = "3"
 
 # 図の色（白・灰・赤だけ）。透過キャンバスに描くので背景色は持たない。
 PALETTE = {
@@ -2140,7 +2141,10 @@ def to_rgba8(dst):
     sub = np.ascontiguousarray(dst[y0:y1, x0:x1], dtype=np.float32)
     sa = np.ascontiguousarray(a[y0:y1, x0:x1])
     sa_t = cv2.threshold(sa, 0.5 / 255.0, 0, cv2.THRESH_TOZERO)[1]
-    inv = cv2.divide(255.0, sa_t)          # 0 で割ると 0（＝ α が 0 の画素の色は 0）
+    inv = cv2.divide(255.0, sa_t)
+    # float の 0 除算は OpenCV の版により inf になる。0×inf を uint8 へ変換すると
+    # 透明な穴に白い RGB が残るので、8bit で消える画素の逆数を明示的に 0 にする。
+    inv[sa_t == 0] = 0
     mult = cv2.merge([inv, inv, inv, np.full_like(sa, 255.0)])
     out[y0:y1, x0:x1] = cv2.convertScaleAbs(cv2.multiply(sub, mult))
     return out
