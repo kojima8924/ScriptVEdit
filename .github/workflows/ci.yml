@@ -56,12 +56,14 @@ jobs:
           print('Blender worker / GPL license / package metadata verified')
           EOF
       - name: パペットの検証映像を保存
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: blender-puppet-review
           path: |
             examples/blender_puppet/output/preview.mp4
             __cache__/artifacts/blender/*.mov
+          retention-days: 2
 
   test:
     strategy:
@@ -248,7 +250,9 @@ jobs:
           # import だけでは extra の中身を確かめられない。need() で3つを実際に読み込む
           /tmp/venv_figures/bin/python -c "import scriptvedit.framekit as fk; fk.need('ci'); print('figures deps OK')"
       - name: 成果物をアップロード
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
+          retention-days: 2
